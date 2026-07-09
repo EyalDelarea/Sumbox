@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6f9d84" />
+      <stop offset="55%" stop-color="#52806a" />
+      <stop offset="100%" stop-color="#3f6a55" />
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.32" />
+      <stop offset="46%" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+  <!-- Sage rounded-square tile -->
+  <rect width="512" height="512" rx="120" ry="120" fill="url(#tile)" />
+  <rect width="512" height="512" rx="120" ry="120" fill="url(#sheen)" />
+  <!-- "זינוק" (swoosh) mark: speech bubble + motion lines, scaled from the 24-grid -->
+  <svg x="96" y="96" width="320" height="320" viewBox="0 0 24 24">
+    <path d="M2.5 8.6 H6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.42" />
+    <path d="M1.6 12.6 H5.6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.42" />
+    <path d="M10 5 h8.4 a2.8 2.8 0 0 1 2.8 2.8 v5 a2.8 2.8 0 0 1 -2.8 2.8 h-4.4 l-4 3 v-3 a2.8 2.8 0 0 1 -2.8 -2.8 V7.8 A2.8 2.8 0 0 1 10 5 z" fill="#ffffff" />
+  </svg>
+</svg>

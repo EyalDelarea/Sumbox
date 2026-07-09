@@ -1,0 +1,42 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#fbfcfa" />
+  <title>סיכום וואטסאפ</title>
+  <!-- Apply the stored/preferred theme before first paint to avoid a flash. -->
+  <script>
+    (function () {
+      try {
+        var s = localStorage.getItem("sumbox-theme");
+        var dark = s === "dark" || (s !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.setAttribute("data-theme", "dark");
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- global stale/unhealthy banner (shown/hidden by app.js) -->
+  <div id="stale-banner" class="stale-banner" role="alert" aria-live="assertive" hidden>
+    <span class="stale-banner__icon" aria-hidden="true">⚠️</span>
+    <span>המערכת לא מגיבה — ייתכן שחסרות הודעות אחרונות. הפעילו מחדש לסנכרון.</span>
+  </div>
+
+  <!-- 3-pane command center: nav rail · appbar + content · mobile bottom nav -->
+  <div id="layout" class="shell" data-view="today">
+    <aside id="pane-list" class="sidebar" aria-label="ניווט ראשי"></aside>
+    <main class="main">
+      <header id="top-bar" class="appbar"></header>
+      <div id="pane-main" class="scroll" aria-live="polite"></div>
+      <nav id="botnav" class="botnav" aria-label="ניווט תחתון"></nav>
+    </main>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

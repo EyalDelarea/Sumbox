@@ -1,0 +1,53 @@
+.DS_Store
+node_modules/
+.venv/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+data/
+*.log
+
+# superpowers brainstorming scratch
+.superpowers/
+
+# DB backups (contain real data)
+backups/
+
+# WhatsApp session/auth + media + imports (defensive — normally under data/).
+# Anchored to the repo root with a leading slash so they don't swallow source
+# directories of the same name (e.g. src/media/).
+/baileys-auth/
+/imports/
+/media/
+
+# Local dev / tooling artifacts
+.playwright-mcp/
+
+# Benchmark harness: generated/real fixtures + raw run output are local-only.
+# Committed: bench/*.ts, bench/*.sh, bench/fixtures/chat-he.json, bench/RESULTS.md.
+bench/fixtures/generated/
+bench/fixtures/local/
+bench/results/
+
+# Local design tooling — the committed deliverables are assets/*.svg + assets/*.png.
+# The banner generator and the raw Sora font (OFL) stay local; the PNG bakes the
+# rasterized wordmark so no font is redistributed.
+assets/.fonts/
+assets/build-banner.mjs
+assets/_*
+
+# Shared, version-controlled agent tooling (committed by convention):
+#   CLAUDE.md / AGENTS.md           — project conventions / grounding
+#   .claude/skills/  .agents/skills/ — reusable project skills
+# Private AI planning & personal overrides stay local:
+.claude/*
+!.claude/skills/
+.claude/settings*.local.json
+.agents/*
+!.agents/skills/
+.agents/settings*.local.json
+.specify/
+specs/
+docs/

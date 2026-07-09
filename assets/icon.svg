@@ -1,0 +1,28 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sumbox logo">
+  <defs>
+    <!-- Sage tile + white "זינוק" (swoosh) mark — mirrors the locked app icon
+         (src/web/public/icons/icon.svg), recolored from the retired blue identity. -->
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6f9d84"/>
+      <stop offset="0.55" stop-color="#52806a"/>
+      <stop offset="1" stop-color="#3f6a55"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity="0.32"/>
+      <stop offset="0.46" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app tile -->
+  <rect width="256" height="256" rx="60" fill="url(#tile)"/>
+  <rect width="256" height="256" rx="60" fill="url(#sheen)"/>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="58.5" stroke="#ffffff" stroke-opacity="0.18" stroke-width="3"/>
+
+  <!-- "זינוק" mark: speech bubble + two motion lines ("catch up fast").
+       Authored on the 24-grid, scaled into the tile (160px, 48px padding). -->
+  <g transform="translate(48 48) scale(6.66667)">
+    <path d="M2.5 8.6 H6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.42"/>
+    <path d="M1.6 12.6 H5.6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.42"/>
+    <path d="M10 5 h8.4 a2.8 2.8 0 0 1 2.8 2.8 v5 a2.8 2.8 0 0 1 -2.8 2.8 h-4.4 l-4 3 v-3 a2.8 2.8 0 0 1 -2.8 -2.8 V7.8 A2.8 2.8 0 0 1 10 5 z" fill="#ffffff"/>
+  </g>
+</svg>

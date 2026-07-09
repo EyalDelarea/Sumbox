@@ -1,0 +1,5 @@
+[31/05/2026, 10:01:02] Alice: Hello from iOS
+[31/05/2026, 10:02:03] Bob: <attached: PTT-20260531-WA0002.opus>
+[31/05/2026, 10:03:04] Alice changed the group description
+[31/05/2026, 10:04:05] דנה: הודעה
+עם המשך שורה

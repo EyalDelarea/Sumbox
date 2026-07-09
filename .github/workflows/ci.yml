@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: jobs only read the repo.
+permissions:
+  contents: read
+
+# Runs on GitHub-hosted ubuntu-latest runners, which ship Docker preinstalled
+# (Testcontainers boots Postgres + RabbitMQ with no extra setup).
+jobs:
+  lint:
+    name: lint (biome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+      - name: Biome check
+        run: npx biome ci src
+
+  build-test:
+    name: typecheck · build · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # ffmpeg is used by the media pipeline.
+      - name: Ensure ffmpeg
+        run: ffmpeg -version >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # Integration tests use Testcontainers (Postgres, RabbitMQ) via the host's
+      # Docker. A single shared Postgres is booted once in globalSetup
+      # (src/test/db.ts) and each file gets an isolated DB clone, so files run in
+      # parallel without container-startup contention.
+      - name: Test
+        run: npm test
+
+  # Single durable required status check. Branch protection requires `ci-ok`,
+  # so adding/renaming jobs above never needs a branch-protection edit.
+  ci-ok:
+    name: ci-ok
+    runs-on: ubuntu-latest
+    needs: [lint, build-test]
+    if: always()
+    steps:
+      - name: Verify upstream jobs succeeded
+        run: |
+          if [ "${{ needs.lint.result }}" != "success" ] || [ "${{ needs.build-test.result }}" != "success" ]; then
+            echo "A required job failed: lint=${{ needs.lint.result }} build-test=${{ needs.build-test.result }}"
+            exit 1
+          fi
+          echo "All required jobs passed."

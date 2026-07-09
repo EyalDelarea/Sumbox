@@ -1,0 +1,73 @@
+<svg width="1000" height="300" viewBox="0 0 1000 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sumbox — local-first WhatsApp summaries">
+  <defs>
+    <style>
+      /* Sora referenced by family; PNG is rendered with the webfont embedded. */
+      .word { font-family: 'Sora', ui-sans-serif, system-ui, sans-serif; font-weight: 700; }
+      .tag  { font-family: 'Sora', ui-sans-serif, system-ui, sans-serif; font-weight: 500; }
+    </style>
+    <linearGradient id="bg" x1="0" y1="0" x2="1000" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0e1c15"/>
+      <stop offset="0.55" stop-color="#0a140f"/>
+      <stop offset="1" stop-color="#060d09"/>
+    </linearGradient>
+    <radialGradient id="aurora" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(330 30) rotate(28) scale(560 320)">
+      <stop stop-color="#6f9d84" stop-opacity="0.26"/>
+      <stop offset="0.65" stop-color="#6f9d84" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="aurora2" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1000 300) rotate(-140) scale(420 260)">
+      <stop stop-color="#3f6a55" stop-opacity="0.20"/>
+      <stop offset="0.7" stop-color="#3f6a55" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6f9d84"/>
+      <stop offset="0.55" stop-color="#52806a"/>
+      <stop offset="1" stop-color="#3f6a55"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity="0.32"/>
+      <stop offset="0.46" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="word" x1="212" y1="100" x2="272" y2="172" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f3faf6"/>
+      <stop offset="0.5" stop-color="#d6ece0"/>
+      <stop offset="1" stop-color="#9cc7b1"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-60" y="-40" width="380" height="400" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="9" stdDeviation="20" flood-color="#000000" flood-opacity="0.38"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="10" flood-color="#3f6a55" flood-opacity="0.45"/>
+    </filter>
+    <filter id="wordGlow" x="-20%" y="-60%" width="140%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0.32  0 0 0 0 0.62  0 0 0 0 0.49  0 0 0 0.34 0"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1000" height="300" fill="url(#bg)"/>
+  <rect width="1000" height="300" fill="url(#aurora)"/>
+  <rect width="1000" height="300" fill="url(#aurora2)"/>
+  <!-- top hairline highlight for a subtle "screen" sheen -->
+  <rect x="0" y="0" width="1000" height="1.5" fill="#ffffff" fill-opacity="0.05"/>
+
+  <g id="lockup" transform="translate(213 0)">
+    <!-- frosted logo tile (icon artwork authored in 256-space) -->
+    <g transform="translate(0 62)" filter="url(#tileShadow)">
+      <g transform="scale(0.6875)">
+        <rect width="256" height="256" rx="60" fill="url(#tile)"/>
+        <rect width="256" height="256" rx="60" fill="url(#sheen)"/>
+        <rect x="1.5" y="1.5" width="253" height="253" rx="58.5" stroke="#ffffff" stroke-opacity="0.16" stroke-width="3"/>
+        <!-- "זינוק" mark: speech bubble + two motion lines ("catch up fast") -->
+        <g transform="translate(48 48) scale(6.66667)">
+          <path d="M2.5 8.6 H6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.42"/>
+          <path d="M1.6 12.6 H5.6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.42"/>
+          <path d="M10 5 h8.4 a2.8 2.8 0 0 1 2.8 2.8 v5 a2.8 2.8 0 0 1 -2.8 2.8 h-4.4 l-4 3 v-3 a2.8 2.8 0 0 1 -2.8 -2.8 V7.8 A2.8 2.8 0 0 1 10 5 z" fill="#ffffff"/>
+        </g>
+      </g>
+    </g>
+
+    <!-- wordmark + two-line tagline (left-aligned text block) -->
+    <text class="word" x="212" y="150" font-size="84" letter-spacing="-1.5" fill="url(#word)" filter="url(#wordGlow)">Sumbox</text>
+    <text class="tag" x="214" y="184" font-size="18.5" letter-spacing="0.3" fill="#9ab4a6">Local-first WhatsApp summaries.</text>
+    <text x="214" y="206" style="font-family:'Sora',ui-sans-serif,system-ui,sans-serif;font-weight:600" font-size="18.5" letter-spacing="0.3" fill="#cfe6da">Nothing leaves your machine.</text>
+  </g>
+</svg>

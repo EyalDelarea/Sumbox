@@ -1,0 +1,47 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/styles.css" />
+  <style>
+    body { background: var(--bg); margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    .wrap { width: 360px; max-width: 92vw; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="glacier-loader glass-card glacier-loader--analyzing" role="status" aria-live="polite">
+      <div class="glacier-loader__aurora" aria-hidden="true"></div>
+      <div class="glacier-loader__inner">
+        <div class="gl-scene" aria-hidden="true">
+          <div class="gl-stage">
+            <span class="gl-msg gl-msg--1"></span>
+            <span class="gl-msg gl-msg--2"></span>
+            <span class="gl-msg gl-msg--3"></span>
+            <span class="gl-msg gl-msg--4"></span>
+            <div class="gl-reader">
+              <span class="gl-reader__halo"></span>
+              <span class="gl-reader__book"></span>
+              <span class="gl-reader__head">
+                <span class="gl-brow gl-brow--l"></span>
+                <span class="gl-brow gl-brow--r"></span>
+                <span class="gl-eye gl-eye--l"><i></i></span>
+                <span class="gl-eye gl-eye--r"><i></i></span>
+              </span>
+              <span class="gl-spark gl-spark--1"></span>
+              <span class="gl-spark gl-spark--2"></span>
+              <span class="gl-spark gl-spark--3"></span>
+            </div>
+          </div>
+        </div>
+        <div class="glacier-loader__status">מסכם 8 הודעות (הצצה ראשונה — ההודעות האחרונות)</div>
+        <div class="glacier-loader__footer">
+          <span class="glacier-loader__elapsed">12ש׳</span>
+        </div>
+        <div class="glacier-loader__bar" aria-hidden="true"><div class="glacier-loader__bar-fill" style="width:74%"></div></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
