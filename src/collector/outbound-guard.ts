@@ -23,6 +23,17 @@
  * config.whatsapp.allowSend), never by default.
  */
 
+/**
+ * Where the guard reads its allowed JIDs from. A plain Set is a fixed allowlist.
+ * A function is re-resolved on **every** send, so a group enabled (or disabled)
+ * in the UI takes effect on the next message with no restart — production passes
+ * the same DB resolver the `/סיכום` matcher uses, so guard and matcher can never
+ * disagree about who is enabled.
+ */
+export type AllowlistSource =
+  | ReadonlySet<string>
+  | (() => ReadonlySet<string> | Promise<ReadonlySet<string>>);
+
 /** Methods that actively send chat content — blocked by throwing. */
 export const HARD_BLOCKED = ["sendMessage", "relayMessage"] as const;
 
@@ -48,22 +59,32 @@ export const SILENCED = [
  * DB `group_command_permissions` table, see src/serve/summary-command-deps.ts) to
  * reply into one specific group without lifting the passive-observer net for the
  * rest of the account.
+ *
+ * Pass a function (see AllowlistSource) to have the set re-read per send. It is
+ * resolved lazily — only once a send is actually attempted — so ordinary traffic
+ * never pays for it, and a resolver that throws BLOCKS the send: the guard must
+ * prove a JID is enabled before letting anything out.
  */
 export function applyOutboundGuard<T>(
   sock: T,
   allowSend: boolean,
-  allowlist: ReadonlySet<string> = new Set(),
+  allowlist: AllowlistSource = new Set<string>(),
 ): T {
   if (allowSend) return sock;
 
   const target = sock as unknown as Record<string, unknown>;
 
+  const isAllowed = async (jid: unknown): Promise<boolean> => {
+    if (typeof jid !== "string") return false;
+    const enabled = typeof allowlist === "function" ? await allowlist() : allowlist;
+    return enabled.has(jid);
+  };
+
   for (const method of HARD_BLOCKED) {
     if (typeof target[method] === "function") {
       const original = (target[method] as (...args: unknown[]) => unknown).bind(target);
       target[method] = async (...args: unknown[]): Promise<unknown> => {
-        const jid = args[0];
-        if (typeof jid === "string" && allowlist.has(jid)) {
+        if (await isAllowed(args[0])) {
           return original(...args);
         }
         throw new Error(

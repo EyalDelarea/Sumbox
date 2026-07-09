@@ -70,6 +70,62 @@ describe("applyOutboundGuard", () => {
     });
   });
 
+  // The guard is applied once, at connect. A frozen Set meant a group enabled in
+  // the UI afterwards matched in the matcher but threw here — the reply, the
+  // error reply and the ⏳/✅ reactions all silently vanished until a restart
+  // re-snapshotted it. The resolver form is what makes toggling take effect live.
+  describe("live allowlist (resolver re-read on every send)", () => {
+    it("a JID enabled after the guard was applied can send — no restart", async () => {
+      const sock = fakeSock();
+      const enabled = new Set<string>();
+      applyOutboundGuard(sock as never, false, () => enabled);
+
+      await expect(sock["sendMessage"]("123@g.us", { text: "hi" })).rejects.toThrow(/blocked/i);
+
+      enabled.add("123@g.us"); // ← the UI toggle, mid-process
+      await expect(sock["sendMessage"]("123@g.us", { text: "hi" })).resolves.toBe("REAL_CALLED");
+    });
+
+    it("a JID disabled after the guard was applied stops sending", async () => {
+      const sock = fakeSock();
+      const enabled = new Set(["123@g.us"]);
+      applyOutboundGuard(sock as never, false, () => enabled);
+
+      await expect(sock["sendMessage"]("123@g.us", { text: "hi" })).resolves.toBe("REAL_CALLED");
+
+      enabled.delete("123@g.us");
+      await expect(sock["sendMessage"]("123@g.us", { text: "hi" })).rejects.toThrow(/blocked/i);
+    });
+
+    it("resolves an async allowlist (the production DB resolver)", async () => {
+      const sock = fakeSock();
+      applyOutboundGuard(sock as never, false, async () => new Set(["123@g.us"]));
+
+      await expect(sock["sendMessage"]("123@g.us", { text: "hi" })).resolves.toBe("REAL_CALLED");
+      await expect(sock["sendMessage"]("999@g.us", { text: "no" })).rejects.toThrow(/blocked/i);
+    });
+
+    it("fails CLOSED when the resolver throws — a DB error must never send", async () => {
+      const sock = fakeSock();
+      const original = sock["sendMessage"];
+      applyOutboundGuard(sock as never, false, () => {
+        throw new Error("db down");
+      });
+
+      await expect(sock["sendMessage"]("123@g.us", { text: "hi" })).rejects.toThrow(/db down/);
+      expect(original).not.toHaveBeenCalled();
+    });
+
+    it("is lazy — the resolver is never called unless a send is attempted", async () => {
+      const sock = fakeSock();
+      const resolve = vi.fn(() => new Set<string>());
+      applyOutboundGuard(sock as never, false, resolve);
+
+      await sock["sendPresenceUpdate"]("available");
+      expect(resolve).not.toHaveBeenCalled();
+    });
+  });
+
   it("tolerates a socket missing some methods (no crash)", () => {
     const partial: Record<string, unknown> = { sendMessage: async () => "x" };
     expect(() => applyOutboundGuard(partial as never, false)).not.toThrow();
