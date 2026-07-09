@@ -31,7 +31,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { getLogger } from "../logging/log.js";
 import { createHistorySyncProgress, type HistorySyncProgress } from "./history-sync-progress.js";
-import { applyOutboundGuard } from "./outbound-guard.js";
+import { type AllowlistSource, applyOutboundGuard } from "./outbound-guard.js";
 
 const collectorLog = getLogger("collector");
 const historySyncLog = getLogger("history-sync");
@@ -71,14 +71,19 @@ export class CollectorSession extends EventEmitter {
   /** When true, accept ALL history chunks incl. FULL (Baileys default drops FULL). */
   private acceptAllHistory: boolean;
   /** JIDs allowed to receive sends even while allowSend is false (see outbound-guard).
-   *  Built once at construction — the /סיכום allowlist is resolved live from the DB in
-   *  the matcher, not mutated here. */
-  private readonly allowlist: ReadonlySet<string>;
+   *  Pass a resolver (production passes the /סיכום matcher's own DB resolver) so the
+   *  guard re-reads it per send and a group enabled at runtime can reply without a
+   *  restart; an array is a fixed set. */
+  private readonly allowlist: AllowlistSource;
 
   constructor(
     authDir: string,
     allowSend = false,
-    opts: { syncFullHistory?: boolean; acceptAllHistory?: boolean; allowlist?: string[] } = {},
+    opts: {
+      syncFullHistory?: boolean;
+      acceptAllHistory?: boolean;
+      allowlist?: string[] | AllowlistSource;
+    } = {},
   ) {
     super();
     this.authDir = authDir;
@@ -88,7 +93,9 @@ export class CollectorSession extends EventEmitter {
     });
     this.syncFullHistory = opts.syncFullHistory ?? false;
     this.acceptAllHistory = opts.acceptAllHistory ?? false;
-    this.allowlist = new Set(opts.allowlist ?? []);
+    this.allowlist = Array.isArray(opts.allowlist)
+      ? new Set(opts.allowlist)
+      : (opts.allowlist ?? new Set<string>());
   }
 
   /**
@@ -489,7 +496,11 @@ export class CollectorSession extends EventEmitter {
 export async function startSession(
   authDir: string,
   allowSend = false,
-  opts: { syncFullHistory?: boolean; acceptAllHistory?: boolean; allowlist?: string[] } = {},
+  opts: {
+    syncFullHistory?: boolean;
+    acceptAllHistory?: boolean;
+    allowlist?: string[] | AllowlistSource;
+  } = {},
 ): Promise<CollectorSession> {
   const session = new CollectorSession(authDir, allowSend, opts);
   await session.start();
