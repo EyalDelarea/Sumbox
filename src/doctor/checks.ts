@@ -12,136 +12,50 @@ export type CheckResult = {
   fix?: string;
 };
 
-// ── Pure check functions (injected probe) ─────────────────────────────────────
-
-/** 1. Docker running */
-export async function checkDocker(probe: () => Promise<boolean>): Promise<CheckResult> {
-  const name = "Docker running";
-  try {
-    const ok = await probe();
-    return ok ? { name, ok: true } : { name, ok: false, fix: "start Docker Desktop" };
-  } catch (err) {
-    return { name, ok: false, fix: "start Docker Desktop" };
-  }
-}
-
-/** 2. Compose services up */
-export async function checkComposeServices(probe: () => Promise<boolean>): Promise<CheckResult> {
-  const name = "Compose services up";
-  try {
-    const ok = await probe();
-    return ok ? { name, ok: true } : { name, ok: false, fix: "docker compose up -d" };
-  } catch (err) {
-    return { name, ok: false, fix: "docker compose up -d" };
-  }
-}
-
-/** 3. Postgres reachable AND migrations applied (job_runs + service_status tables exist) */
-export async function checkPostgres(probe: () => Promise<boolean>): Promise<CheckResult> {
-  const name = "Postgres reachable + migrations applied";
-  try {
-    const ok = await probe();
-    return ok ? { name, ok: true } : { name, ok: false, fix: "npm run migrate" };
-  } catch (err) {
-    return { name, ok: false, fix: "npm run migrate" };
-  }
-}
-
-/** 4. RabbitMQ reachable */
-export async function checkRabbitMQ(probe: () => Promise<boolean>): Promise<CheckResult> {
-  const name = "RabbitMQ reachable";
-  try {
-    const ok = await probe();
-    return ok ? { name, ok: true } : { name, ok: false, fix: "docker compose up -d rabbitmq" };
-  } catch (err) {
-    return { name, ok: false, fix: "docker compose up -d rabbitmq" };
-  }
-}
-
-/** 5. Ollama reachable AND SUMMARY_MODEL pulled */
-export async function checkOllama(
-  model: string,
-  probe: () => Promise<boolean>,
-): Promise<CheckResult> {
-  const name = "Ollama reachable + model pulled";
-  try {
-    const ok = await probe();
-    return ok
-      ? { name, ok: true }
-      : { name, ok: false, fix: `ollama serve && ollama pull ${model}` };
-  } catch (err) {
-    return { name, ok: false, fix: `ollama serve && ollama pull ${model}` };
-  }
-}
-
-/** 6. Python interpreter importable with faster-whisper */
-export async function checkPython(probe: () => Promise<boolean>): Promise<CheckResult> {
-  const name = "Python + faster-whisper importable";
-  try {
-    const ok = await probe();
-    return ok
-      ? { name, ok: true }
-      : {
-          name,
-          ok: false,
-          fix: "pip install -r src/transcription/requirements.txt (in your .venv)",
-        };
-  } catch (err) {
-    return {
-      name,
-      ok: false,
-      fix: "pip install -r src/transcription/requirements.txt (in your .venv)",
-    };
-  }
-}
-
-/** 7. ffmpeg on PATH */
-export async function checkFfmpeg(probe: () => Promise<boolean>): Promise<CheckResult> {
-  const name = "ffmpeg on PATH";
-  try {
-    const ok = await probe();
-    return ok ? { name, ok: true } : { name, ok: false, fix: "brew install ffmpeg" };
-  } catch (err) {
-    return { name, ok: false, fix: "brew install ffmpeg" };
-  }
-}
+// ── Check entry + runner ──────────────────────────────────────────────────────
 
 /**
- * 9. Btree indexes pass amcheck (detects collation-drift corruption).
- *
- * A glibc/ICU bump under an unpinned Postgres image changes text collation order,
- * which makes a btree over a text column (e.g. participants' (tenant_id, display_name))
- * look corrupt — surfacing as `XX002 … overlaps with invalid duplicate tuple` on the
- * next upsert and silently breaking message ingestion. The probe amchecks every valid
- * btree index and reports unhealthy only on a definitive corruption error, so a clean
- * fail here means "REINDEX + pin the image", not a transient environment quirk.
+ * One doctor check as data: a name, a remediation `fix` hint, and an async
+ * `probe` that resolves true when healthy. Two optional knobs capture the only
+ * real variation across checks:
+ *  - `detail`: extra context surfaced on a non-ok result (never on ok).
+ *  - `onProbeError`: what a *probe throw* means. "fail" (default) → not-ok;
+ *    "pass" → ok — the probe couldn't reach a verdict and another check owns the
+ *    real signal (e.g. index-integrity defers DB-outage to the Postgres check).
  */
-export async function checkIndexIntegrity(probe: () => Promise<boolean>): Promise<CheckResult> {
-  const name = "DB indexes pass integrity check (amcheck)";
-  const fix =
-    "REINDEX the corrupt index (e.g. REINDEX INDEX participants_tenant_idx) and pin the pgvector image by digest — see ops/runbooks/collation-corruption.md";
+export type CheckEntry = {
+  name: string;
+  fix: string;
+  detail?: string;
+  onProbeError?: "fail" | "pass";
+  probe: () => Promise<boolean>;
+};
+
+/**
+ * Run one check entry. Never throws: a probe rejection becomes a not-ok result
+ * (or an ok result when `onProbeError` is "pass"). A definitive false is always
+ * a failure regardless of `onProbeError` — that flag only governs *throws*.
+ */
+export async function runCheck(entry: CheckEntry): Promise<CheckResult> {
+  const { name } = entry;
+  let healthy: boolean;
   try {
-    const ok = await probe();
-    return ok
-      ? { name, ok: true }
-      : {
-          name,
-          ok: false,
-          detail:
-            "a btree index failed amcheck (XX002) — likely glibc/ICU collation drift from an unpinned Postgres image; this can silently break message ingestion",
-          fix,
-        };
+    healthy = await entry.probe();
   } catch {
-    // A probe error is inconclusive — checkPostgres owns real DB-outage signalling.
-    return { name, ok: true };
+    if (entry.onProbeError === "pass") return { name, ok: true };
+    healthy = false;
   }
+  if (healthy) return { name, ok: true };
+  return entry.detail
+    ? { name, ok: false, detail: entry.detail, fix: entry.fix }
+    : { name, ok: false, fix: entry.fix };
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 /**
  * Run all checks and return one result per check. Never throws — each check
- * catches its own errors internally.
+ * catches its own errors internally (via runCheck).
  */
 export async function runChecks(checks: Array<() => Promise<CheckResult>>): Promise<CheckResult[]> {
   return Promise.all(checks.map((c) => c()));
@@ -280,24 +194,59 @@ async function realFfmpegProbe(ffmpegPath: string): Promise<boolean> {
   return spawnProbe(ffmpegPath, ["-version"]);
 }
 
-// ── defaultChecks: assembles real probes from config ─────────────────────────
+// ── Check table → real probes ─────────────────────────────────────────────────
+
+/**
+ * The doctor check table: each row is one check wired to a real system probe.
+ * Adding a check = one row here. Order is the display order. The Ollama `fix`
+ * interpolates the configured model; index-integrity opts into the
+ * inconclusive-probe policy (a probe throw is not treated as corruption — see
+ * realIndexIntegrityProbe for why glibc/ICU collation drift is the real signal).
+ */
+export function checkEntries(config: AppConfig): CheckEntry[] {
+  return [
+    { name: "Docker running", fix: "start Docker Desktop", probe: realDockerProbe },
+    { name: "Compose services up", fix: "docker compose up -d", probe: realComposeProbe },
+    {
+      name: "Postgres reachable + migrations applied",
+      fix: "npm run migrate",
+      probe: () => realPostgresProbe(config.databaseUrl),
+    },
+    {
+      name: "DB indexes pass integrity check (amcheck)",
+      fix: "REINDEX the corrupt index (e.g. REINDEX INDEX participants_tenant_idx) and pin the pgvector image by digest — see ops/runbooks/collation-corruption.md",
+      detail:
+        "a btree index failed amcheck (XX002) — likely glibc/ICU collation drift from an unpinned Postgres image; this can silently break message ingestion",
+      onProbeError: "pass",
+      probe: () => realIndexIntegrityProbe(config.databaseUrl),
+    },
+    {
+      name: "RabbitMQ reachable",
+      fix: "docker compose up -d rabbitmq",
+      probe: () => realRabbitMqProbe(config.broker.url),
+    },
+    {
+      name: "Ollama reachable + model pulled",
+      fix: `ollama serve && ollama pull ${config.summarization.model}`,
+      probe: () => realOllamaProbe(config.summarization.ollamaHost, config.summarization.model),
+    },
+    {
+      name: "Python + faster-whisper importable",
+      fix: "pip install -r src/transcription/requirements.txt (in your .venv)",
+      probe: () => realPythonProbe(config.transcription.pythonPath),
+    },
+    {
+      name: "ffmpeg on PATH",
+      fix: "brew install ffmpeg",
+      probe: () => realFfmpegProbe(config.transcription.ffmpegPath),
+    },
+  ];
+}
 
 /**
  * Returns the array of real check thunks wired to actual system probes.
  * Pass the result directly to runChecks().
  */
 export function defaultChecks(config: AppConfig): Array<() => Promise<CheckResult>> {
-  return [
-    () => checkDocker(realDockerProbe),
-    () => checkComposeServices(realComposeProbe),
-    () => checkPostgres(() => realPostgresProbe(config.databaseUrl)),
-    () => checkIndexIntegrity(() => realIndexIntegrityProbe(config.databaseUrl)),
-    () => checkRabbitMQ(() => realRabbitMqProbe(config.broker.url)),
-    () =>
-      checkOllama(config.summarization.model, () =>
-        realOllamaProbe(config.summarization.ollamaHost, config.summarization.model),
-      ),
-    () => checkPython(() => realPythonProbe(config.transcription.pythonPath)),
-    () => checkFfmpeg(() => realFfmpegProbe(config.transcription.ffmpegPath)),
-  ];
+  return checkEntries(config).map((entry) => () => runCheck(entry));
 }

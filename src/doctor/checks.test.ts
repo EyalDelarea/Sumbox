@@ -1,16 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  type CheckResult,
-  checkComposeServices,
-  checkDocker,
-  checkFfmpeg,
-  checkIndexIntegrity,
-  checkOllama,
-  checkPostgres,
-  checkPython,
-  checkRabbitMQ,
-  runChecks,
-} from "./checks.js";
+import type { AppConfig } from "../config.js";
+import { type CheckEntry, checkEntries, defaultChecks, runCheck, runChecks } from "./checks.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -18,196 +8,126 @@ const ok = () => Promise.resolve(true);
 const fail = () => Promise.resolve(false);
 const throws = () => Promise.reject(new Error("probe boom"));
 
-function assertOk(result: CheckResult, name: string) {
-  expect(result.name).toBe(name);
-  expect(result.ok).toBe(true);
-}
+/** A check entry with sensible defaults; override any field per test. */
+const entry = (over: Partial<CheckEntry> = {}): CheckEntry => ({
+  name: "Test check",
+  fix: "do the thing",
+  probe: ok,
+  ...over,
+});
 
-function assertFail(result: CheckResult, name: string) {
-  expect(result.name).toBe(name);
-  expect(result.ok).toBe(false);
-  expect(result.fix).toBeTruthy();
-  expect(result.fix!.length).toBeGreaterThan(0);
-}
+/** Minimal AppConfig carrying only the fields the check table reads. */
+const fakeConfig = (model = "gemma4:26b"): AppConfig =>
+  ({
+    databaseUrl: "postgres://localhost/test",
+    broker: { url: "amqp://localhost" },
+    summarization: { model, ollamaHost: "http://localhost:11434" },
+    transcription: { pythonPath: "python3", ffmpegPath: "ffmpeg" },
+  }) as unknown as AppConfig;
 
-// ── checkDocker ───────────────────────────────────────────────────────────────
+// ── runCheck ──────────────────────────────────────────────────────────────────
 
-describe("checkDocker", () => {
-  it("returns ok when Docker is running", async () => {
-    const result = await checkDocker(ok);
-    assertOk(result, "Docker running");
+describe("runCheck", () => {
+  it("returns ok (no fix/detail) when the probe resolves true", async () => {
+    expect(await runCheck(entry({ probe: ok }))).toEqual({ name: "Test check", ok: true });
   });
 
-  it("returns not-ok with a fix when Docker is not running", async () => {
-    const result = await checkDocker(fail);
-    assertFail(result, "Docker running");
+  it("returns not-ok with the fix when the probe resolves false", async () => {
+    const r = await runCheck(entry({ probe: fail }));
+    expect(r.ok).toBe(false);
+    expect(r.fix).toBe("do the thing");
   });
 
-  it("returns not-ok with a fix when probe throws", async () => {
-    const result = await checkDocker(throws);
-    assertFail(result, "Docker running");
+  it("treats a probe throw as not-ok with fix by default", async () => {
+    const r = await runCheck(entry({ probe: throws }));
+    expect(r.ok).toBe(false);
+    expect(r.fix).toBe("do the thing");
+  });
+
+  it("treats a probe throw as inconclusive (ok) when onProbeError is 'pass'", async () => {
+    expect(await runCheck(entry({ probe: throws, onProbeError: "pass" }))).toEqual({
+      name: "Test check",
+      ok: true,
+    });
+  });
+
+  it("still fails on a definitive false even when onProbeError is 'pass'", async () => {
+    // onProbeError only governs *throws*; a false verdict is a real failure.
+    const r = await runCheck(entry({ probe: fail, onProbeError: "pass", detail: "d" }));
+    expect(r.ok).toBe(false);
+    expect(r.detail).toBe("d");
+  });
+
+  it("includes detail on a non-ok result when the entry has one (and no warn level)", async () => {
+    const r = await runCheck(entry({ probe: fail, detail: "why it broke" }));
+    expect(r.ok).toBe(false);
+    expect(r.detail).toBe("why it broke");
+    expect(r.level).toBeUndefined();
+  });
+
+  it("omits detail on an ok result", async () => {
+    expect(await runCheck(entry({ probe: ok, detail: "why it broke" }))).toEqual({
+      name: "Test check",
+      ok: true,
+    });
   });
 });
 
-// ── checkComposeServices ──────────────────────────────────────────────────────
+// ── checkEntries (the table) ────────────────────────────────────────────────
 
-describe("checkComposeServices", () => {
-  it("returns ok when Compose services are up", async () => {
-    const result = await checkComposeServices(ok);
-    assertOk(result, "Compose services up");
+describe("checkEntries", () => {
+  it("lists every check in stable display order, each with a fix hint", () => {
+    const entries = checkEntries(fakeConfig());
+    expect(entries.map((e) => e.name)).toEqual([
+      "Docker running",
+      "Compose services up",
+      "Postgres reachable + migrations applied",
+      "DB indexes pass integrity check (amcheck)",
+      "RabbitMQ reachable",
+      "Ollama reachable + model pulled",
+      "Python + faster-whisper importable",
+      "ffmpeg on PATH",
+    ]);
+    for (const e of entries) expect(e.fix.length).toBeGreaterThan(0);
   });
 
-  it("returns not-ok with a fix when services are down", async () => {
-    const result = await checkComposeServices(fail);
-    assertFail(result, "Compose services up");
+  it("interpolates the configured model into the Ollama fix", () => {
+    const ollama = checkEntries(fakeConfig("mymodel:latest")).find((e) =>
+      e.name.startsWith("Ollama"),
+    );
+    expect(ollama?.fix).toContain("mymodel:latest");
   });
 
-  it("returns not-ok with a fix when probe throws", async () => {
-    const result = await checkComposeServices(throws);
-    assertFail(result, "Compose services up");
-  });
-});
-
-// ── checkPostgres ─────────────────────────────────────────────────────────────
-
-describe("checkPostgres", () => {
-  it("returns ok when Postgres is reachable and migrations applied", async () => {
-    const result = await checkPostgres(ok);
-    assertOk(result, "Postgres reachable + migrations applied");
+  it("marks index-integrity as inconclusive-on-probe-error and gives it a detail", () => {
+    const idx = checkEntries(fakeConfig()).find((e) => e.name.startsWith("DB indexes"));
+    expect(idx?.onProbeError).toBe("pass");
+    expect(idx?.detail).toMatch(/XX002|collation/);
   });
 
-  it("returns not-ok with a fix when Postgres check fails", async () => {
-    const result = await checkPostgres(fail);
-    assertFail(result, "Postgres reachable + migrations applied");
-  });
-
-  it("returns not-ok with a fix when probe throws", async () => {
-    const result = await checkPostgres(throws);
-    assertFail(result, "Postgres reachable + migrations applied");
-  });
-});
-
-// ── checkIndexIntegrity ───────────────────────────────────────────────────────
-
-describe("checkIndexIntegrity", () => {
-  const NAME = "DB indexes pass integrity check (amcheck)";
-
-  it("returns ok when all indexes pass amcheck", async () => {
-    const result = await checkIndexIntegrity(ok);
-    assertOk(result, NAME);
-  });
-
-  it("returns not-ok with detail + fix when an index is corrupt", async () => {
-    const result = await checkIndexIntegrity(fail);
-    assertFail(result, NAME);
-    expect(result.detail).toMatch(/XX002|collation/);
-    // Corruption is a hard failure, not advisory — no warn level.
-    expect(result.level).toBeUndefined();
-  });
-
-  it("treats a probe error as inconclusive (ok), not corrupt", async () => {
-    // The probe never throws in practice, but a throw must not masquerade as
-    // corruption (which would hard-fail doctor on an environment quirk).
-    const result = await checkIndexIntegrity(throws);
-    assertOk(result, NAME);
+  it("uses the default (fail) probe-error policy for every other check", () => {
+    const others = checkEntries(fakeConfig()).filter((e) => !e.name.startsWith("DB indexes"));
+    for (const e of others) expect(e.onProbeError).toBeUndefined();
   });
 });
 
-// ── checkRabbitMQ ─────────────────────────────────────────────────────────────
-
-describe("checkRabbitMQ", () => {
-  it("returns ok when RabbitMQ is reachable", async () => {
-    const result = await checkRabbitMQ(ok);
-    assertOk(result, "RabbitMQ reachable");
-  });
-
-  it("returns not-ok with a fix when RabbitMQ is unreachable", async () => {
-    const result = await checkRabbitMQ(fail);
-    assertFail(result, "RabbitMQ reachable");
-  });
-
-  it("returns not-ok with a fix when probe throws", async () => {
-    const result = await checkRabbitMQ(throws);
-    assertFail(result, "RabbitMQ reachable");
-  });
-});
-
-// ── checkOllama ───────────────────────────────────────────────────────────────
-
-describe("checkOllama", () => {
-  it("returns ok when Ollama is reachable and model is pulled", async () => {
-    const result = await checkOllama("gemma4:26b", ok);
-    assertOk(result, "Ollama reachable + model pulled");
-  });
-
-  it("returns not-ok with a fix when Ollama is unreachable or model not pulled", async () => {
-    const result = await checkOllama("gemma4:26b", fail);
-    assertFail(result, "Ollama reachable + model pulled");
-    // fix hint should reference the model name
-    expect(result.fix).toContain("gemma4:26b");
-  });
-
-  it("returns not-ok with a fix when probe throws", async () => {
-    const result = await checkOllama("mymodel:latest", throws);
-    assertFail(result, "Ollama reachable + model pulled");
-    expect(result.fix).toContain("mymodel:latest");
-  });
-});
-
-// ── checkPython ───────────────────────────────────────────────────────────────
-
-describe("checkPython", () => {
-  it("returns ok when Python and faster-whisper are importable", async () => {
-    const result = await checkPython(ok);
-    assertOk(result, "Python + faster-whisper importable");
-  });
-
-  it("returns not-ok with a fix when Python check fails", async () => {
-    const result = await checkPython(fail);
-    assertFail(result, "Python + faster-whisper importable");
-  });
-
-  it("returns not-ok with a fix when probe throws", async () => {
-    const result = await checkPython(throws);
-    assertFail(result, "Python + faster-whisper importable");
-  });
-});
-
-// ── checkFfmpeg ───────────────────────────────────────────────────────────────
-
-describe("checkFfmpeg", () => {
-  it("returns ok when ffmpeg is on PATH", async () => {
-    const result = await checkFfmpeg(ok);
-    assertOk(result, "ffmpeg on PATH");
-  });
-
-  it("returns not-ok with a fix when ffmpeg is missing", async () => {
-    const result = await checkFfmpeg(fail);
-    assertFail(result, "ffmpeg on PATH");
-  });
-
-  it("returns not-ok with a fix when probe throws", async () => {
-    const result = await checkFfmpeg(throws);
-    assertFail(result, "ffmpeg on PATH");
-  });
-});
-
-// ── runChecks ─────────────────────────────────────────────────────────────────
+// ── runChecks / defaultChecks ─────────────────────────────────────────────────
 
 describe("runChecks", () => {
   it("runs all checks and returns one result per check", async () => {
-    const checks = [() => checkDocker(ok), () => checkComposeServices(ok), () => checkPostgres(ok)];
-    const results = await runChecks(checks);
-    expect(results).toHaveLength(3);
+    const checks = [
+      () => runCheck(entry({ name: "a", probe: ok })),
+      () => runCheck(entry({ name: "b", probe: ok })),
+      () => runCheck(entry({ name: "c", probe: ok })),
+    ];
+    expect(await runChecks(checks)).toHaveLength(3);
   });
 
   it("continues running remaining checks when some fail", async () => {
-    const checks = [
-      () => checkDocker(fail),
-      () => checkComposeServices(ok),
-      () => checkRabbitMQ(fail),
-    ];
-    const results = await runChecks(checks);
+    const results = await runChecks([
+      () => runCheck(entry({ name: "a", probe: fail })),
+      () => runCheck(entry({ name: "b", probe: ok })),
+      () => runCheck(entry({ name: "c", probe: fail })),
+    ]);
     expect(results).toHaveLength(3);
     expect(results[0]!.ok).toBe(false);
     expect(results[1]!.ok).toBe(true);
@@ -215,16 +135,21 @@ describe("runChecks", () => {
   });
 
   it("does not throw when a check probe throws — still returns a result", async () => {
-    const checks = [() => checkDocker(throws), () => checkComposeServices(ok)];
-    // runChecks must never throw; each check catches its own errors
-    const results = await runChecks(checks);
+    const results = await runChecks([
+      () => runCheck(entry({ name: "a", probe: throws })),
+      () => runCheck(entry({ name: "b", probe: ok })),
+    ]);
     expect(results).toHaveLength(2);
     expect(results[0]!.ok).toBe(false);
     expect(results[1]!.ok).toBe(true);
   });
 
   it("returns empty array for empty checks list", async () => {
-    const results = await runChecks([]);
-    expect(results).toHaveLength(0);
+    expect(await runChecks([])).toHaveLength(0);
+  });
+
+  it("defaultChecks wires the full table into runnable thunks", async () => {
+    const checks = defaultChecks(fakeConfig());
+    expect(checks).toHaveLength(8);
   });
 });
