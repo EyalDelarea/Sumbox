@@ -355,16 +355,17 @@ export async function handleIncomingMessage(
 
   // For a voice note we intend to download, give it a deterministic `.opus`
   // filename up front so the dedupe key is stable across re-deliveries.
-  const willDownload = mapped.isVoiceNote && typeof opts.downloadVoiceNote === "function";
-  // For a non-sticker image we intend to download, give it a deterministic `.jpg`
+  const willDownload = mapped.mediaKind === "audio" && typeof opts.downloadVoiceNote === "function";
+  // For an image we intend to download, give it a deterministic `.jpg`
   // filename up front so the dedupe key is stable across re-deliveries.
+  // (Stickers are a distinct mediaKind, so they never match here.)
   const willDownloadImage =
-    mapped.isImage && !mapped.isSticker && typeof opts.downloadImage === "function";
-  // For a non-sticker video we intend to download, give it a deterministic `.mp4`
+    mapped.mediaKind === "image" && typeof opts.downloadImage === "function";
+  // For a video we intend to download, give it a deterministic `.mp4`
   // filename up front. If download is not provided (or fails) but a jpegThumbnail
   // is present, we still persist the thumbnail and enqueue analyze.video.
   const willDownloadVideo =
-    mapped.isVideo && !mapped.isSticker && typeof opts.downloadVideo === "function";
+    mapped.mediaKind === "video" && typeof opts.downloadVideo === "function";
   const mediaFilename = willDownload
     ? liveVoiceNoteFilename(mapped.externalId)
     : willDownloadImage
@@ -438,7 +439,7 @@ export async function handleIncomingMessage(
   // On success: sets media_path + media_status='present'.
   // On failure: if jpegThumbnail is present, persist it as a fallback so
   //   analyzeVideo can still describe the video without the full file.
-  // Stickers are excluded by willDownloadVideo (isSticker guard above).
+  // Stickers are excluded by willDownloadVideo (a distinct mediaKind).
   let videoThumbnailPath: string | null = null;
   if (willDownloadVideo) {
     const mediaDir = path.join(opts.dataDir, "media", "live");
@@ -506,7 +507,13 @@ export async function handleIncomingMessage(
   // --- Enqueue transcription for new, downloaded voice notes ---
   // Only enqueue when the media is actually present on disk, so the worker
   // always has a file to transcribe (no dead jobs).
-  if (isNew && mapped.isVoiceNote && opts.bus && normalized.mediaStatus === "present" && analyze) {
+  if (
+    isNew &&
+    mapped.mediaKind === "audio" &&
+    opts.bus &&
+    normalized.mediaStatus === "present" &&
+    analyze
+  ) {
     const messageId = result.ids[0];
     if (messageId !== undefined) {
       await opts.bus.enqueue("transcribe.voicenote", {
@@ -517,7 +524,7 @@ export async function handleIncomingMessage(
 
   // --- Enqueue analysis for new, downloaded non-sticker images ---
   // Only enqueue when the media is actually present on disk.
-  // Stickers are already excluded by willDownloadImage (isSticker guard above).
+  // Stickers are already excluded by willDownloadImage (a distinct mediaKind).
   if (isNew && willDownloadImage && opts.bus && normalized.mediaStatus === "present" && analyze) {
     const messageId = result.ids[0];
     if (messageId !== undefined) {
@@ -527,10 +534,11 @@ export async function handleIncomingMessage(
     }
   }
 
-  // --- Enqueue analysis for new non-sticker videos ---
+  // --- Enqueue analysis for new videos ---
   // Enqueue when: media is present (downloaded) OR a thumbnail was persisted.
   // Never enqueue when neither is available (nothing to describe).
-  if (isNew && mapped.isVideo && !mapped.isSticker && opts.bus && analyze) {
+  // (Stickers are a distinct mediaKind, so they never match here.)
+  if (isNew && mapped.mediaKind === "video" && opts.bus && analyze) {
     const hasMedia = normalized.mediaStatus === "present";
     const hasThumbnail = videoThumbnailPath !== null;
     if (hasMedia || hasThumbnail) {

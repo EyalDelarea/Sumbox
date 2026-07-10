@@ -148,7 +148,7 @@ describe("mapWaMessage()", () => {
     expect(result!.textContent).toBe("Extended hello");
   });
 
-  it("maps an audio/voice message to type 'media' with null textContent and isVoiceNote=true", () => {
+  it("maps an audio/voice message to type 'media' with null textContent and mediaKind='audio'", () => {
     const wa = makeAudioMessage();
     const result = mapWaMessage(wa as any);
 
@@ -158,14 +158,14 @@ describe("mapWaMessage()", () => {
     expect(result!.sentAt.getTime()).toBe(1700000100 * 1000);
     expect(result!.messageType).toBe("media");
     expect(result!.textContent).toBeNull();
-    expect(result!.isVoiceNote).toBe(true);
+    expect(result!.mediaKind).toBe("audio");
   });
 
-  it("maps a text message with isVoiceNote=false", () => {
+  it("maps a text message with mediaKind=null", () => {
     const wa = makeTextMessage();
     const result = mapWaMessage(wa as any);
     expect(result).not.toBeNull();
-    expect(result!.isVoiceNote).toBe(false);
+    expect(result!.mediaKind).toBeNull();
   });
 
   it("returns null for status@broadcast messages (ignore)", () => {
@@ -210,7 +210,7 @@ describe("mapWaMessage()", () => {
     expect(result!.senderName).toBe("9999@s.whatsapp.net");
   });
 
-  it("maps imageMessage to type 'media'", () => {
+  it("maps imageMessage to type 'media' with mediaKind='image' and caption text", () => {
     const wa = makeTextMessage({
       message: {
         imageMessage: {
@@ -221,9 +221,11 @@ describe("mapWaMessage()", () => {
     const result = mapWaMessage(wa as any);
     expect(result).not.toBeNull();
     expect(result!.messageType).toBe("media");
+    expect(result!.mediaKind).toBe("image");
+    expect(result!.textContent).toBe("Photo caption");
   });
 
-  it("maps videoMessage to type 'media'", () => {
+  it("maps videoMessage to type 'media' with mediaKind='video'", () => {
     const wa = makeTextMessage({
       message: {
         videoMessage: {
@@ -234,9 +236,11 @@ describe("mapWaMessage()", () => {
     const result = mapWaMessage(wa as any);
     expect(result).not.toBeNull();
     expect(result!.messageType).toBe("media");
+    expect(result!.mediaKind).toBe("video");
+    expect(result!.textContent).toBe("Video caption");
   });
 
-  it("maps documentMessage to type 'media' with filename", () => {
+  it("maps documentMessage to type 'media' with mediaKind='document' (now explicit) and filename", () => {
     const wa = makeTextMessage({
       message: {
         documentMessage: {
@@ -248,7 +252,39 @@ describe("mapWaMessage()", () => {
     const result = mapWaMessage(wa as any);
     expect(result).not.toBeNull();
     expect(result!.messageType).toBe("media");
+    expect(result!.mediaKind).toBe("document");
     expect(result!.mediaFilename).toBe("report.pdf");
+  });
+
+  it("maps stickerMessage to type 'media' with mediaKind='sticker'", () => {
+    const wa = makeTextMessage({
+      message: {
+        stickerMessage: {
+          mimetype: "image/webp",
+        },
+      },
+    });
+    const result = mapWaMessage(wa as any);
+    expect(result).not.toBeNull();
+    expect(result!.messageType).toBe("media");
+    expect(result!.mediaKind).toBe("sticker");
+    expect(result!.mediaFilename).toBeNull();
+  });
+
+  it("extracts the embedded jpegThumbnail from a videoMessage", () => {
+    const wa = makeTextMessage({
+      message: {
+        videoMessage: {
+          caption: "clip",
+          jpegThumbnail: new Uint8Array([1, 2, 3]),
+        },
+      },
+    });
+    const result = mapWaMessage(wa as any);
+    expect(result).not.toBeNull();
+    expect(result!.mediaKind).toBe("video");
+    expect(result!.jpegThumbnail).not.toBeNull();
+    expect(Buffer.isBuffer(result!.jpegThumbnail)).toBe(true);
   });
 
   it("converts messageTimestamp from Long-like object correctly", () => {

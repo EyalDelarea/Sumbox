@@ -64,7 +64,14 @@ function parseOeExpiry(...candidates: (string | null | undefined)[]): number | n
   return null;
 }
 
-function pickMedia(
+/**
+ * Classify a Baileys message into its media {@link MediaKind} and the raw
+ * content node, or null when it carries no downloadable media. This is the
+ * single place the imageMessage/videoMessage/audioMessage/stickerMessage/
+ * documentMessage union is switched — the message mapper reads `.kind` for its
+ * `mediaKind` discriminant, this module reads `.content` for the download blob.
+ */
+export function classifyMedia(
   msg: NonNullable<WAMessage["message"]>,
 ): { kind: MediaKind; content: MediaContent } | null {
   if (msg.imageMessage) return { kind: "image", content: msg.imageMessage as MediaContent };
@@ -79,7 +86,7 @@ function pickMedia(
 export function extractMediaDescriptor(waMessage: WAMessage): MediaDescriptor | null {
   const msg = waMessage.message;
   if (!msg) return null;
-  const picked = pickMedia(msg);
+  const picked = classifyMedia(msg);
   if (!picked) return null;
   const c = picked.content;
 
