@@ -33,11 +33,11 @@
     "unzipper": "^0.12.5"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.2",
+    "@biomejs/biome": "2.5.3",
     "@testcontainers/postgresql": "^12.0.4",
     "@testcontainers/rabbitmq": "^12.0.4",
     "@types/amqplib": "^0.10.7",
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.1.1",
     "@types/pg": "^8.15.6",
     "@types/unzipper": "^0.10.11",
     "node-pg-migrate": "^8.0.4",
