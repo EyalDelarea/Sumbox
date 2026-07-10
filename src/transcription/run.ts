@@ -31,6 +31,75 @@ async function hotwordsFor(
   }
 }
 
+/** A voice note ready to transcribe: its DB id and the on-disk media path. */
+export type NoteToTranscribe = { messageId: number; mediaPath: string };
+
+/** Engine + conversion knobs shared by the single-shot and batch callers. */
+export type TranscribeCoreDeps = {
+  transcriber: Transcriber;
+  engine: string;
+  ffmpegPath: string;
+  /** When true, convert the media to WAV via ffmpeg before decoding. */
+  convert: boolean;
+};
+
+/**
+ * The shared per-note transcription body: (optionally convert to WAV) →
+ * hotword-bias → transcribe → insertTranscript("completed"); on any error,
+ * insertTranscript("failed") with the message; the wav temp file is always
+ * unlinked in a finally. transcriber.open()/close() are the caller's job (the
+ * single-shot path opens per note; the batch opens once around the whole loop).
+ *
+ * The two callers diverge only at the edges, so those are injected:
+ *  - onSuccess(): after the completed row — the single-shot path prunes the
+ *    media file; the batch loop just counts.
+ *  - onFailure(err): after the failed row — the single-shot path rethrows so the
+ *    bus retries; the batch loop swallows and counts.
+ * onSuccess runs inside the try (matching the original prune placement), so a
+ * throw there still routes through onFailure.
+ */
+export async function transcribeNoteCore(
+  pool: pg.Pool,
+  note: NoteToTranscribe,
+  deps: TranscribeCoreDeps,
+  handlers: {
+    onSuccess: () => void | Promise<void>;
+    onFailure: (err: unknown) => void | Promise<void>;
+  },
+): Promise<void> {
+  let wavPath: string | null = null;
+  try {
+    const audioPath = deps.convert
+      ? (wavPath = await convertToWav(deps.ffmpegPath, note.mediaPath))
+      : note.mediaPath;
+    const { text } = await deps.transcriber.transcribe(
+      audioPath,
+      await hotwordsFor(pool, note.messageId),
+    );
+    await insertTranscript(pool, {
+      messageId: note.messageId,
+      transcript: text,
+      engine: deps.engine,
+      status: "completed",
+    });
+    await handlers.onSuccess();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await insertTranscript(pool, {
+      messageId: note.messageId,
+      transcript: null,
+      engine: deps.engine,
+      status: "failed",
+      errorMessage: message,
+    });
+    await handlers.onFailure(err);
+  } finally {
+    if (wavPath) {
+      await fsp.unlink(wavPath).catch(() => {});
+    }
+  }
+}
+
 export type TranscribeOneNoteDeps = {
   /**
    * Injected pool (T2: the worker passes its tenant-scoped app pool so transcript
@@ -83,41 +152,28 @@ export async function transcribeOneNote(
 
     await deps.transcriber.open();
     try {
-      let wavPath: string | null = null;
-      try {
-        const audioPath = deps.convert
-          ? (wavPath = await convertToWav(deps.ffmpegPath, mediaPath))
-          : mediaPath;
-        const { text } = await deps.transcriber.transcribe(
-          audioPath,
-          await hotwordsFor(pool, messageId),
-        );
-        await insertTranscript(pool, {
-          messageId: Number(messageId),
-          transcript: text,
+      await transcribeNoteCore(
+        pool,
+        { messageId: Number(messageId), mediaPath },
+        {
+          transcriber: deps.transcriber,
           engine: deps.engine,
-          status: "completed",
-        });
-        // Prune media file after successful transcription (gated by retainMedia).
-        if (!deps.retainMedia) {
-          await deps.pruneMediaFile(messageId);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        await insertTranscript(pool, {
-          messageId: Number(messageId),
-          transcript: null,
-          engine: deps.engine,
-          status: "failed",
-          errorMessage: message,
-        });
-        // Re-throw so the handler (and bus) knows it failed
-        throw err;
-      } finally {
-        if (wavPath) {
-          await fsp.unlink(wavPath).catch(() => {});
-        }
-      }
+          ffmpegPath: deps.ffmpegPath,
+          convert: deps.convert,
+        },
+        {
+          // Prune the media file after a successful transcription (gated by retainMedia).
+          onSuccess: async () => {
+            if (!deps.retainMedia) {
+              await deps.pruneMediaFile(messageId);
+            }
+          },
+          // Re-throw so the handler (and bus) knows it failed → retry.
+          onFailure: (err) => {
+            throw err;
+          },
+        },
+      );
     } finally {
       await deps.transcriber.close();
     }
@@ -188,37 +244,21 @@ export async function runTranscription(
 
     try {
       for (const note of pending) {
-        let wavPath: string | null = null;
-        try {
-          const audioPath = convert
-            ? (wavPath = await convertToWav(ffmpegPath, note.mediaPath))
-            : note.mediaPath;
-          const { text } = await transcriber.transcribe(
-            audioPath,
-            await hotwordsFor(pool, note.messageId),
-          );
-          await insertTranscript(pool, {
-            messageId: note.messageId,
-            transcript: text,
-            engine,
-            status: "completed",
-          });
-          ok++;
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          await insertTranscript(pool, {
-            messageId: note.messageId,
-            transcript: null,
-            engine,
-            status: "failed",
-            errorMessage: message,
-          });
-          failed++;
-        } finally {
-          if (wavPath) {
-            await fsp.unlink(wavPath).catch(() => {});
-          }
-        }
+        // The batch counts successes/failures and never prunes or rethrows —
+        // a bad note is recorded as failed and the loop moves on (resumable).
+        await transcribeNoteCore(
+          pool,
+          { messageId: note.messageId, mediaPath: note.mediaPath },
+          { transcriber, engine, ffmpegPath, convert },
+          {
+            onSuccess: () => {
+              ok++;
+            },
+            onFailure: () => {
+              failed++;
+            },
+          },
+        );
       }
     } finally {
       await transcriber.close();
