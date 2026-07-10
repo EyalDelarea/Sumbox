@@ -60,6 +60,9 @@ function slotKey(slot: TimeSlot, prefix: string): string {
   return `${prefix}@${hh}:${mm}`;
 }
 
+/** On the first ever run there is no prior watermark; bound the window to 12h. */
+const TWELVE_H_MS = 12 * 60 * 60 * 1000;
+
 export type SchedulerHandle = {
   stop: () => void;
 };
@@ -107,6 +110,46 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
   };
 
   /**
+   * Roll up the most-recent last-run across all slots into the total-summary
+   * window. Returns the window start (`sinceForTotal` — the latest last-run, or
+   * `at` − 12h on the first run) and the raw `latest` (which the startup path
+   * feeds to its `dueSumbox` check). Per-slot read errors are logged and skipped.
+   */
+  async function rollupWindow(at: Date): Promise<{ sinceForTotal: Date; latest: Date | null }> {
+    let latest: Date | null = null;
+    for (const slot of times) {
+      const key = slotKey(slot, slotKeyPrefix);
+      try {
+        const lr = await getLastRun(pool, key);
+        if (lr !== null && (latest === null || lr > latest)) {
+          latest = lr;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(`getLastRun for ${key} failed: ${msg}`);
+      }
+    }
+    return { sinceForTotal: latest ?? new Date(at.getTime() - TWELVE_H_MS), latest };
+  }
+
+  /**
+   * Record that every slot ran at `at`. Called only AFTER a successful enqueue,
+   * so a failed enqueue never advances the watermark. Per-slot write errors are
+   * logged and skipped.
+   */
+  async function recordAllSlots(at: Date): Promise<void> {
+    for (const slot of times) {
+      const key = slotKey(slot, slotKeyPrefix);
+      try {
+        await recordRun(pool, key, at);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(`recordRun for ${key} failed: ${msg}`);
+      }
+    }
+  }
+
+  /**
    * Schedule a timer to the next slot from the given reference time.
    */
   function scheduleNext(reference: Date): void {
@@ -119,39 +162,12 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
       if (stopped) return;
       const firedAt = now();
       try {
-        // Find the most recent last-run across all slots to bound the total-summary window.
-        let periodicLatestLastRun: Date | null = null;
-        for (const slot of times) {
-          const key = slotKey(slot, slotKeyPrefix);
-          try {
-            const lr = await getLastRun(pool, key);
-            if (lr !== null && (periodicLatestLastRun === null || lr > periodicLatestLastRun)) {
-              periodicLatestLastRun = lr;
-            }
-          } catch {
-            // Ignore per-slot errors; fallback to 12h window below
-          }
-        }
-        // Total summary window = since the previous scheduled run (or last 12h on first fire).
-        const TWELVE_H_MS = 12 * 60 * 60 * 1000;
-        const sinceForTotal = periodicLatestLastRun ?? new Date(firedAt.getTime() - TWELVE_H_MS);
+        // The timer firing IS the due-check for the periodic path — enqueue the
+        // total-summary run over the window since the previous run, then record
+        // that every slot ran at firedAt.
+        const { sinceForTotal } = await rollupWindow(firedAt);
         await enqueueRun(pool, bus, { sinceForTotal });
-        // Record the run for the slot that just fired.
-        // We record for every time slot that is <= firedAt and > their last run.
-        // For simplicity (single catch-up slot per fire), record for each slot.
-        for (const slot of times) {
-          const key = slotKey(slot, slotKeyPrefix);
-          const slotInstant = new Date(firedAt);
-          slotInstant.setHours(slot.h, slot.m, 0, 0);
-          // If the slot has just passed (or is very close to now), record it.
-          // Use the fired-at time to avoid depending on exact math.
-          try {
-            await recordRun(pool, key, firedAt);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log.error(`recordRun for ${key} failed: ${msg}`);
-          }
-        }
+        await recordAllSlots(firedAt);
         log.info(`Scheduled run complete at ${firedAt.toISOString()}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -166,20 +182,12 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
   }
 
   /**
-   * Startup catch-up: check every slot; if dueSumbox() is true, run once.
-   *
-   * We check all slots together (using the combined times list) to avoid
-   * multiple catch-up runs when several slots were missed. We use the
-   * most-recently-completed slot key as the state key. A conservative
-   * approach: use the first slot's key as the single catch-up key, and
-   * check the overall dueSumbox across all times.
-   *
-   * Simpler and correct: use a single catch-up key "digest@sumbox" that
-   * represents "the last time any slot ran". This avoids per-slot state
-   * proliferation and matches the at-most-once guarantee.
-   *
-   * Actually, per the data model, we record per slot key. So check each
-   * slot independently and enqueue at most once across the whole batch.
+   * Startup catch-up: if any slot became due while the process was down, run the
+   * digest exactly once. We roll up the latest last-run across all slots and let
+   * `dueSumbox` decide against the combined times list — this enqueues at most
+   * once no matter how many slots were missed. On the first ever start there is
+   * no watermark (latest = null → dueSumbox = true), and the window falls back to
+   * the last 12h so the first digest is non-empty but bounded.
    */
   async function runStartupSumbox(): Promise<void> {
     if (stopped) return;
@@ -187,44 +195,12 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
     const nowDate = now();
 
     try {
-      // Find the most recent slot that has run (to drive overall dueSumbox).
-      // Strategy: check if ANY slot is due, then enqueue once.
-      let latestLastRun: Date | null = null;
-      for (const slot of times) {
-        const key = slotKey(slot, slotKeyPrefix);
-        try {
-          const lr = await getLastRun(pool, key);
-          if (lr !== null) {
-            if (latestLastRun === null || lr > latestLastRun) {
-              latestLastRun = lr;
-            }
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.error(`getLastRun for ${slotKey(slot, slotKeyPrefix)} failed: ${msg}`);
-        }
-      }
-
-      // If no slot has ever run, latestLastRun is null → dueSumbox = true.
-      if (dueSumbox(nowDate, latestLastRun, times)) {
+      const { sinceForTotal, latest } = await rollupWindow(nowDate);
+      if (dueSumbox(nowDate, latest, times)) {
         if (stopped) return;
         log.info(`Startup catch-up: running enqueueScheduledRun`);
-        // Total summary window = since the previous scheduled run (or last 12h
-        // on first ever run, so the first digest is non-empty but bounded).
-        const TWELVE_H_MS = 12 * 60 * 60 * 1000;
-        const sinceForTotal = latestLastRun ?? new Date(nowDate.getTime() - TWELVE_H_MS);
         await enqueueRun(pool, bus, { sinceForTotal });
-
-        // Record the catch-up run for all slot keys (sets their last_run_at to now)
-        for (const slot of times) {
-          const key = slotKey(slot, slotKeyPrefix);
-          try {
-            await recordRun(pool, key, nowDate);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log.error(`recordRun for ${key} failed: ${msg}`);
-          }
-        }
+        await recordAllSlots(nowDate);
         log.info(`Startup catch-up complete at ${nowDate.toISOString()}`);
       }
     } catch (err) {
