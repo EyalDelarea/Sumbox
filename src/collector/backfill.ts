@@ -12,6 +12,7 @@ import type pg from "pg";
 import { countReadableByGroup, getNewestAnchor } from "../db/repositories/messages.js";
 import type { Logger } from "../logging/logger.js";
 import { handleIncomingMessage } from "./collector.js";
+import { timestampToMs } from "./timestamp.js";
 
 export type AnchorKey = { remoteJid: string; id: string; fromMe: boolean };
 
@@ -64,21 +65,6 @@ export type BackfillDeps = {
 };
 
 export type BackfillResult = { fetched: number; durationMs: number; partial: boolean };
-
-/**
- * Coerce a Baileys messageTimestamp (number | Long-like | null | undefined) to milliseconds.
- *
- * Baileys stores timestamps as seconds (matching message-mapper's timestampToMs approach).
- * Long-like objects (from protobufjs) expose a .toNumber() method.
- */
-function timestampToMs(ts: unknown): number {
-  if (ts == null) return Date.now();
-  if (typeof ts === "number") return ts * 1000;
-  if (typeof (ts as { toNumber?: () => number }).toNumber === "function") {
-    return (ts as { toNumber: () => number }).toNumber() * 1000;
-  }
-  return Number(ts) * 1000;
-}
 
 /**
  * Orchestrate a backfill for a single group.

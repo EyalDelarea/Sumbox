@@ -8,6 +8,7 @@
  */
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { ImportedMessageType } from "../importer/types.js";
+import { timestampToMs } from "./timestamp.js";
 
 export type MappedMessage = {
   externalId: string;
@@ -39,20 +40,6 @@ export type MappedMessage = {
   /** Whether the message was sent by the device owner (from waMessage.key.fromMe). */
   fromMe: boolean;
 };
-
-/**
- * Convert a Baileys messageTimestamp (number | Long | null | undefined) to milliseconds.
- * Baileys uses seconds; Long objects expose .toNumber().
- */
-function timestampToMs(ts: unknown): number {
-  if (ts == null) return Date.now();
-  if (typeof ts === "number") return ts * 1000;
-  // Long-like objects (from protobufjs) have a toNumber() method
-  if (typeof (ts as { toNumber?: () => number }).toNumber === "function") {
-    return (ts as { toNumber: () => number }).toNumber() * 1000;
-  }
-  return Number(ts) * 1000;
-}
 
 /**
  * Map a Baileys WAMessage to our MappedMessage domain shape.
