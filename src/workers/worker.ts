@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { startReconcileLoop } from "../collector/identity-reconcile-loop.js";
 import type { JobBus } from "../jobs/job-bus.js";
-import type { Job, JobType } from "../jobs/job-types.js";
+import { JOB_DESCRIPTORS, type Job, type JobType } from "../jobs/job-types.js";
 import { installConsoleGuard } from "../logging/install-console.js";
 import { logLifecycle } from "../logging/lifecycle.js";
 import { getLogger } from "../logging/log.js";
@@ -34,54 +34,12 @@ const noopLogger: Logger = {
 } as unknown as Logger;
 
 /**
- * Job types that must always use prefetch=1 for backpressure (slow jobs).
- * Transcription, vision analysis, and group summarization are GPU/LLM-bound
- * and can take seconds to minutes per item, so we never pre-fetch more than
- * one at a time regardless of --concurrency.
- */
-const PREFETCH_ONE_TYPES = new Set<JobType>([
-  "transcribe.voicenote",
-  "analyze.image",
-  "analyze.video",
-  "summarize.group",
-  "summarize.total",
-]);
-
-/**
- * Job types that call Ollama directly (LLM or vision model).
- * These share a single serialization gate so they never send concurrent
- * requests to Ollama — concurrent requests force a model-swap that can
- * exceed the socket timeout and trigger RabbitMQ consumer_timeout.
- * transcribe.voicenote is excluded (uses faster-whisper, not Ollama).
- */
-const OLLAMA_JOB_TYPES = new Set<JobType>([
-  "analyze.image",
-  "analyze.video",
-  "summarize.group",
-  "summarize.total",
-]);
-
-/**
- * Normalize a job type to a coarse operation label for metrics/dashboards.
- * (Summaries log op="summary" from the web server; not a worker job.)
+ * Normalize a job type to a coarse operation label for metrics/dashboards,
+ * from the JOB_DESCRIPTORS table. (Summaries log op="summary" from the web
+ * server; not a worker job.)
  */
 export function opForJobType(type: JobType): string {
-  switch (type) {
-    case "transcribe.voicenote":
-      return "audio";
-    case "analyze.image":
-      return "image";
-    case "analyze.video":
-      return "video";
-    case "import.file":
-      return "import";
-    case "summarize.group":
-      return "summary";
-    case "summarize.total":
-      return "summary";
-    default:
-      return type;
-  }
+  return JOB_DESCRIPTORS[type]?.opLabel ?? type;
 }
 
 /**
@@ -123,10 +81,10 @@ export async function buildWorker(
     [JobType, (job: Job) => Promise<void>]
   >) {
     if (handler) {
-      const isSlow = PREFETCH_ONE_TYPES.has(type);
+      const isSlow = JOB_DESCRIPTORS[type].prefetch === "one";
       const prefetch = isSlow ? 1 : concurrency;
 
-      const execute = OLLAMA_JOB_TYPES.has(type)
+      const execute = JOB_DESCRIPTORS[type].usesOllama
         ? (job: Job) => withOllamaSlot(() => handler(job))
         : handler;
 
