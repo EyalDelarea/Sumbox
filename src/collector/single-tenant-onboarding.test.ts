@@ -3,10 +3,8 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_TENANT_ID } from "../db/tenant-context.js";
-import type { OnboardingRegistry } from "../web/onboarding-routes.js";
 import { makeOnboardingRoutes } from "../web/onboarding-routes.js";
-import { composeOnboarding, SingleTenantOnboardingAdapter } from "./single-tenant-onboarding.js";
-import type { SessionHealth, TenantSessionStatus } from "./tenant-session-registry.js";
+import { SingleTenantOnboardingAdapter } from "./single-tenant-onboarding.js";
 
 describe("SingleTenantOnboardingAdapter", () => {
   it("starts 'connecting' when no device is linked", () => {
@@ -94,55 +92,5 @@ describe("adapter through /api/onboarding/status", () => {
     );
     const r = await fetch(`${base}/api/onboarding/status`);
     expect(await r.json()).toEqual({ status: "connected" });
-  });
-});
-
-describe("composeOnboarding", () => {
-  const OTHER = "11111111-1111-1111-1111-111111111111";
-  const health = (tenantId: string, status: TenantSessionStatus): SessionHealth => ({
-    tenantId,
-    status,
-    restarts: 0,
-    lastError: null,
-    lastConnectedAt: null,
-  });
-  const fake = (entries: SessionHealth[]) => {
-    const started: string[] = [];
-    const reg: OnboardingRegistry = {
-      start: (t) => {
-        started.push(t);
-        return Promise.resolve();
-      },
-      snapshot: () => entries,
-      on: () => undefined,
-      off: () => undefined,
-    };
-    return { started, reg };
-  };
-
-  it("starts the default tenant on legacy and other tenants on the registry", async () => {
-    // The bug this guards: routing DEFAULT to the registry opens a 2nd socket on the
-    // shared root creds → WhatsApp 440 reconnect loop. DEFAULT must hit legacy only.
-    const legacy = fake([health(DEFAULT_TENANT_ID, "connected")]);
-    const registry = fake([health(OTHER, "connecting")]);
-    const c = composeOnboarding(legacy.reg, registry.reg);
-
-    await c.start(DEFAULT_TENANT_ID);
-    expect(legacy.started).toEqual([DEFAULT_TENANT_ID]);
-    expect(registry.started).toEqual([]);
-
-    await c.start(OTHER);
-    expect(registry.started).toEqual([OTHER]);
-    expect(legacy.started).toEqual([DEFAULT_TENANT_ID]); // unchanged
-  });
-
-  it("merges snapshots, keeping legacy's default entry and dropping the registry's", () => {
-    const legacy = fake([health(DEFAULT_TENANT_ID, "connected")]);
-    const registry = fake([health(DEFAULT_TENANT_ID, "connecting"), health(OTHER, "connecting")]);
-    const c = composeOnboarding(legacy.reg, registry.reg);
-    expect(c.snapshot()).toEqual([
-      health(DEFAULT_TENANT_ID, "connected"),
-      health(OTHER, "connecting"),
-    ]);
   });
 });

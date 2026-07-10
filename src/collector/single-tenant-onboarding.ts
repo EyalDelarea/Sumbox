@@ -1,16 +1,13 @@
 import { EventEmitter } from "node:events";
 import { DEFAULT_TENANT_ID } from "../db/tenant-context.js";
 import type { OnboardingRegistry } from "../web/onboarding-routes.js";
-import type { SessionHealth, TenantSessionStatus } from "./tenant-session-registry.js";
+import type { SessionHealth, SessionStatus } from "./session-status.js";
 
 /**
- * 021 — single-user web onboarding.
+ * Web onboarding over the ONE `CollectorSession` that `serve --collect` starts.
  *
- * A thin {@link OnboardingRegistry} over the ONE default-tenant `CollectorSession`
- * (the one `serve --collect` starts). It re-emits that session's onboarding-relevant
- * events with the `DEFAULT_TENANT_ID` prefix the routes filter on, mirroring what
- * `TenantSessionRegistry` does per tenant — but for a single, already-supervised
- * session. The live session is injected via {@link attachSession} after `--collect`
+ * A thin {@link OnboardingRegistry} that re-emits the session's onboarding-relevant
+ * events. The live session is injected via {@link attachSession} after `--collect`
  * starts it (the adapter must exist earlier, at `createServer` time).
  */
 
@@ -21,7 +18,7 @@ export type OnboardingSessionSource = {
 
 export class SingleTenantOnboardingAdapter implements OnboardingRegistry {
   private readonly emitter = new EventEmitter();
-  private status: TenantSessionStatus;
+  private status: SessionStatus;
   private lastQr: string | null = null;
 
   /**
@@ -89,38 +86,4 @@ export class SingleTenantOnboardingAdapter implements OnboardingRegistry {
     this.emitter.off(event, listener);
     return this;
   }
-}
-
-/**
- * Compose onboarding for MT + `--collect`: the DEFAULT tenant is owned by the legacy
- * `--collect` session (`legacy`), every other tenant by the per-tenant `registry`.
- *
- * Routing the default tenant to the registry would make it open a SECOND Baileys socket
- * on the shared root creds (the registry's `authDirFor(DEFAULT)` == the legacy auth root) —
- * WhatsApp permits one socket per linked device, so the two evict each other forever
- * (stream-error 440 "replaced") → endless reconnect loop. Events are tenant-prefixed and
- * the routes filter by tenant, so forwarding listeners to both adapters is safe.
- */
-export function composeOnboarding(
-  legacy: OnboardingRegistry,
-  registry: OnboardingRegistry,
-): OnboardingRegistry {
-  return {
-    start: (tenantId) =>
-      tenantId === DEFAULT_TENANT_ID ? legacy.start(tenantId) : registry.start(tenantId),
-    snapshot: () => [
-      ...legacy.snapshot(),
-      ...registry.snapshot().filter((h) => h.tenantId !== DEFAULT_TENANT_ID),
-    ],
-    on: (event, listener) => {
-      legacy.on(event, listener);
-      registry.on(event, listener);
-      return undefined;
-    },
-    off: (event, listener) => {
-      legacy.off(event, listener);
-      registry.off(event, listener);
-      return undefined;
-    },
-  };
 }

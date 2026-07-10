@@ -1,25 +1,18 @@
 import type http from "node:http";
-import type { SessionHealth, TenantSessionStatus } from "../collector/tenant-session-registry.js";
+import type { SessionHealth, SessionStatus } from "../collector/session-status.js";
 import { sseFrame } from "./sse.js";
 
 /**
- * T4 — web onboarding (register → verify → scan QR → "connected").
+ * Web onboarding (scan QR → "connected").
  *
- * The /api/onboarding/* surface is a thin adapter over the TenantSessionRegistry: it
- * starts the requesting tenant's session, streams that tenant's QR refreshes over SSE,
- * and reports link status. Everything is scoped to the AUTHENTICATED tenant the server
- * resolves — a tenant can only ever link/observe its own session.
+ * The /api/onboarding/* surface is a thin adapter over the collector session: it starts
+ * the session, streams QR refreshes over SSE, and reports link status.
  */
 
-/** The slice of TenantSessionRegistry onboarding needs (the real registry satisfies it). */
+/** The slice of the onboarding adapter these routes need. */
 export interface OnboardingRegistry {
   start(tenantId: string): Promise<void>;
   snapshot(): SessionHealth[];
-  /**
-   * Whether the tenant has persisted Baileys creds on disk (i.e. has already linked).
-   * Optional: the single-user adapter already reports "connected" when initiallyLinked,
-   * so only the multi-tenant TenantSessionRegistry needs to implement this.
-   */
   hasLinkedAuth?(tenantId: string): boolean;
   on(event: string, listener: (...args: unknown[]) => void): unknown;
   off(event: string, listener: (...args: unknown[]) => void): unknown;
@@ -29,8 +22,8 @@ export type OnboardingStatus = "unlinked" | "connecting" | "connected" | "logged
 
 export type OnboardingRoutesOptions = { registry: OnboardingRegistry };
 
-/** Collapse the registry's fine-grained session status into what the onboarding UI needs. */
-function toOnboardingStatus(status: TenantSessionStatus | undefined): OnboardingStatus {
+/** Collapse the session's fine-grained status into what the onboarding UI needs. */
+function toOnboardingStatus(status: SessionStatus | undefined): OnboardingStatus {
   switch (status) {
     case "connected":
       return "connected";

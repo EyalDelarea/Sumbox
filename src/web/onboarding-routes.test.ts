@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import type { SessionHealth } from "../collector/tenant-session-registry.js";
+import type { SessionHealth } from "../collector/session-status.js";
 import { makeOnboardingRoutes, type OnboardingRegistry } from "./onboarding-routes.js";
 
 /**
