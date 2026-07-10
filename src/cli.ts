@@ -148,8 +148,7 @@ program
       { upsertParticipant },
       { getSummaryUserMark, upsertSummaryUserMark },
       { runSummarizeOnPool },
-      { createAppPool },
-      tenantCtx,
+      { createDbClient },
       { setCollectorConnected },
       { startHeartbeat },
       { makeSummaryCommandDeps },
@@ -162,16 +161,12 @@ program
       import("./db/repositories/summary-user-marks.js"),
       import("./summarization/summarize.js"),
       import("./db/client.js"),
-      import("./db/tenant-context.js"),
       import("./db/repositories/service-status.js"),
       import("./service/heartbeat.js"),
       import("./serve/summary-command-deps.js"),
     ]);
 
-    // T2 cutover: ingest runs on the RLS-enforced app pool, attributed to the default
-    // tenant (single-user mode; T3 makes this per-tenant via the session registry).
-    const appPool = createAppPool();
-    const pool = tenantCtx.scopedPool(appPool, () => tenantCtx.DEFAULT_TENANT_ID);
+    const pool = createDbClient();
     let storedCount = 0;
 
     // Cross-process liveness: this standalone collector keeps the shared service_status
@@ -322,7 +317,7 @@ program
       void setCollectorConnected(pool, false)
         .catch(() => {})
         .finally(() => {
-          appPool
+          pool
             .end()
             .catch(() => {})
             .finally(() => {

@@ -2,19 +2,14 @@ import { describe, expect, it } from "vitest";
 import { runRetentionSweep } from "./retention-sweep.js";
 
 describe("runRetentionSweep", () => {
-  it("purges each opted-in tenant with its own window and unlinks freed media", async () => {
-    const purgeCalls: Array<{ tenantId: string; days: number }> = [];
+  it("purges with the configured window and unlinks freed media", async () => {
+    const purgeCalls: number[] = [];
     const unlinked: string[] = [];
     const total = await runRetentionSweep({
-      listTenants: async () => [
-        { tenantId: "t1", retentionDays: 30 },
-        { tenantId: "t2", retentionDays: 7 },
-      ],
-      purgeChats: async (tenantId, days) => {
-        purgeCalls.push({ tenantId, days });
-        return tenantId === "t1"
-          ? { chatsAffected: 2, mediaPaths: ["/a", "/b"] }
-          : { chatsAffected: 1, mediaPaths: [] };
+      retentionDays: async () => 30,
+      purgeChats: async (days) => {
+        purgeCalls.push(days);
+        return { chatsAffected: 2, mediaPaths: ["/a", "/b"] };
       },
       unlink: async (paths) => {
         unlinked.push(...paths);
@@ -22,40 +17,45 @@ describe("runRetentionSweep", () => {
       },
     });
 
-    expect(total).toBe(3);
-    expect(purgeCalls).toEqual([
-      { tenantId: "t1", days: 30 },
-      { tenantId: "t2", days: 7 },
-    ]);
-    expect(unlinked).toEqual(["/a", "/b"]); // t2 had no media → unlink not called with empty
+    expect(total).toBe(2);
+    expect(purgeCalls).toEqual([30]);
+    expect(unlinked).toEqual(["/a", "/b"]);
   });
 
-  it("isolates a failing tenant — the rest of the sweep still runs", async () => {
-    const purged: string[] = [];
+  it("skips unlink when the purge freed no media", async () => {
+    let unlinkCalls = 0;
+    const total = await runRetentionSweep({
+      retentionDays: async () => 7,
+      purgeChats: async () => ({ chatsAffected: 1, mediaPaths: [] }),
+      unlink: async () => {
+        unlinkCalls++;
+        return 0;
+      },
+    });
+
+    expect(total).toBe(1);
+    expect(unlinkCalls).toBe(0);
+  });
+
+  it("warns and returns 0 when the purge fails", async () => {
     const warnings: string[] = [];
     const total = await runRetentionSweep({
-      listTenants: async () => [
-        { tenantId: "boom", retentionDays: 30 },
-        { tenantId: "ok", retentionDays: 30 },
-      ],
-      purgeChats: async (tenantId) => {
-        if (tenantId === "boom") throw new Error("db down");
-        purged.push(tenantId);
-        return { chatsAffected: 1, mediaPaths: [] };
+      retentionDays: async () => 30,
+      purgeChats: async () => {
+        throw new Error("db down");
       },
       unlink: async (p) => p.length,
       log: { info: () => {}, warn: (m) => warnings.push(m) },
     });
 
-    expect(total).toBe(1);
-    expect(purged).toEqual(["ok"]);
-    expect(warnings.some((w) => w.includes("boom"))).toBe(true);
+    expect(total).toBe(0);
+    expect(warnings.some((w) => w.includes("db down"))).toBe(true);
   });
 
-  it("does nothing when no tenant opted into retention", async () => {
+  it("does nothing when retention is disabled", async () => {
     let purgeCount = 0;
     const total = await runRetentionSweep({
-      listTenants: async () => [],
+      retentionDays: async () => 0,
       purgeChats: async () => {
         purgeCount++;
         return { chatsAffected: 0, mediaPaths: [] };

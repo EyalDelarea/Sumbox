@@ -1,14 +1,13 @@
 import fs from "node:fs/promises";
 import type pg from "pg";
-import { markTenantDeleted, purgeTenantData } from "./tenants.js";
 
 /**
- * data-deletion.ts — self-service destructive operations a tenant can run on their
- * OWN data (wired into Settings → Privacy & Data):
+ * data-deletion.ts — destructive operations the user can run on their own data
+ * (wired into Settings → Privacy & Data):
  *
- *  - deleteTenantCompletely — wipe everything + (multi-tenant) soft-delete the account.
- *  - purgeUnselectedChats   — delete every chat the user did NOT include, keeping the
- *                             selection decision so a re-sync won't silently re-pull it.
+ *  - deleteAllData        — wipe everything.
+ *  - purgeUnselectedChats — delete every chat the user did NOT include, keeping the
+ *                           selection decision so a re-sync won't silently re-pull it.
  *
  * Both follow the same two-phase contract: the DB work runs inside ONE caller-provided
  * transaction (atomic — a failure rolls back cleanly) and RETURNS the on-disk media
@@ -20,6 +19,60 @@ import { markTenantDeleted, purgeTenantData } from "./tenants.js";
  * `messages.media_path` holds the ABSOLUTE path to each downloaded file, so disk cleanup
  * needs no knowledge of the import-dir layout.
  */
+
+/**
+ * Every table holding user data, ordered children-before-parents for FK-safe deletion.
+ *
+ * EVERY table that carries a `tenant_id` scoping column must appear here, or a wipe
+ * silently leaves rows behind. `data-deletion.test.ts` enforces this against the live
+ * schema (introspecting `information_schema`), with `audit_log` the one deliberate
+ * exception — it is content-free and intentionally outlives a wipe.
+ *
+ * Children-before-parents is always FK-safe regardless of ON DELETE action; the same
+ * test asserts the ordering against the live FK graph so a future table can't drift.
+ */
+export const SCOPED_TABLES_DELETE_ORDER = [
+  // ── message/group-derived (most CASCADE from messages; listed for completeness) ──
+  "read_watermarks",
+  "summary_user_marks", // → summaries (SET NULL) · groups/participants (CASCADE); delete before them
+  "transcripts",
+  "media_analyses",
+  "message_embeddings",
+  "message_media",
+  "suggestion_feedback",
+  "suggestions",
+  "todo_sources",
+  "todos",
+  "meeting_sources",
+  "meetings",
+  "people",
+  "dismissed_sources",
+  "dismissed_info_cards",
+  "group_command_permissions",
+  "chat_scopes",
+  "scope_categories",
+  "creation_messages",
+  "creations",
+  "assistant_memory",
+  // ── core content + structure ──
+  "messages",
+  "summaries",
+  "total_summaries",
+  "imports",
+  "participants",
+  "scheduler_state",
+  "job_runs",
+  "identity_links",
+  "user_preferences",
+  "groups",
+];
+
+/**
+ * Tables with a tenant_id column deliberately excluded from `SCOPED_TABLES_DELETE_ORDER`:
+ * `audit_log` is content-free and is meant to survive a wipe for accountability. The
+ * schema guard test treats this as the allowed exception.
+ */
+export const PURGE_EXCLUDED_TENANT_TABLES = ["audit_log"];
 
 /** Best-effort unlink of media files. Missing files (ENOENT) and per-file errors never throw. */
 export async function unlinkMediaFiles(
@@ -40,44 +93,28 @@ export async function unlinkMediaFiles(
   return removed;
 }
 
-async function collectTenantMediaPaths(
-  client: pg.Pool | pg.PoolClient,
-  tenantId: string,
-): Promise<string[]> {
+async function collectAllMediaPaths(client: pg.Pool | pg.PoolClient): Promise<string[]> {
   // Both downloaded media (messages.media_path) AND the original WhatsApp export files
   // (imports.original_file_path) — "wipe everything" must clear both off disk.
   const { rows } = await client.query<{ path: string }>(
-    `SELECT media_path AS path FROM messages WHERE tenant_id = $1 AND media_path IS NOT NULL
+    `SELECT media_path AS path FROM messages WHERE media_path IS NOT NULL
      UNION ALL
-     SELECT original_file_path AS path FROM imports
-       WHERE tenant_id = $1 AND original_file_path IS NOT NULL`,
-    [tenantId],
+     SELECT original_file_path AS path FROM imports WHERE original_file_path IS NOT NULL`,
   );
   return rows.map((r) => r.path);
 }
 
-export type DeleteTenantResult = {
+export type DeleteAllResult = {
   /** Absolute media-file paths the caller should unlink after the transaction commits. */
   mediaPaths: string[];
 };
 
-/**
- * Wipe ALL of a tenant's data. Runs inside the caller's tenant-scoped transaction.
- *
- * `softDelete` controls the account lifecycle: in multi-tenant mode it marks the tenant
- * `deleted` (so the account is a real off-switch — see the login guard), end-to-end with
- * the session rows that `purgeTenantData` removes. In single-user mode the caller passes
- * `softDelete: false` so the lone default tenant stays active and the zero-config app
- * keeps working against an empty store.
- */
-export async function deleteTenantCompletely(
-  client: pg.Pool | pg.PoolClient,
-  tenantId: string,
-  opts: { softDelete: boolean },
-): Promise<DeleteTenantResult> {
-  const mediaPaths = await collectTenantMediaPaths(client, tenantId);
-  await purgeTenantData(client, tenantId);
-  if (opts.softDelete) await markTenantDeleted(client, tenantId);
+/** Wipe ALL stored data. Runs inside the caller's transaction. */
+export async function deleteAllData(client: pg.Pool | pg.PoolClient): Promise<DeleteAllResult> {
+  const mediaPaths = await collectAllMediaPaths(client);
+  for (const table of SCOPED_TABLES_DELETE_ORDER) {
+    await client.query(`DELETE FROM ${table}`);
+  }
   return { mediaPaths };
 }
 
@@ -125,7 +162,7 @@ export type PurgeUnselectedResult = {
 };
 
 /**
- * Delete the content of every chat the tenant did NOT include — messages, media (rows +
+ * Delete the content of every chat the user did NOT include — messages, media (rows +
  * files), transcripts, analyses, embeddings, summaries, and chat-derived todos/meetings/
  * suggestions. KEEPS the `groups` and `chat_scopes` rows (so the "not included" decision
  * survives a later WhatsApp re-sync) and the cross-chat projections (`participants`,
@@ -137,16 +174,12 @@ export type PurgeUnselectedResult = {
  * `olderThanDays` (used by the retention sweep) restricts deletion to dormant chats whose
  * most recent message is older than the window; omitted (the manual "purge now" button)
  * means every unselected chat regardless of age.
- *
- * Tenant-bounded by the selected `group_id`s, so it is correct on both the RLS-scoped
- * request pool and the BYPASSRLS operator pool the sweep uses.
  */
 export async function purgeUnselectedChats(
   client: pg.Pool | pg.PoolClient,
-  tenantId: string,
   opts: { olderThanDays?: number } = {},
 ): Promise<PurgeUnselectedResult> {
-  const params: unknown[] = [tenantId];
+  const params: unknown[] = [];
   let ageClause = "";
   if (opts.olderThanDays !== undefined) {
     params.push(opts.olderThanDays);
@@ -154,15 +187,14 @@ export async function purgeUnselectedChats(
     ageClause = `
       AND NOT EXISTS (
         SELECT 1 FROM messages m
-        WHERE m.group_id = g.id AND m.sent_at >= now() - make_interval(days => $2::int)
+        WHERE m.group_id = g.id AND m.sent_at >= now() - make_interval(days => $1::int)
       )`;
   }
 
   const { rows: groupRows } = await client.query<{ id: string }>(
     `SELECT g.id
        FROM groups g
-      WHERE g.tenant_id = $1
-        AND NOT EXISTS (
+      WHERE NOT EXISTS (
           SELECT 1 FROM chat_scopes cs
           WHERE cs.group_id = g.id AND cs.included AND cs.removed_at IS NULL
         )${ageClause}`,

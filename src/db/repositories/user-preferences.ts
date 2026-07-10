@@ -1,6 +1,6 @@
 import type pg from "pg";
 
-/** A tenant's preferences. A missing row resolves to env defaults at the caller. */
+/** Saved preferences. A missing row resolves to env defaults at the caller. */
 export type UserPreferences = {
   /** CSV HH:MM (same grammar as DIGEST_TIMES). */
   digestTimes: string;
@@ -38,7 +38,7 @@ function mapRow(r: Row): UserPreferences {
   };
 }
 
-/** The current tenant's preferences row, or null when none has been saved yet. */
+/** The saved preferences row, or null when none has been saved yet. */
 export async function getPreferences(
   client: pg.Pool | pg.PoolClient,
 ): Promise<UserPreferences | null> {
@@ -47,23 +47,6 @@ export async function getPreferences(
        FROM user_preferences LIMIT 1`,
   );
   return rows[0] ? mapRow(rows[0]) : null;
-}
-
-/**
- * Read a SPECIFIC tenant's `digest_times`, or null when no row exists. Intended
- * for the scheduler, which runs outside a request and reads via the operator
- * (BYPASSRLS) pool — hence the explicit tenant filter (not RLS-scoped). Returns
- * null so the caller can fall back to the env default.
- */
-export async function getTenantDigestTimes(
-  operatorClient: pg.Pool | pg.PoolClient,
-  tenantId: string,
-): Promise<string | null> {
-  const { rows } = await operatorClient.query<{ digest_times: string }>(
-    `SELECT digest_times FROM user_preferences WHERE tenant_id = $1`,
-    [tenantId],
-  );
-  return rows[0]?.digest_times ?? null;
 }
 
 /**

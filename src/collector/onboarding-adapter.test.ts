@@ -2,32 +2,28 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_TENANT_ID } from "../db/tenant-context.js";
 import { makeOnboardingRoutes } from "../web/onboarding-routes.js";
-import { SingleTenantOnboardingAdapter } from "./single-tenant-onboarding.js";
+import { OnboardingAdapter } from "./onboarding-adapter.js";
 
-describe("SingleTenantOnboardingAdapter", () => {
+describe("OnboardingAdapter", () => {
   it("starts 'connecting' when no device is linked", () => {
-    const a = new SingleTenantOnboardingAdapter({ initiallyLinked: false });
-    expect(a.snapshot()).toEqual([
-      {
-        tenantId: DEFAULT_TENANT_ID,
-        status: "connecting",
-        restarts: 0,
-        lastError: null,
-        lastConnectedAt: null,
-      },
-    ]);
+    const a = new OnboardingAdapter({ initiallyLinked: false });
+    expect(a.snapshot()).toEqual({
+      status: "connecting",
+      restarts: 0,
+      lastError: null,
+      lastConnectedAt: null,
+    });
   });
 
   it("starts 'connected' when a device is already linked (gate skips onboarding)", () => {
-    const a = new SingleTenantOnboardingAdapter({ initiallyLinked: true });
-    expect(a.snapshot()[0].status).toBe("connected");
+    const a = new OnboardingAdapter({ initiallyLinked: true });
+    expect(a.snapshot().status).toBe("connected");
   });
 
-  it("re-emits the session's events with the default tenant id", () => {
+  it("re-emits the session's events", () => {
     const src = new EventEmitter();
-    const a = new SingleTenantOnboardingAdapter({ initiallyLinked: false });
+    const a = new OnboardingAdapter({ initiallyLinked: false });
     a.attachSession(src);
     const seen: unknown[][] = [];
     a.on("qr", (...args) => seen.push(["qr", ...args]));
@@ -37,26 +33,26 @@ describe("SingleTenantOnboardingAdapter", () => {
     src.emit("history-progress", { progress: 42, count: 9 });
     src.emit("connected");
     expect(seen).toEqual([
-      ["qr", DEFAULT_TENANT_ID, "QR-1"],
-      ["history-progress", DEFAULT_TENANT_ID, { progress: 42, count: 9 }],
-      ["connected", DEFAULT_TENANT_ID],
+      ["qr", "QR-1"],
+      ["history-progress", { progress: 42, count: 9 }],
+      ["connected"],
     ]);
-    expect(a.snapshot()[0].status).toBe("connected");
+    expect(a.snapshot().status).toBe("connected");
   });
 
   it("replays the buffered QR to a late subscriber", () => {
     const src = new EventEmitter();
-    const a = new SingleTenantOnboardingAdapter({ initiallyLinked: false });
+    const a = new OnboardingAdapter({ initiallyLinked: false });
     a.attachSession(src);
     src.emit("qr", "QR-LATE"); // emitted before anyone subscribes
     const got: unknown[][] = [];
     a.on("qr", (...args) => got.push(args)); // subscribe afterwards
-    expect(got).toEqual([[DEFAULT_TENANT_ID, "QR-LATE"]]);
+    expect(got).toEqual([["QR-LATE"]]);
   });
 
   it("does not replay a stale QR once connected", () => {
     const src = new EventEmitter();
-    const a = new SingleTenantOnboardingAdapter({ initiallyLinked: false });
+    const a = new OnboardingAdapter({ initiallyLinked: false });
     a.attachSession(src);
     src.emit("qr", "QR-X");
     src.emit("connected");
@@ -74,11 +70,11 @@ describe("adapter through /api/onboarding/status", () => {
   });
 
   it("serves the adapter's status as the onboarding status", async () => {
-    const a = new SingleTenantOnboardingAdapter({ initiallyLinked: true });
+    const a = new OnboardingAdapter({ initiallyLinked: true });
     const routes = makeOnboardingRoutes({ registry: a });
     server = http.createServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
-      void routes.handle(req, res, url, DEFAULT_TENANT_ID).then((h) => {
+      void routes.handle(req, res, url).then((h) => {
         if (!h) {
           res.writeHead(404);
           res.end("nope");

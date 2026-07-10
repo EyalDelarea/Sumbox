@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events";
-import { DEFAULT_TENANT_ID } from "../db/tenant-context.js";
 import type { OnboardingRegistry } from "../web/onboarding-routes.js";
 import type { SessionHealth, SessionStatus } from "./session-status.js";
 
@@ -16,7 +15,7 @@ export type OnboardingSessionSource = {
   on(event: string, listener: (...args: unknown[]) => void): unknown;
 };
 
-export class SingleTenantOnboardingAdapter implements OnboardingRegistry {
+export class OnboardingAdapter implements OnboardingRegistry {
   private readonly emitter = new EventEmitter();
   private status: SessionStatus;
   private lastQr: string | null = null;
@@ -34,24 +33,24 @@ export class SingleTenantOnboardingAdapter implements OnboardingRegistry {
     session.on("qr", (...a) => {
       this.lastQr = String(a[0]);
       if (this.status !== "connected") this.status = "connecting";
-      this.emitter.emit("qr", DEFAULT_TENANT_ID, a[0]);
+      this.emitter.emit("qr", a[0]);
     });
     session.on("connected", () => {
       this.status = "connected";
       this.lastQr = null;
-      this.emitter.emit("connected", DEFAULT_TENANT_ID);
+      this.emitter.emit("connected");
     });
     session.on("disconnected", () => {
       if (this.status !== "logged-out") this.status = "disconnected";
-      this.emitter.emit("disconnected", DEFAULT_TENANT_ID);
+      this.emitter.emit("disconnected");
     });
     session.on("logged-out", () => {
       this.status = "logged-out";
       this.lastQr = null;
-      this.emitter.emit("logged-out", DEFAULT_TENANT_ID);
+      this.emitter.emit("logged-out");
     });
     session.on("history-progress", (...a) => {
-      this.emitter.emit("history-progress", DEFAULT_TENANT_ID, a[0]);
+      this.emitter.emit("history-progress", a[0]);
     });
   }
 
@@ -60,16 +59,13 @@ export class SingleTenantOnboardingAdapter implements OnboardingRegistry {
     return Promise.resolve();
   }
 
-  snapshot(): SessionHealth[] {
-    return [
-      {
-        tenantId: DEFAULT_TENANT_ID,
-        status: this.status,
-        restarts: 0,
-        lastError: null,
-        lastConnectedAt: null,
-      },
-    ];
+  snapshot(): SessionHealth {
+    return {
+      status: this.status,
+      restarts: 0,
+      lastError: null,
+      lastConnectedAt: null,
+    };
   }
 
   on(event: string, listener: (...args: unknown[]) => void): unknown {
@@ -77,7 +73,7 @@ export class SingleTenantOnboardingAdapter implements OnboardingRegistry {
     // Replay the buffered QR so the Connect step renders immediately instead of
     // waiting for the next ~20s Baileys rotation.
     if (event === "qr" && this.lastQr && this.status !== "connected") {
-      listener(DEFAULT_TENANT_ID, this.lastQr);
+      listener(this.lastQr);
     }
     return this;
   }

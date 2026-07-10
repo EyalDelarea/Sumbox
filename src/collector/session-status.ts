@@ -14,7 +14,6 @@ export type SessionStatus =
   | "logged-out";
 
 export type SessionHealth = {
-  tenantId: string;
   status: SessionStatus;
   /** Failed start attempts consumed for the CURRENT start (supervision counter). */
   restarts: number;
