@@ -23,12 +23,12 @@ import { recordLink, siblingForJid } from "../db/repositories/identity-links.js"
 import { getMessageIdByExternalId, insertMessages } from "../db/repositories/messages.js";
 import { upsertParticipant } from "../db/repositories/participants.js";
 import { normalize } from "../importer/normalize.js";
-import type { ImportedMessage } from "../importer/types.js";
+import type { ImportedMessage, NormalizedMessage } from "../importer/types.js";
 import type { JobBus } from "../jobs/job-bus.js";
 import type { Logger } from "../logging/logger.js";
 import { isGoneError, statusOf } from "./media-backfill-loop.js";
 import { extractMediaDescriptor, type MediaDescriptor } from "./media-descriptor.js";
-import { mapWaMessage } from "./message-mapper.js";
+import { type MappedMessage, mapWaMessage } from "./message-mapper.js";
 
 /**
  * Media kinds that the analysis pipeline can handle. Only these kinds get a
@@ -235,6 +235,123 @@ function logDownloadFailure(
 }
 
 /**
+ * Per-media-kind spec driving the live download → persist → enqueue path for the
+ * three analyzable kinds. Only audio/image/video have entries — sticker and
+ * document are never downloaded or enqueued. Adding a downloadable kind is one
+ * row here instead of another trio of near-identical inline blocks, and each
+ * kind's failure/enqueue rules live together.
+ */
+type LiveMediaSpec = {
+  /** Label passed to logDownloadFailure. */
+  logLabel: "voice-note" | "image" | "video";
+  /** The opts downloader for this kind (undefined → this kind isn't downloaded). */
+  downloaderOf: (opts: CollectorOptions) => ((m: WAMessage) => Promise<Buffer>) | undefined;
+  /** Deterministic on-disk filename (keyed by the Baileys id) for the download. */
+  filenameFor: (externalId: string | null) => string;
+  /**
+   * Per-kind hook run when the download FAILS. Video persists the embedded
+   * jpegThumbnail as an analyzable fallback and returns its path; others no-op.
+   */
+  onDownloadFailure?: (ctx: {
+    mapped: MappedMessage;
+    mediaDir: string;
+    opts: CollectorOptions;
+  }) => string | null;
+  /** Whether to enqueue the analysis job, given the post-download state. */
+  enqueueWhen: (ctx: {
+    downloaderProvided: boolean;
+    mediaStatus: NormalizedMessage["mediaStatus"];
+    thumbnailPath: string | null;
+  }) => boolean;
+  /** Enqueue this kind's job (closes over the literal job type for clean typing). */
+  enqueueJob: (bus: JobBus, messageId: string) => Promise<unknown>;
+};
+
+const LIVE_MEDIA_SPECS: Record<"audio" | "image" | "video", LiveMediaSpec> = {
+  audio: {
+    logLabel: "voice-note",
+    downloaderOf: (o) => o.downloadVoiceNote,
+    filenameFor: liveVoiceNoteFilename,
+    // Enqueue only when the note is actually present on disk (no dead jobs).
+    enqueueWhen: ({ mediaStatus }) => mediaStatus === "present",
+    enqueueJob: (bus, messageId) => bus.enqueue("transcribe.voicenote", { messageId }),
+  },
+  image: {
+    logLabel: "image",
+    downloaderOf: (o) => o.downloadImage,
+    filenameFor: liveImageFilename,
+    // Enqueue only when a downloader was provided and the image is present.
+    enqueueWhen: ({ downloaderProvided, mediaStatus }) =>
+      downloaderProvided && mediaStatus === "present",
+    enqueueJob: (bus, messageId) => bus.enqueue("analyze.image", { messageId }),
+  },
+  video: {
+    logLabel: "video",
+    downloaderOf: (o) => o.downloadVideo,
+    filenameFor: liveVideoFilename,
+    // On download failure, persist the embedded thumbnail as a fallback so the
+    // video can still be described without the full file.
+    onDownloadFailure: ({ mapped, mediaDir, opts }) => {
+      if (!(mapped.jpegThumbnail && mapped.jpegThumbnail.length > 0)) return null;
+      try {
+        fs.mkdirSync(mediaDir, { recursive: true });
+        const thumbPath = path.join(mediaDir, liveVideoThumbnailFilename(mapped.externalId));
+        fs.writeFileSync(thumbPath, mapped.jpegThumbnail);
+        return thumbPath;
+      } catch (err) {
+        opts.log?.warn({ err, externalId: mapped.externalId }, "failed to persist video thumbnail");
+        return null;
+      }
+    },
+    // Enqueue when the video is present OR a thumbnail was persisted (nothing to
+    // describe when neither is available).
+    enqueueWhen: ({ mediaStatus, thumbnailPath }) =>
+      mediaStatus === "present" || thumbnailPath !== null,
+    enqueueJob: (bus, messageId) => bus.enqueue("analyze.video", { messageId }),
+  },
+};
+
+/** The spec for a mapped message's media kind, or undefined (text/sticker/document). */
+function liveMediaSpecFor(mediaKind: MappedMessage["mediaKind"]): LiveMediaSpec | undefined {
+  return mediaKind === "audio" || mediaKind === "image" || mediaKind === "video"
+    ? LIVE_MEDIA_SPECS[mediaKind]
+    : undefined;
+}
+
+/**
+ * Download the media, write it under <dataDir>/media/live, and set
+ * media_path/media_status on `normalized` — 'present' on success, 'missing' on
+ * failure (logged). Returns the video thumbnail-fallback path when the download
+ * failed and the kind's onDownloadFailure hook persisted one, else null.
+ */
+async function downloadAndPersistMedia(args: {
+  spec: LiveMediaSpec;
+  downloader: (m: WAMessage) => Promise<Buffer>;
+  waMessage: WAMessage;
+  mapped: MappedMessage;
+  mediaFilename: string;
+  normalized: NormalizedMessage;
+  opts: CollectorOptions;
+}): Promise<string | null> {
+  const { spec, downloader, waMessage, mapped, mediaFilename, normalized, opts } = args;
+  const mediaDir = path.join(opts.dataDir, "media", "live");
+  try {
+    const buf = await downloader(waMessage);
+    fs.mkdirSync(mediaDir, { recursive: true });
+    const filePath = path.join(mediaDir, mediaFilename);
+    fs.writeFileSync(filePath, buf);
+    normalized.mediaPath = filePath;
+    normalized.mediaStatus = "present";
+    return null;
+  } catch (err) {
+    logDownloadFailure(opts.log, spec.logLabel, mapped.externalId, err);
+    normalized.mediaPath = null;
+    normalized.mediaStatus = "missing";
+    return spec.onDownloadFailure ? spec.onDownloadFailure({ mapped, mediaDir, opts }) : null;
+  }
+}
+
+/**
  * Handle a single incoming Baileys WAMessage:
  * 1. Map the Baileys message → our domain shape (returns null → ignore).
  * 2. Upsert the group by JID.
@@ -353,26 +470,14 @@ export async function handleIncomingMessage(
   // --- Upsert participant ---
   const participantId = await upsertParticipant(client, mapped.senderName);
 
-  // For a voice note we intend to download, give it a deterministic `.opus`
-  // filename up front so the dedupe key is stable across re-deliveries.
-  const willDownload = mapped.mediaKind === "audio" && typeof opts.downloadVoiceNote === "function";
-  // For an image we intend to download, give it a deterministic `.jpg`
-  // filename up front so the dedupe key is stable across re-deliveries.
-  // (Stickers are a distinct mediaKind, so they never match here.)
-  const willDownloadImage =
-    mapped.mediaKind === "image" && typeof opts.downloadImage === "function";
-  // For a video we intend to download, give it a deterministic `.mp4`
-  // filename up front. If download is not provided (or fails) but a jpegThumbnail
-  // is present, we still persist the thumbnail and enqueue analyze.video.
-  const willDownloadVideo =
-    mapped.mediaKind === "video" && typeof opts.downloadVideo === "function";
-  const mediaFilename = willDownload
-    ? liveVoiceNoteFilename(mapped.externalId)
-    : willDownloadImage
-      ? liveImageFilename(mapped.externalId)
-      : willDownloadVideo
-        ? liveVideoFilename(mapped.externalId)
-        : mapped.mediaFilename;
+  // Select the download spec for this message's media kind (audio/image/video).
+  // Sticker/document/text have no spec → never downloaded or enqueued. When a
+  // downloader is wired for the kind, give the media a deterministic filename up
+  // front so the dedupe key is stable across re-deliveries.
+  const mediaSpec = liveMediaSpecFor(mapped.mediaKind);
+  const downloader = mediaSpec?.downloaderOf(opts);
+  const mediaFilename =
+    mediaSpec && downloader ? mediaSpec.filenameFor(mapped.externalId) : mapped.mediaFilename;
 
   // --- Normalize ---
   const importedMsg: ImportedMessage = {
@@ -395,80 +500,22 @@ export async function handleIncomingMessage(
     return false;
   }
 
-  // --- Download voice-note media (so it becomes transcribable) ---
-  // Sets media_path + media_status='present' on success; 'missing' on failure.
-  // A failed/absent download leaves the note non-transcribable (and un-enqueued)
-  // rather than silently dropping it — the row is still recorded.
-  if (willDownload) {
-    try {
-      const buf = await opts.downloadVoiceNote!(waMessage);
-      const mediaDir = path.join(opts.dataDir, "media", "live");
-      fs.mkdirSync(mediaDir, { recursive: true });
-      const filePath = path.join(mediaDir, mediaFilename!);
-      fs.writeFileSync(filePath, buf);
-      normalized.mediaPath = filePath;
-      normalized.mediaStatus = "present";
-    } catch (err) {
-      logDownloadFailure(opts.log, "voice-note", mapped.externalId, err);
-      normalized.mediaPath = null;
-      normalized.mediaStatus = "missing";
-    }
-  }
-
-  // --- Download image media (so it becomes analyzable) ---
-  // Sets media_path + media_status='present' on success; 'missing' on failure.
-  // Skip stickers — they are not enqueued for visual analysis.
-  if (willDownloadImage) {
-    try {
-      const buf = await opts.downloadImage!(waMessage);
-      const mediaDir = path.join(opts.dataDir, "media", "live");
-      fs.mkdirSync(mediaDir, { recursive: true });
-      const filePath = path.join(mediaDir, mediaFilename!);
-      fs.writeFileSync(filePath, buf);
-      normalized.mediaPath = filePath;
-      normalized.mediaStatus = "present";
-    } catch (err) {
-      logDownloadFailure(opts.log, "image", mapped.externalId, err);
-      normalized.mediaPath = null;
-      normalized.mediaStatus = "missing";
-    }
-  }
-
-  // --- Download video media (so it becomes analyzable) ---
-  // Only active when a downloadVideo downloader is provided (opt-in).
-  // On success: sets media_path + media_status='present'.
-  // On failure: if jpegThumbnail is present, persist it as a fallback so
-  //   analyzeVideo can still describe the video without the full file.
-  // Stickers are excluded by willDownloadVideo (a distinct mediaKind).
+  // --- Download + persist media (voice notes / images / videos) ---
+  // One routine driven by the kind's spec: sets media_path + media_status to
+  // 'present' on success or 'missing' on failure (logged), leaving the row
+  // recorded either way. The video kind's onDownloadFailure hook persists the
+  // embedded jpegThumbnail as an analyzable fallback and returns its path.
   let videoThumbnailPath: string | null = null;
-  if (willDownloadVideo) {
-    const mediaDir = path.join(opts.dataDir, "media", "live");
-    let downloadSucceeded = false;
-    try {
-      const buf = await opts.downloadVideo!(waMessage);
-      fs.mkdirSync(mediaDir, { recursive: true });
-      const filePath = path.join(mediaDir, mediaFilename!);
-      fs.writeFileSync(filePath, buf);
-      normalized.mediaPath = filePath;
-      normalized.mediaStatus = "present";
-      downloadSucceeded = true;
-    } catch (err) {
-      logDownloadFailure(opts.log, "video", mapped.externalId, err);
-      normalized.mediaPath = null;
-      normalized.mediaStatus = "missing";
-    }
-    // Persist embedded thumbnail as fallback when download failed but thumbnail is available
-    if (!downloadSucceeded && mapped.jpegThumbnail && mapped.jpegThumbnail.length > 0) {
-      try {
-        fs.mkdirSync(mediaDir, { recursive: true });
-        const thumbFilename = liveVideoThumbnailFilename(mapped.externalId);
-        const thumbPath = path.join(mediaDir, thumbFilename);
-        fs.writeFileSync(thumbPath, mapped.jpegThumbnail);
-        videoThumbnailPath = thumbPath;
-      } catch (err) {
-        opts.log?.warn({ err, externalId: mapped.externalId }, "failed to persist video thumbnail");
-      }
-    }
+  if (mediaSpec && downloader) {
+    videoThumbnailPath = await downloadAndPersistMedia({
+      spec: mediaSpec,
+      downloader,
+      waMessage,
+      mapped,
+      mediaFilename: mediaFilename!,
+      normalized,
+      opts,
+    });
   }
 
   // --- Insert ---
@@ -504,49 +551,20 @@ export async function handleIncomingMessage(
   // is never gated — only the analysis enqueues below are conditional on this.
   const analyze = opts.isGroupIncluded ? await opts.isGroupIncluded(groupId) : true;
 
-  // --- Enqueue transcription for new, downloaded voice notes ---
-  // Only enqueue when the media is actually present on disk, so the worker
-  // always has a file to transcribe (no dead jobs).
-  if (
-    isNew &&
-    mapped.mediaKind === "audio" &&
-    opts.bus &&
-    normalized.mediaStatus === "present" &&
-    analyze
-  ) {
-    const messageId = result.ids[0];
-    if (messageId !== undefined) {
-      await opts.bus.enqueue("transcribe.voicenote", {
-        messageId: String(messageId),
-      });
-    }
-  }
-
-  // --- Enqueue analysis for new, downloaded non-sticker images ---
-  // Only enqueue when the media is actually present on disk.
-  // Stickers are already excluded by willDownloadImage (a distinct mediaKind).
-  if (isNew && willDownloadImage && opts.bus && normalized.mediaStatus === "present" && analyze) {
-    const messageId = result.ids[0];
-    if (messageId !== undefined) {
-      await opts.bus.enqueue("analyze.image", {
-        messageId: String(messageId),
-      });
-    }
-  }
-
-  // --- Enqueue analysis for new videos ---
-  // Enqueue when: media is present (downloaded) OR a thumbnail was persisted.
-  // Never enqueue when neither is available (nothing to describe).
-  // (Stickers are a distinct mediaKind, so they never match here.)
-  if (isNew && mapped.mediaKind === "video" && opts.bus && analyze) {
-    const hasMedia = normalized.mediaStatus === "present";
-    const hasThumbnail = videoThumbnailPath !== null;
-    if (hasMedia || hasThumbnail) {
+  // --- Enqueue the analysis/transcription job for new, eligible media ---
+  // One gate per kind (spec.enqueueWhen): voice/image require the media present
+  // on disk; video also accepts a persisted thumbnail. No bus/spec, or a chat
+  // excluded from analysis → no enqueue. Sticker/document/text have no spec.
+  if (isNew && mediaSpec && opts.bus && analyze) {
+    const eligible = mediaSpec.enqueueWhen({
+      downloaderProvided: downloader !== undefined,
+      mediaStatus: normalized.mediaStatus,
+      thumbnailPath: videoThumbnailPath,
+    });
+    if (eligible) {
       const messageId = result.ids[0];
       if (messageId !== undefined) {
-        await opts.bus.enqueue("analyze.video", {
-          messageId: String(messageId),
-        });
+        await mediaSpec.enqueueJob(opts.bus, String(messageId));
       }
     }
   }
