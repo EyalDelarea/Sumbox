@@ -50,8 +50,9 @@ export async function listCommandPermissions(
 }
 
 /**
- * Get enabled group JIDs for a command. Returns the group's whatsapp_id so
- * the allowlist can be populated from DB at startup and on hot-reload.
+ * Get enabled group JIDs for a command. Returns the group's whatsapp_id. Read
+ * live — per message by the /סיכום matcher, per send by the outbound guard —
+ * never snapshotted, so a toggle in the UI needs no restart or reload channel.
  */
 export async function getEnabledGroupJids(
   client: pg.Pool | pg.PoolClient,
