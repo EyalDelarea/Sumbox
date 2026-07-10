@@ -30,10 +30,12 @@
  *     command from an unlisted group")
  *  3. Fail closed — if the per-message DB resolve throws, no send is attempted.
  *     .............................. summary-command.test.ts ("fails CLOSED …")
- *  4. Toggle-off is immediate, every topology — the enabled set is re-read from
- *     the DB per message, so disabling a group stops replies on the next one, no
+ *  4. Toggling is immediate, every topology — the enabled set is re-read from
+ *     the DB per message by the matcher AND per send by the outbound guard, so
+ *     enabling or disabling a group takes effect on the next message, no
  *     restart. ...................... summary-command.test.ts ("toggle-off is
- *     immediate …")
+ *     immediate …"), outbound-guard.test.ts ("a JID enabled after the guard was
+ *     applied can send …")
  *  5. Verified inbound group id, never a name lookup (#123) — the summary is run
  *     for the resolved inbound groupId, so it can't cross chats/tenants. ........
  *     summary-command.test.ts (run called with `groupId: 7`)

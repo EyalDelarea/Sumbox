@@ -316,21 +316,13 @@ export async function startServe(options: { port?: string; collect?: boolean }):
       const { startSession } = await import("../collector/session.js");
       const { attachCollector } = await import("../service/live-service.js");
 
-      // One-shot startup snapshot for the outbound guard's own allowlist (see
-      // outbound-guard.ts — unchanged, unrelated to the matcher). This is NOT a
-      // cache the matcher reads: maybeHandleSummaryCommand always re-resolves
-      // per message via cmdDeps.resolveEnabledJids, so toggling a group OFF (or
-      // editing the trigger) takes effect immediately with no restart — that is
-      // this task's guarantee. Toggling a group ON in read-only mode is NOT
-      // instant: the guard only permits sends to JIDs in THIS startup snapshot,
-      // and (per the brief) nothing re-applies it after connect — so a brand
-      // new group enabled after boot needs a restart before its first reply can
-      // actually send (the matcher will match and try, but sendText throws,
-      // caught and logged as a failure). Pre-existing behavior, out of this
-      // task's scope; see the report's uncertainties.
+      // The outbound guard reads the SAME live DB resolver the matcher uses, per
+      // send — never a startup snapshot. So toggling a group on or off in the UI
+      // takes effect on the very next message, with no restart, and the guard can
+      // never disagree with the matcher about who is enabled.
       const authDir = path.join(config.dataDir, "baileys-auth");
       const session = await startSession(authDir, config.whatsapp.allowSend, {
-        allowlist: [...(await cmdDeps.resolveEnabledJids())],
+        allowlist: cmdDeps.resolveEnabledJids,
       });
       liveSession = session;
 

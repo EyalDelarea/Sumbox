@@ -201,20 +201,15 @@ program
       );
     } else {
       collectorLog.info(
-        "🔒 Read-only mode: passive observer — will NOT send messages, read receipts, or presence (set WHATSAPP_ALLOW_SEND=true to enable). /סיכום replies to groups enabled at startup still send — see group_command_permissions; a group enabled after startup needs a restart before its first reply can send.",
+        "🔒 Read-only mode: passive observer — will NOT send messages, read receipts, or presence (set WHATSAPP_ALLOW_SEND=true to enable). /סיכום replies still send to groups enabled in group_command_permissions — toggling one on or off takes effect on the next message, no restart.",
       );
     }
 
-    // One-shot startup snapshot for the outbound guard's own allowlist (see
-    // outbound-guard.ts — unchanged, unrelated to the matcher, which always
-    // re-resolves per message via cmdDeps.resolveEnabledJids). Toggling a group
-    // OFF is instant (the matcher never attempts the send); toggling one ON in
-    // read-only mode is NOT — the guard only permits this snapshot's JIDs and
-    // nothing re-applies it after connect, so a brand-new group needs a
-    // restart before its first reply can actually send. Pre-existing, out of
-    // this task's scope.
+    // The outbound guard reads the SAME live DB resolver the matcher uses, per
+    // send — never a startup snapshot — so a group toggled on or off in the UI
+    // takes effect on the very next message, with no restart.
     const session = await startSession(authDir, config.whatsapp.allowSend, {
-      allowlist: [...(await cmdDeps.resolveEnabledJids())],
+      allowlist: cmdDeps.resolveEnabledJids,
     });
 
     session.on("qr", () => {
