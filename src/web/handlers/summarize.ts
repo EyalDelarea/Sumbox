@@ -5,11 +5,10 @@ import { countReadableByGroup, getOldestSentAt } from "../../db/repositories/mes
 import { upsertWatermark } from "../../db/repositories/read-watermarks.js";
 import { insertSummary } from "../../db/repositories/summaries.js";
 import { normalizeSummaryOutput } from "../../summarization/normalize.js";
-import { parseStructuredSummary } from "../../summarization/parse-structured.js";
 import { prepareSummary } from "../../summarization/prepare.js";
 import { prepareRegenerate } from "../../summarization/prepare-regenerate.js";
 import { prepareSumbox } from "../../summarization/prepare-sumbox.js";
-import { persistSumboxResult } from "../../summarization/run-summary.js";
+import { persistSumboxResult, streamSummary } from "../../summarization/run-summary.js";
 import type { Selection } from "../../summarization/select.js";
 import { sseFrame } from "../sse.js";
 import { type ServerDeps, SUMBOX_FALLBACK_N } from "./context.js";
@@ -125,24 +124,24 @@ export async function handleSummarize(
           mediaJobsAhead,
         });
         const startRegen = Date.now();
-        let fullRegen = "";
-        for await (const delta of deps.summarizer.summarizeStream(regen.prompt, {
+        const result = await streamSummary({
+          tokens: deps.summarizer.summarizeStream(regen.prompt, { signal: ac.signal }),
+          indexMap: regen.indexMap,
           signal: ac.signal,
-        })) {
-          fullRegen += delta;
-          send("token", { delta });
-        }
-        if (ac.signal.aborted) return;
-        const structuredRegen = parseStructuredSummary(fullRegen, regen.indexMap);
-        // Insert directly (NOT persistSumboxResult) so the read-watermark stays put.
-        const regenSummaryId = await insertSummary(deps.pool, {
-          groupId: regen.groupId,
-          summaryType: regen.summaryType,
-          parameters: regen.parameters,
-          output: structuredRegen,
-          model: deps.model,
-          regeneratedFromId: regen.regeneratedFromId,
+          onToken: (delta) => send("token", { delta }),
+          // Insert only (NOT persistSumboxResult) so the read-watermark stays put.
+          persist: (output) =>
+            insertSummary(deps.pool, {
+              groupId: regen.groupId,
+              summaryType: regen.summaryType,
+              parameters: regen.parameters,
+              output,
+              model: deps.model,
+              regeneratedFromId: regen.regeneratedFromId,
+            }),
         });
+        if (result.aborted) return;
+        const { output: structuredRegen, summaryId: regenSummaryId } = result;
         deps.logger?.info(
           {
             evt: "summarize",
@@ -192,30 +191,29 @@ export async function handleSummarize(
         mediaJobsAhead,
       });
       const start = Date.now();
-      let full = "";
-      for await (const delta of deps.summarizer.summarizeStream(prepared.prompt, {
+      const result = await streamSummary({
+        tokens: deps.summarizer.summarizeStream(prepared.prompt, { signal: ac.signal }),
+        indexMap: prepared.indexMap,
         signal: ac.signal,
-      })) {
-        full += delta;
-        send("token", { delta });
-      }
-      // Guard: if the client disconnected, do NOT commit partial summary or advance watermark.
-      if (ac.signal.aborted) return;
-      // Parse the streamed prose into the fielded schema once, at completion.
-      const structured = parseStructuredSummary(full, prepared.indexMap);
-      // Commit only after the stream completes successfully.
-      // Shared persist helper: summary row first, watermark second (no partial state).
-      const summaryId = await persistSumboxResult({
-        pool: deps.pool,
-        groupId: prepared.groupId,
-        summaryType: prepared.summaryType,
-        parameters: prepared.parameters,
-        output: structured,
-        model: deps.model,
-        newWatermark: prepared.newWatermark,
-        insertSummary,
-        updateWatermark: upsertWatermark,
+        onToken: (delta) => send("token", { delta }),
+        // Commit only after a successful stream — summary row first, watermark
+        // second (no partial state), via the shared sumbox commit helper.
+        persist: (output) =>
+          persistSumboxResult({
+            pool: deps.pool,
+            groupId: prepared.groupId,
+            summaryType: prepared.summaryType,
+            parameters: prepared.parameters,
+            output,
+            model: deps.model,
+            newWatermark: prepared.newWatermark,
+            insertSummary,
+            updateWatermark: upsertWatermark,
+          }),
       });
+      // Guard: if the client disconnected, do NOT commit partial summary or advance watermark.
+      if (result.aborted) return;
+      const { output: structured, summaryId } = result;
       deps.logger?.info(
         {
           evt: "summarize",
@@ -278,23 +276,23 @@ export async function handleSummarize(
     const mediaJobsAhead = await countInFlightMediaJobs(deps.pool);
     send("status", { messages: prepared.messageCount, stale, mediaJobsAhead });
     const start = Date.now();
-    let full = "";
-    for await (const delta of deps.summarizer.summarizeStream(prepared.prompt, {
+    const result = await streamSummary({
+      tokens: deps.summarizer.summarizeStream(prepared.prompt, { signal: ac.signal }),
+      indexMap: prepared.indexMap,
       signal: ac.signal,
-    })) {
-      full += delta;
-      send("token", { delta });
-    }
-    // Guard: if the client disconnected, do NOT commit partial summary.
-    if (ac.signal.aborted) return;
-    const structured = parseStructuredSummary(full, prepared.indexMap);
-    const summaryId = await insertSummary(deps.pool, {
-      groupId: prepared.groupId,
-      summaryType: prepared.summaryType,
-      parameters: prepared.parameters,
-      output: structured,
-      model: deps.model,
+      onToken: (delta) => send("token", { delta }),
+      persist: (output) =>
+        insertSummary(deps.pool, {
+          groupId: prepared.groupId,
+          summaryType: prepared.summaryType,
+          parameters: prepared.parameters,
+          output,
+          model: deps.model,
+        }),
     });
+    // Guard: if the client disconnected, do NOT commit partial summary.
+    if (result.aborted) return;
+    const { output: structured, summaryId } = result;
     deps.logger?.info(
       {
         evt: "summarize",

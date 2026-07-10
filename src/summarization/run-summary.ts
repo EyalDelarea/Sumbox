@@ -60,6 +60,50 @@ export async function persistSumboxResult(opts: SumboxResultToPersist): Promise<
   return summaryId;
 }
 
+export type StreamSummaryResult =
+  | { aborted: true }
+  | { aborted: false; output: SummaryOutput; summaryId: number };
+
+/**
+ * The single streaming spine shared by the /api/summarize SSE handler's three
+ * variants (sumbox / regenerate / last-since), which previously reimplemented it
+ * inline. It mirrors the accumulate → parse → commit shape that the non-streaming
+ * `summarizeAndPersist` implements one-shot (a parallel implementation, not a
+ * shared call path — that core takes a full-string `summarize()` and also
+ * materializes entities). It:
+ *   1. accumulates the full prose from a token iterable, emitting each delta to
+ *      `onToken` (the SSE handler sends a `token` event; the batch path passes
+ *      no sink),
+ *   2. guards against a mid-stream client disconnect — if `signal` aborted, it
+ *      returns `{ aborted: true }` and commits NOTHING (no partial summary, no
+ *      watermark advance),
+ *   3. parses the completed prose into the fielded schema once, and
+ *   4. commits via the caller's `persist` policy (sumbox advances the read
+ *      watermark via persistSumboxResult; regenerate/last-since insert only).
+ *
+ * Callers differ ONLY by token source, `onToken` sink, and `persist` policy.
+ */
+export async function streamSummary(args: {
+  tokens: AsyncIterable<string>;
+  indexMap: Map<number, number>;
+  persist: (output: SummaryOutput) => Promise<number>;
+  signal?: AbortSignal;
+  onToken?: (delta: string) => void;
+}): Promise<StreamSummaryResult> {
+  let full = "";
+  for await (const delta of args.tokens) {
+    full += delta;
+    args.onToken?.(delta);
+  }
+  // Client disconnected mid-stream → never commit a partial or advance a watermark.
+  if (args.signal?.aborted) {
+    return { aborted: true };
+  }
+  const output = parseStructuredSummary(full, args.indexMap);
+  const summaryId = await args.persist(output);
+  return { aborted: false, output, summaryId };
+}
+
 /**
  * Injected dependencies for summarizeAndPersist.
  * All I/O is injected for testability — no live Ollama or DB required in tests.
