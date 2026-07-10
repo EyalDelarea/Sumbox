@@ -62,6 +62,11 @@ program
         // exits, so it is gated on NODE_ENV=test and can NEVER be activated
         // in production (where it would silently swallow enqueued jobs).
         let bus: JobBus;
+        // The RabbitMQ bus records job runs through a Postgres pool; the in-memory
+        // test bus has none. Track it so it is closed after the bus — the in-memory
+        // branch leaves it null (nothing to end). This is the ONE place that keeps a
+        // non-Rabbit bus (the NODE_ENV=test seam), so it stays outside withJobInfra.
+        let recorderPool: import("pg").Pool | null = null;
         if (process.env["USE_IN_MEMORY_BUS"] === "1" && process.env["NODE_ENV"] === "test") {
           const { InMemoryJobBus } = await import("./jobs/in-memory-bus.js");
           const { InMemoryJobRunRecorder } = await import("./jobs/job-run-recorder.js");
@@ -71,14 +76,15 @@ program
           const { PostgresJobRunRecorder } = await import("./jobs/job-run-recorder.js");
           const { createDbClient } = await import("./db/client.js");
           const config = loadConfig();
-          const dbClient = createDbClient();
-          const recorder = new PostgresJobRunRecorder(dbClient);
+          recorderPool = createDbClient();
+          const recorder = new PostgresJobRunRecorder(recorderPool);
           bus = new RabbitMqJobBus({ url: config.broker.url, recorder });
         }
 
         const result = await enqueueFolder(bus, folder);
         console.log(`Enqueued ${result.enqueued} import jobs.`);
         await bus.close();
+        if (recorderPool) await recorderPool.end();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         process.stderr.write(`Error: Failed to enqueue folder: ${message}\n`);
@@ -338,8 +344,8 @@ program
   .description("List imported WhatsApp groups and chats")
   .action(async () => {
     const { listGroups } = await import("./db/repositories/groups.js");
-    const pg = await import("pg");
-    const pool = new pg.default.Pool({ connectionString: loadConfig().databaseUrl });
+    const { createDbClient } = await import("./db/client.js");
+    const pool = createDbClient();
     try {
       const groups = await listGroups(pool);
       if (groups.length === 0) {
@@ -462,46 +468,30 @@ program
       (options.types ?? "analyze.image,analyze.video").split(",").map((s) => s.trim()),
     );
 
-    const [
-      { RabbitMqJobBus },
-      { PostgresJobRunRecorder },
-      { createDbClient },
-      pg,
-      { selectVisualMediaNeedingAnalysis },
-    ] = await Promise.all([
-      import("./jobs/rabbitmq-bus.js"),
-      import("./jobs/job-run-recorder.js"),
-      import("./db/client.js"),
-      import("pg"),
+    const [{ selectVisualMediaNeedingAnalysis }, { withJobInfra }] = await Promise.all([
       import("./db/repositories/media-analyses.js"),
+      import("./jobs/with-job-infra.js"),
     ]);
 
-    const config = loadConfig();
-    const pool = new pg.default.Pool({ connectionString: config.databaseUrl });
-    const dbClient = createDbClient();
-    const recorder = new PostgresJobRunRecorder(dbClient);
-    const bus = new RabbitMqJobBus({ url: config.broker.url, recorder });
+    await withJobInfra(async ({ pool, bus }) => {
+      try {
+        const rows = await selectVisualMediaNeedingAnalysis(pool, limit);
 
-    try {
-      const rows = await selectVisualMediaNeedingAnalysis(pool, limit);
+        let enqueued = 0;
+        for (const { messageId, kind } of rows) {
+          const jobType = kind === "video" ? "analyze.video" : "analyze.image";
+          if (!allowedTypes.has(jobType)) continue;
+          await bus.enqueue(jobType, { messageId: String(messageId) });
+          enqueued++;
+        }
 
-      let enqueued = 0;
-      for (const { messageId, kind } of rows) {
-        const jobType = kind === "video" ? "analyze.video" : "analyze.image";
-        if (!allowedTypes.has(jobType)) continue;
-        await bus.enqueue(jobType, { messageId: String(messageId) });
-        enqueued++;
+        console.log(`Enqueued ${enqueued} analyze job(s).`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`Error: analyze-backlog failed: ${message}\n`);
+        process.exit(1);
       }
-
-      console.log(`Enqueued ${enqueued} analyze job(s).`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Error: analyze-backlog failed: ${message}\n`);
-      process.exit(1);
-    } finally {
-      await pool.end();
-      await bus.close();
-    }
+    });
   });
 
 program
@@ -529,7 +519,6 @@ program
       mediaRepo,
       msgRepo,
       chatScopes,
-      pgMod,
       fsp,
       nodePath,
       { RabbitMqJobBus },
@@ -542,7 +531,6 @@ program
       import("./db/repositories/message-media.js"),
       import("./db/repositories/messages.js"),
       import("./db/repositories/chat-scopes.js"),
-      import("pg"),
       import("node:fs/promises"),
       import("node:path"),
       import("./jobs/rabbitmq-bus.js"),
@@ -550,9 +538,9 @@ program
       import("./db/client.js"),
     ]);
 
-    const pool = new pgMod.default.Pool({ connectionString: config.databaseUrl });
-    const dbClient = createDbClient();
-    const recorder = new PostgresJobRunRecorder(dbClient);
+    // One pool serves both the backfill queries and the job-run recorder.
+    const pool = createDbClient();
+    const recorder = new PostgresJobRunRecorder(pool);
     const bus = new RabbitMqJobBus({ url: config.broker.url, recorder });
     const authDir = options.authDir ?? path.join(config.dataDir, "baileys-fullsync-auth");
     const session = await startSession(authDir, false, {});
@@ -629,102 +617,68 @@ program
   )
   .option("--all", "Enqueue all groups regardless of whether they have new messages")
   .action(async (options: { all?: boolean }) => {
-    const [
-      { RabbitMqJobBus },
-      { PostgresJobRunRecorder },
-      { createDbClient },
-      pg,
-      { enqueueScheduledRun },
-    ] = await Promise.all([
-      import("./jobs/rabbitmq-bus.js"),
-      import("./jobs/job-run-recorder.js"),
-      import("./db/client.js"),
-      import("pg"),
+    const [{ enqueueScheduledRun }, { withJobInfra }] = await Promise.all([
       import("./scheduler/enqueue-run.js"),
+      import("./jobs/with-job-infra.js"),
     ]);
 
-    const config = loadConfig();
-    const pool = new pg.default.Pool({ connectionString: config.databaseUrl });
-    const dbClient = createDbClient();
-    const recorder = new PostgresJobRunRecorder(dbClient);
-    const bus = new RabbitMqJobBus({ url: config.broker.url, recorder });
-
-    try {
-      const result = await enqueueScheduledRun(pool, bus, { all: options.all === true });
-      console.log(`Enqueued ${result.enqueued} (skipped ${result.skipped})`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Error: digest-run failed: ${message}\n`);
-      process.exit(1);
-    } finally {
-      await pool.end();
-      await bus.close();
-    }
+    await withJobInfra(async ({ pool, bus }) => {
+      try {
+        const result = await enqueueScheduledRun(pool, bus, { all: options.all === true });
+        console.log(`Enqueued ${result.enqueued} (skipped ${result.skipped})`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`Error: digest-run failed: ${message}\n`);
+        process.exit(1);
+      }
+    });
   });
 
 program
   .command("ops-sweep")
   .description("Manually trigger one ops sweep: re-drive dead jobs and record a status snapshot")
   .action(async () => {
-    const config = loadConfig();
-
-    const [
-      { RabbitMqJobBus },
-      { PostgresJobRunRecorder },
-      { createDbClient },
-      pg,
-      { runOpsSweep },
-      { DEFAULT_STALENESS_MS },
-    ] = await Promise.all([
-      import("./jobs/rabbitmq-bus.js"),
-      import("./jobs/job-run-recorder.js"),
-      import("./db/client.js"),
-      import("pg"),
+    const [{ runOpsSweep }, { DEFAULT_STALENESS_MS }, { withJobInfra }] = await Promise.all([
       import("./ops/sweep.js"),
       import("./service/status.js"),
+      import("./jobs/with-job-infra.js"),
     ]);
 
-    const pool = new pg.default.Pool({ connectionString: config.databaseUrl });
-    const dbClient = createDbClient();
-    const recorder = new PostgresJobRunRecorder(dbClient);
-    const bus = new RabbitMqJobBus({ url: config.broker.url, recorder });
+    await withJobInfra(async ({ pool, bus, config }) => {
+      const getQueueDepths = async () => {
+        const types = ["import.file", "transcribe.voicenote"] as const;
+        const result: Record<string, number> = {};
+        await Promise.all(
+          types.map(async (type) => {
+            try {
+              result[type] = await bus.depth(type);
+            } catch {
+              // broker unreachable for this type — omit so depth stays null
+            }
+          }),
+        );
+        return result as Partial<Record<(typeof types)[number], number>>;
+      };
 
-    const getQueueDepths = async () => {
-      const types = ["import.file", "transcribe.voicenote"] as const;
-      const result: Record<string, number> = {};
-      await Promise.all(
-        types.map(async (type) => {
-          try {
-            result[type] = await bus.depth(type);
-          } catch {
-            // broker unreachable for this type — omit so depth stays null
-          }
-        }),
-      );
-      return result as Partial<Record<(typeof types)[number], number>>;
-    };
-
-    try {
-      const snap = await runOpsSweep({
-        pool,
-        bus,
-        getQueueDepths,
-        stalenessMs: DEFAULT_STALENESS_MS,
-        cap: config.opsSweep.redriveCap,
-        logger: undefined,
-        now: () => new Date(),
-      });
-      console.log(
-        `Ops sweep complete: re-driven ${snap.redriven}, flagged ${snap.flagged}, dead ${snap.jobsDead} (snapshot ${snap.id}).`,
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Error: ops-sweep failed: ${message}\n`);
-      process.exit(1);
-    } finally {
-      await pool.end();
-      await bus.close();
-    }
+      try {
+        const snap = await runOpsSweep({
+          pool,
+          bus,
+          getQueueDepths,
+          stalenessMs: DEFAULT_STALENESS_MS,
+          cap: config.opsSweep.redriveCap,
+          logger: undefined,
+          now: () => new Date(),
+        });
+        console.log(
+          `Ops sweep complete: re-driven ${snap.redriven}, flagged ${snap.flagged}, dead ${snap.jobsDead} (snapshot ${snap.id}).`,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`Error: ops-sweep failed: ${message}\n`);
+        process.exit(1);
+      }
+    });
   });
 
 program
@@ -765,8 +719,8 @@ program
   .option("--apply", "Actually perform the merges (default: dry-run, no writes)")
   .action(async (options: { apply?: boolean }) => {
     const config = loadConfig();
-    const pg = await import("pg");
-    const pool = new pg.default.Pool({ connectionString: config.databaseUrl });
+    const { createDbClient } = await import("./db/client.js");
+    const pool = createDbClient();
     const { startSession } = await import("./collector/session.js");
     const { findMergeCandidates, mergeGroups } = await import("./db/repositories/merge.js");
 
@@ -888,12 +842,12 @@ program
 
     const config = loadConfig();
     const collectorLog = getLogger("collector");
-    const [{ startSession }, { handleIncomingMessage }, pgMod] = await Promise.all([
+    const [{ startSession }, { handleIncomingMessage }, { createDbClient }] = await Promise.all([
       import("./collector/session.js"),
       import("./collector/collector.js"),
-      import("pg"),
+      import("./db/client.js"),
     ]);
-    const pool = new pgMod.default.Pool({ connectionString: config.databaseUrl });
+    const pool = createDbClient();
 
     // whitelist === null → keep ALL chats (--all). Otherwise jid -> display name.
     let whitelist: Map<string, string> | null = null;
