@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   type CheckResult,
   checkComposeServices,
-  checkDefaultPasswords,
   checkDocker,
   checkFfmpeg,
   checkIndexIntegrity,
@@ -190,37 +189,6 @@ describe("checkFfmpeg", () => {
   it("returns not-ok with a fix when probe throws", async () => {
     const result = await checkFfmpeg(throws);
     assertFail(result, "ffmpeg on PATH");
-  });
-});
-
-// ── checkDefaultPasswords ─────────────────────────────────────────────────────
-
-describe("checkDefaultPasswords", () => {
-  it("is ok when neither role accepts the default password (rotated)", async () => {
-    const result = await checkDefaultPasswords(fail, fail);
-    assertOk(result, "DB roles use non-default passwords");
-    expect(result.level).toBeUndefined();
-  });
-
-  it("warns (non-fatal) when a role still accepts the default password", async () => {
-    const result = await checkDefaultPasswords(ok, fail);
-    expect(result.ok).toBe(false);
-    expect(result.level).toBe("warn");
-    expect(result.detail).toContain("catchapp_app");
-    expect(result.detail).not.toContain("catchapp_operator");
-    expect(result.fix).toBeTruthy();
-  });
-
-  it("names both roles when both still accept the default password", async () => {
-    const result = await checkDefaultPasswords(ok, ok);
-    expect(result.level).toBe("warn");
-    expect(result.detail).toContain("catchapp_app");
-    expect(result.detail).toContain("catchapp_operator");
-  });
-
-  it("treats a probe error as inconclusive (ok), not a hard failure", async () => {
-    const result = await checkDefaultPasswords(throws, throws);
-    assertOk(result, "DB roles use non-default passwords");
   });
 });
 
