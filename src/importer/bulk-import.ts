@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { currentTenantId } from "../db/tenant-context.js";
 import type { JobBus } from "../jobs/job-bus.js";
 
 const EXPORT_EXTENSIONS = new Set([".txt", ".zip"]);
@@ -43,7 +42,7 @@ export async function enqueueFolder(
     // collapse into a single merged group. (Folder mode has no --name.)
     const name = path.basename(filePath, path.extname(filePath));
 
-    await bus.enqueue("import.file", { filePath, name, tenantId: currentTenantId() });
+    await bus.enqueue("import.file", { filePath, name });
     enqueued++;
   }
 

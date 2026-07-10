@@ -22,21 +22,13 @@ export const ALL_JOB_TYPES = [
   "summarize.total",
 ] as const satisfies readonly JobType[];
 
-/**
- * Every payload carries the tenant the job belongs to (T2). Producers stamp it from
- * their active tenant context; the worker re-establishes that context around the
- * handler. OPTIONAL for rolling-upgrade compatibility: jobs enqueued before T2 have no
- * tenantId and are processed as the default tenant — exactly what they were.
- */
-type TenantStamped = { tenantId?: string };
-
 export interface JobPayloads {
-  "import.file": TenantStamped & { filePath: string; name?: string };
-  "transcribe.voicenote": TenantStamped & { messageId: string };
-  "analyze.image": TenantStamped & { messageId: string };
-  "analyze.video": TenantStamped & { messageId: string };
-  "summarize.group": TenantStamped & { groupId: string };
-  "summarize.total": TenantStamped & { since: string };
+  "import.file": { filePath: string; name?: string };
+  "transcribe.voicenote": { messageId: string };
+  "analyze.image": { messageId: string };
+  "analyze.video": { messageId: string };
+  "summarize.group": { groupId: string };
+  "summarize.total": { since: string };
 }
 
 export interface Job<T extends JobType = JobType> {

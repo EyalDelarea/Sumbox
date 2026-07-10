@@ -22,7 +22,6 @@ import {
 import { recordLink, siblingForJid } from "../db/repositories/identity-links.js";
 import { getMessageIdByExternalId, insertMessages } from "../db/repositories/messages.js";
 import { upsertParticipant } from "../db/repositories/participants.js";
-import { currentTenantId } from "../db/tenant-context.js";
 import { normalize } from "../importer/normalize.js";
 import type { ImportedMessage } from "../importer/types.js";
 import type { JobBus } from "../jobs/job-bus.js";
@@ -512,7 +511,6 @@ export async function handleIncomingMessage(
     if (messageId !== undefined) {
       await opts.bus.enqueue("transcribe.voicenote", {
         messageId: String(messageId),
-        tenantId: currentTenantId(),
       });
     }
   }
@@ -525,7 +523,6 @@ export async function handleIncomingMessage(
     if (messageId !== undefined) {
       await opts.bus.enqueue("analyze.image", {
         messageId: String(messageId),
-        tenantId: currentTenantId(),
       });
     }
   }
@@ -541,7 +538,6 @@ export async function handleIncomingMessage(
       if (messageId !== undefined) {
         await opts.bus.enqueue("analyze.video", {
           messageId: String(messageId),
-          tenantId: currentTenantId(),
         });
       }
     }

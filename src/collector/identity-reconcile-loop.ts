@@ -3,7 +3,6 @@ import { reconcileIdentities } from "./identity-reconcile.js";
 
 export type ReconcileLoopOpts = {
   pool: pg.Pool;
-  tenantId: string;
   intervalMs: number;
   /** Injected timer for testability; defaults to setTimeout. */
   setTimer?: (cb: () => void, ms: number) => NodeJS.Timeout;
@@ -23,7 +22,7 @@ export function startReconcileLoop(opts: ReconcileLoopOpts): { stop: () => void 
 
   const tick = async () => {
     try {
-      await reconcileIdentities(opts.pool, opts.tenantId);
+      await reconcileIdentities(opts.pool);
     } catch (err) {
       opts.onError?.(err);
     }

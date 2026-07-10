@@ -1,13 +1,11 @@
 import "dotenv/config";
 import { startReconcileLoop } from "../collector/identity-reconcile-loop.js";
-import { DEFAULT_TENANT_ID, runWithTenantContext } from "../db/tenant-context.js";
 import type { JobBus } from "../jobs/job-bus.js";
 import type { Job, JobType } from "../jobs/job-types.js";
 import { installConsoleGuard } from "../logging/install-console.js";
 import { logLifecycle } from "../logging/lifecycle.js";
 import { getLogger } from "../logging/log.js";
 import type { Logger } from "../logging/logger.js";
-import { makeFairShareDispatcher } from "./fair-share.js";
 
 export type HandlerMap = {
   [T in JobType]?: (job: Job<T>) => Promise<void>;
@@ -19,21 +17,6 @@ export type BuildWorkerOptions = {
   concurrency: number;
   /** Optional logger; defaults to no-op so tests produce no output. */
   logger?: Logger;
-  /**
-   * T3 fair-share: when set, slow (PREFETCH_ONE) job types consume with THIS prefetch
-   * and run through a per-type round-robin-by-tenant dispatcher, so one tenant's
-   * backlog cannot starve another's single job. Unset (single-user mode) = exact
-   * pre-T3 behavior.
-   */
-  fairShareWindow?: number;
-  /**
-   * Cross-tenant check that a job's tenant still exists. When provided and it
-   * returns false for a non-default tenant, the job is acked and dropped instead
-   * of run — so a stale job for a hard-deleted tenant can't wedge the worker in a
-   * poison-loop against the `tenant_id` foreign keys. Omitted (tests / single-user)
-   * = no check, exact prior behavior.
-   */
-  tenantExists?: (tenantId: string) => Promise<boolean>;
 };
 
 /** A no-op logger used in tests so worker test output stays clean. */
@@ -141,30 +124,11 @@ export async function buildWorker(
   >) {
     if (handler) {
       const isSlow = PREFETCH_ONE_TYPES.has(type);
-      const prefetch = isSlow ? (opts.fairShareWindow ?? 1) : concurrency;
+      const prefetch = isSlow ? 1 : concurrency;
 
-      // Tenant context is established here — at EXECUTION time — so a job parked in a
-      // fair-share lane still runs under its own tenant, not the dispatcher caller's.
-      const runInTenant = async (job: Job): Promise<void> => {
-        const p = job.payload as Record<string, unknown>;
-        const t = typeof p["tenantId"] === "string" ? (p["tenantId"] as string) : DEFAULT_TENANT_ID;
-        // Drop (ack) jobs whose tenant was hard-deleted — otherwise they fail the
-        // tenant_id foreign key forever and poison-loop. Only checked for non-default
-        // tenants (the default always exists) and only when a checker is wired.
-        if (t !== DEFAULT_TENANT_ID && opts.tenantExists && !(await opts.tenantExists(t))) {
-          log.warn(
-            { tenantId: t, jobType: job.type, jobId: job.id },
-            "skipping job for a tenant that no longer exists (acked, dropped)",
-          );
-          return;
-        }
-        return runWithTenantContext(t, () => handler(job));
-      };
-      const fairShareOrDirect =
-        isSlow && opts.fairShareWindow ? makeFairShareDispatcher(runInTenant) : runInTenant;
       const execute = OLLAMA_JOB_TYPES.has(type)
-        ? (job: Job) => withOllamaSlot(() => fairShareOrDirect(job))
-        : fairShareOrDirect;
+        ? (job: Job) => withOllamaSlot(() => handler(job))
+        : handler;
 
       const wrappedHandler = async (job: Job): Promise<void> => {
         // Build correlation context: common fields + payload-specific ids
@@ -175,12 +139,6 @@ export async function buildWorker(
         };
         if (typeof payload["messageId"] === "string") ctx["messageId"] = payload["messageId"];
         if (typeof payload["filePath"] === "string") ctx["filePath"] = payload["filePath"];
-
-        // T2: each job runs inside its tenant's context (see runInTenant above —
-        // jobs enqueued before T2 carry no tenantId → default tenant).
-        const tenantId =
-          typeof payload["tenantId"] === "string" ? payload["tenantId"] : DEFAULT_TENANT_ID;
-        ctx["tenantId"] = tenantId;
 
         const child = log.child(ctx);
         child.info("job received");
@@ -238,7 +196,6 @@ async function main(): Promise<void> {
     { IvritWhisperTranscriber },
     { pruneMediaFile },
     { resetStaleRunningJobs },
-    { scopedPool, currentTenantId },
   ] = await Promise.all([
     import("../config.js"),
     import("../jobs/rabbitmq-bus.js"),
@@ -257,7 +214,6 @@ async function main(): Promise<void> {
     import("../transcription/ivrit-whisper.js"),
     import("../media/prune.js"),
     import("../db/repositories/job-runs.js"),
-    import("../db/tenant-context.js"),
   ]);
 
   // Parse CLI args
@@ -270,27 +226,17 @@ async function main(): Promise<void> {
   const concurrency =
     concurrencyIdx !== -1 ? Number(args[concurrencyIdx + 1]) : config.worker.concurrency;
 
-  // Admin pool: migrations-grade maintenance + job-run recording only. Cross-tenant by
-  // design (stale-job reset spans tenants; job_runs rows auto-attribute via the GUC
-  // default — to the job's tenant when recorded in context, else the default tenant).
-  const dbClient = createDbClient();
-  const recorder = new PostgresJobRunRecorder(dbClient);
+  // One pool for everything: job-run recording, maintenance, and all handler data access.
+  const pool = createDbClient();
+  const recorder = new PostgresJobRunRecorder(pool);
 
   const bus = new RabbitMqJobBus({
     url: config.broker.url,
     recorder,
   });
 
-  // T2 cutover: ALL handler data access runs on the RLS-enforced catchapp_app pool,
-  // scoped per query to the active job's tenant (carried by AsyncLocalStorage — see
-  // buildWorker). Isolation is enforced by Postgres, not by handler discipline.
-  const { createAppPool } = await import("../db/client.js");
-  const appPool = createAppPool();
-  const pool = scopedPool(appPool, currentTenantId);
-
   // On startup, reset any orphaned 'running' rows from a previous crash/restart.
-  // Admin connection: this maintenance legitimately spans all tenants.
-  const staleReset = await resetStaleRunningJobs(dbClient);
+  const staleReset = await resetStaleRunningJobs(pool);
   if (staleReset > 0) {
     logger.warn(
       { staleReset },
@@ -319,7 +265,7 @@ async function main(): Promise<void> {
       isAlreadyTranscribed: (messageId) => hasTranscript(pool, messageId),
       transcribeOne: (messageId) =>
         transcribeOneNote(messageId, {
-          pool, // tenant-scoped app pool (T2) — instead of a private owner pool
+          pool,
           databaseUrl: config.databaseUrl,
           transcriber: new IvritWhisperTranscriber({
             pythonPath: config.transcription.pythonPath,
@@ -480,21 +426,12 @@ async function main(): Promise<void> {
     handlers,
     concurrency,
     logger,
-    // Cross-tenant existence check on the admin (owner) pool — drops stale jobs
-    // whose tenant was hard-deleted instead of poison-looping the FK.
-    tenantExists: async (tenantId) => {
-      const { rows } = await dbClient.query("SELECT 1 FROM tenants WHERE id = $1", [tenantId]);
-      return rows.length > 0;
-    },
   });
 
   // Periodically reconcile lid/phone duplicate chats from the durable identity
-  // map (session-independent; runs once now, then hourly). Uses the REAL appPool
-  // (not the per-query scopedPool, which has no connect()) — reconcileIdentities
-  // opens its own withTenant transaction, setting the tenant GUC under RLS.
+  // map (session-independent; runs once now, then hourly).
   const reconcile = startReconcileLoop({
-    pool: appPool,
-    tenantId: DEFAULT_TENANT_ID,
+    pool,
     intervalMs: 60 * 60 * 1000,
     onError: (err) => logger.warn({ err }, "identity reconcile tick failed"),
   });
@@ -507,8 +444,7 @@ async function main(): Promise<void> {
     reconcile.stop();
     logLifecycle("shutdown", { proc: "worker", signal });
     void worker.close().then(() => {
-      void appPool.end();
-      void dbClient.end();
+      void pool.end();
       // Flush the shutdown event before exiting, with a safety timeout.
       const exit = () => process.exit(0);
       try {

@@ -9,7 +9,6 @@
 
 import type pg from "pg";
 import { listIncludedGroupIds } from "../db/repositories/chat-scopes.js";
-import { currentTenantId } from "../db/tenant-context.js";
 import type { JobBus } from "../jobs/job-bus.js";
 
 export type EnqueueScheduledRunOpts = {
@@ -96,7 +95,6 @@ export async function enqueueScheduledRun(
 
         await bus.enqueue("summarize.group", {
           groupId: String(groupId),
-          tenantId: currentTenantId(),
         });
         enqueued++;
       } catch (err) {
@@ -117,7 +115,6 @@ export async function enqueueScheduledRun(
     try {
       await bus.enqueue("summarize.total", {
         since: opts.sinceForTotal.toISOString(),
-        tenantId: currentTenantId(),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

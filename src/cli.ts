@@ -494,8 +494,7 @@ program
       for (const { messageId, kind } of rows) {
         const jobType = kind === "video" ? "analyze.video" : "analyze.image";
         if (!allowedTypes.has(jobType)) continue;
-        const { currentTenantId } = await import("./db/tenant-context.js");
-        await bus.enqueue(jobType, { messageId: String(messageId), tenantId: currentTenantId() });
+        await bus.enqueue(jobType, { messageId: String(messageId) });
         enqueued++;
       }
 

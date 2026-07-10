@@ -22,14 +22,13 @@ describe("startReconcileLoop", () => {
 
     const handle = startReconcileLoop({
       pool: {} as never,
-      tenantId: "t",
       intervalMs: 1000,
       setTimer,
     });
     await flush();
 
     expect(reconcileIdentities).toHaveBeenCalledTimes(1);
-    expect(reconcileIdentities).toHaveBeenCalledWith({}, "t");
+    expect(reconcileIdentities).toHaveBeenCalledWith({});
     expect(scheduledMs).toBe(1000);
     expect(typeof scheduled).toBe("function");
 
@@ -57,7 +56,6 @@ describe("startReconcileLoop", () => {
 
     const handle = startReconcileLoop({
       pool: {} as never,
-      tenantId: "t",
       intervalMs: 1000,
       setTimer,
       onError,
