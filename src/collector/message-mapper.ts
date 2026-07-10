@@ -8,6 +8,7 @@
  */
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { ImportedMessageType } from "../importer/types.js";
+import { classifyMedia, type MediaKind } from "./media-descriptor.js";
 import { timestampToMs } from "./timestamp.js";
 
 export type MappedMessage = {
@@ -24,14 +25,13 @@ export type MappedMessage = {
   messageType: ImportedMessageType;
   textContent: string | null;
   mediaFilename: string | null;
-  /** True when the underlying Baileys message is an audioMessage (voice note). */
-  isVoiceNote: boolean;
-  /** True when the underlying Baileys message is an imageMessage. */
-  isImage: boolean;
-  /** True when the underlying Baileys message is a videoMessage. */
-  isVideo: boolean;
-  /** True when the underlying Baileys message is a stickerMessage. */
-  isSticker: boolean;
+  /**
+   * The kind of media this message carries, or null for text. One discriminant
+   * in place of the former isVoiceNote/isImage/isVideo/isSticker booleans
+   * ("audio" is a voice note); "document" is now explicit rather than implied by
+   * all-four-false. Derived from the shared classifyMedia().
+   */
+  mediaKind: MediaKind | null;
   /**
    * Embedded JPEG thumbnail bytes for a video message, if present.
    * Used as a fallback when the video itself is oversized or cannot be downloaded.
@@ -110,10 +110,7 @@ export function mapWaMessage(waMessage: WAMessage): MappedMessage | null {
     messageType: mapped.messageType,
     textContent: mapped.textContent,
     mediaFilename: mapped.mediaFilename,
-    isVoiceNote: mapped.isVoiceNote,
-    isImage: mapped.isImage,
-    isVideo: mapped.isVideo,
-    isSticker: mapped.isSticker,
+    mediaKind: mapped.mediaKind,
     jpegThumbnail: mapped.jpegThumbnail,
     fromMe: key.fromMe ?? false,
   };
@@ -123,10 +120,7 @@ type ContentResult = {
   messageType: ImportedMessageType;
   textContent: string | null;
   mediaFilename: string | null;
-  isVoiceNote: boolean;
-  isImage: boolean;
-  isVideo: boolean;
-  isSticker: boolean;
+  mediaKind: MediaKind | null;
   jpegThumbnail: Buffer | null;
 };
 
@@ -135,111 +129,65 @@ type ContentResult = {
  * Returns null if we cannot map the content to a known type.
  */
 function resolveContent(msg: NonNullable<WAMessage["message"]>): ContentResult | null {
-  // Simple text (conversation)
+  // Text is checked first (before media), preserving the original precedence.
   if (msg.conversation) {
-    return {
-      messageType: "text",
-      textContent: msg.conversation,
-      mediaFilename: null,
-      isVoiceNote: false,
-      isImage: false,
-      isVideo: false,
-      isSticker: false,
-      jpegThumbnail: null,
-    };
+    return textResult(msg.conversation);
   }
-
-  // Extended text message (replies, links, etc.)
   if (msg.extendedTextMessage?.text) {
-    return {
-      messageType: "text",
-      textContent: msg.extendedTextMessage.text,
-      mediaFilename: null,
-      isVoiceNote: false,
-      isImage: false,
-      isVideo: false,
-      isSticker: false,
-      jpegThumbnail: null,
-    };
+    return textResult(msg.extendedTextMessage.text);
   }
 
-  // Audio / voice note
-  if (msg.audioMessage) {
-    return {
-      messageType: "media",
-      textContent: null,
-      mediaFilename: null,
-      isVoiceNote: true,
-      isImage: false,
-      isVideo: false,
-      isSticker: false,
-      jpegThumbnail: null,
-    };
+  // Every media kind flows through the shared classifier (the single place the
+  // Baileys media union is switched). Unrecognized types (pollMessage,
+  // groupInviteMessage, contactMessage, locationMessage, …) return null and the
+  // caller logs/ignores them.
+  const media = classifyMedia(msg);
+  if (!media) {
+    return null;
   }
 
-  // Image message
-  if (msg.imageMessage) {
-    const caption = msg.imageMessage.caption ?? null;
-    return {
-      messageType: "media",
-      textContent: caption || null,
-      mediaFilename: null,
-      isVoiceNote: false,
-      isImage: true,
-      isVideo: false,
-      isSticker: false,
-      jpegThumbnail: null,
-    };
+  switch (media.kind) {
+    case "audio":
+      return mediaResult("audio", { textContent: null });
+    case "image":
+      return mediaResult("image", { textContent: msg.imageMessage?.caption || null });
+    case "video": {
+      const video = msg.videoMessage;
+      // Extract embedded thumbnail bytes (Uint8Array → Buffer) for the
+      // download-failure fallback.
+      const thumbBytes = (video as { jpegThumbnail?: Uint8Array | null } | null | undefined)
+        ?.jpegThumbnail;
+      const jpegThumbnail = thumbBytes && thumbBytes.length > 0 ? Buffer.from(thumbBytes) : null;
+      return mediaResult("video", { textContent: video?.caption || null, jpegThumbnail });
+    }
+    case "document":
+      return mediaResult("document", {
+        mediaFilename: (msg.documentMessage?.fileName as string | undefined | null) ?? null,
+      });
+    case "sticker":
+      return mediaResult("sticker", { textContent: null });
   }
+}
 
-  // Video message
-  if (msg.videoMessage) {
-    const caption = msg.videoMessage.caption ?? null;
-    // Extract embedded thumbnail bytes (Uint8Array → Buffer)
-    const thumbBytes = (msg.videoMessage as { jpegThumbnail?: Uint8Array | null }).jpegThumbnail;
-    const jpegThumbnail = thumbBytes && thumbBytes.length > 0 ? Buffer.from(thumbBytes) : null;
-    return {
-      messageType: "media",
-      textContent: caption || null,
-      mediaFilename: null,
-      isVoiceNote: false,
-      isImage: false,
-      isVideo: true,
-      isSticker: false,
-      jpegThumbnail,
-    };
-  }
+function textResult(textContent: string): ContentResult {
+  return {
+    messageType: "text",
+    textContent,
+    mediaFilename: null,
+    mediaKind: null,
+    jpegThumbnail: null,
+  };
+}
 
-  // Document message
-  if (msg.documentMessage) {
-    return {
-      messageType: "media",
-      textContent: null,
-      mediaFilename: (msg.documentMessage.fileName as string | undefined | null) ?? null,
-      isVoiceNote: false,
-      isImage: false,
-      isVideo: false,
-      isSticker: false,
-      jpegThumbnail: null,
-    };
-  }
-
-  // Sticker
-  if (msg.stickerMessage) {
-    return {
-      messageType: "media",
-      textContent: null,
-      mediaFilename: null,
-      isVoiceNote: false,
-      isImage: false,
-      isVideo: false,
-      isSticker: true,
-      jpegThumbnail: null,
-    };
-  }
-
-  // Unrecognized / unhandled message types (e.g. pollMessage, eventMessage, etc.)
-  // Note: these are silently ignored; the caller receives null and can log.
-  // Common unhandled types: pollCreationMessage, groupInviteMessage, contactMessage, locationMessage
-  return null;
+function mediaResult(
+  mediaKind: MediaKind,
+  over: Partial<Pick<ContentResult, "textContent" | "mediaFilename" | "jpegThumbnail">>,
+): ContentResult {
+  return {
+    messageType: "media",
+    textContent: over.textContent ?? null,
+    mediaFilename: over.mediaFilename ?? null,
+    mediaKind,
+    jpegThumbnail: over.jpegThumbnail ?? null,
+  };
 }
