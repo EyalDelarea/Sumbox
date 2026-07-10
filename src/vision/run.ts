@@ -72,100 +72,41 @@ export type AnalyzeMediaOneDeps = {
 /**
  * Analyze a single visual media message and persist the result.
  * Throws on failure (after recording a 'failed' row) so the bus can retry.
+ *
+ * One envelope wraps both kinds: resolve-path-or-skip → kind-specific describe →
+ * insertMediaAnalysis('completed') → prune-if-!retainMedia; a shared catch writes
+ * insertMediaAnalysis('failed', errorMessage) and rethrows. Only the middle
+ * describe step differs per kind (see describeImageMedia / describeVideoMedia).
  */
 export async function analyzeMediaOne(
   messageId: number,
   kind: "image" | "video",
   deps: AnalyzeMediaOneDeps,
 ): Promise<void> {
-  if (kind === "video") {
-    // ── Video branch (T019) ────────────────────────────────────────────────
-    let videoMediaPath: string | null = null;
-    try {
-      // 1. Resolve media path. null → no analyzable media present (pruned,
-      //    absent, or a stale queued job). Terminal non-error: skip without a
-      //    'failed' row or a throw, so the bus acks instead of retry-storming.
-      const resolved = await deps.getVisualMediaPath(messageId);
-      if (!resolved) return;
-      videoMediaPath = resolved.path;
-
-      // 2. Resolve thumbnail path (may be null)
-      const thumbnailPath = await deps.getThumbnailPath(messageId);
-
-      // 3. Run video analysis (keyframe + optional audio)
-      const { description, engine } = await deps.analyzeVideo({
-        mediaPath: videoMediaPath,
-        thumbnailPath,
-      });
-
-      // 4. Persist completed
-      await deps.insertMediaAnalysis({
-        messageId,
-        kind,
-        description,
-        engine,
-        status: "completed",
-      });
-
-      // 5. Prune media file (only on success, gated by retainMedia)
-      if (!deps.retainMedia) {
-        await deps.pruneMediaFile(messageId);
-      }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      await deps.insertMediaAnalysis({
-        messageId,
-        kind,
-        description: null,
-        engine: deps.engineLabel,
-        status: "failed",
-        errorMessage,
-      });
-      throw err;
-    }
-    return;
-  }
-
-  // ── Image branch ────────────────────────────────────────────────────────
-  let mediaPath: string | null = null;
-
   try {
-    // 1. Resolve path. null → no analyzable media present (pruned, absent, or a
-    //    stale queued job). Terminal non-error: skip without a 'failed' row or a
-    //    throw, so the bus acks instead of retry-storming.
+    // 1. Resolve the media path. null → no analyzable media present (pruned,
+    //    absent, or a stale queued job). Terminal non-error: skip WITHOUT a
+    //    'failed' row or a throw, so the bus acks instead of retry-storming.
     const resolved = await deps.getVisualMediaPath(messageId);
     if (!resolved) return;
-    mediaPath = resolved.path;
 
-    // 2. Orientation normalize; clean up temp file afterwards if it differs from input.
-    const normalizedPath = await deps.normalizeImage(mediaPath);
-    try {
-      // 3. Describe image
-      const { description, engine } = await deps.visionAnalyzer.describeImage(normalizedPath);
+    // 2. Kind-specific describe step (the only part that differs).
+    const { description, engine } =
+      kind === "video"
+        ? await describeVideoMedia(messageId, resolved.path, deps)
+        : await describeImageMedia(resolved.path, deps);
 
-      // 4. Persist completed
-      await deps.insertMediaAnalysis({
-        messageId,
-        kind,
-        description,
-        engine,
-        status: "completed",
-      });
+    // 3. Persist the completed analysis.
+    await deps.insertMediaAnalysis({ messageId, kind, description, engine, status: "completed" });
 
-      // 5. Prune media file (only on success, gated by retainMedia)
-      if (!deps.retainMedia) {
-        await deps.pruneMediaFile(messageId);
-      }
-    } finally {
-      // Clean up the normalized temp file only when it is a different path.
-      if (normalizedPath !== mediaPath) {
-        await fsp.unlink(normalizedPath).catch(() => {});
-      }
+    // 4. Prune media file (only on success, gated by retainMedia).
+    if (!deps.retainMedia) {
+      await deps.pruneMediaFile(messageId);
     }
   } catch (err) {
+    // Record the failure (best-effort; if this also throws, let it propagate),
+    // then rethrow so the bus retries.
     const errorMessage = err instanceof Error ? err.message : String(err);
-
-    // Record the failure (best-effort; if this also throws, let it propagate)
     await deps.insertMediaAnalysis({
       messageId,
       kind,
@@ -174,10 +115,39 @@ export async function analyzeMediaOne(
       status: "failed",
       errorMessage,
     });
-
-    // Rethrow so the bus retries
     throw err;
   }
+}
+
+/**
+ * Image describe step: orientation-normalize, describe, and always clean up the
+ * normalized temp file (only when it differs from the input path).
+ */
+async function describeImageMedia(
+  mediaPath: string,
+  deps: AnalyzeMediaOneDeps,
+): Promise<{ description: string; engine: string }> {
+  const normalizedPath = await deps.normalizeImage(mediaPath);
+  try {
+    return await deps.visionAnalyzer.describeImage(normalizedPath);
+  } finally {
+    if (normalizedPath !== mediaPath) {
+      await fsp.unlink(normalizedPath).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Video describe step: resolve the (optional) embedded thumbnail, then run the
+ * keyframe + optional-audio video analysis.
+ */
+async function describeVideoMedia(
+  messageId: number,
+  mediaPath: string,
+  deps: AnalyzeMediaOneDeps,
+): Promise<{ description: string; engine: string }> {
+  const thumbnailPath = await deps.getThumbnailPath(messageId);
+  return deps.analyzeVideo({ mediaPath, thumbnailPath });
 }
 
 // ---------------------------------------------------------------------------
