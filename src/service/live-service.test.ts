@@ -172,8 +172,9 @@ describe("attachCollector", () => {
 
     // onError was called with the error
     expect(onError).toHaveBeenCalledOnce();
-    expect(onError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
-    expect((onError.mock.calls[0]?.[0] as Error).message).toBe("handler exploded");
+    const err = onError.mock.calls[0]?.[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe("handler exploded");
   });
 
   it("stop() stops the heartbeat and calls session.stop()", async () => {
