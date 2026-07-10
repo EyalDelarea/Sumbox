@@ -134,7 +134,6 @@ The doctor checks, in order:
 5. **Ollama reachable + model pulled** — hits `/api/tags` and checks that `SUMMARY_MODEL` is present
 6. **Python + faster-whisper importable** — spawns `python -c "import faster_whisper"`
 7. **ffmpeg on PATH** — spawns `ffmpeg -version`
-8. **DB roles use non-default passwords** — advisory check against the committed default local-dev passwords
 
 Each line prints `✅ <check>`, `⚠️ <check>` (advisory — does not fail the run), or `❌ <check> — fix: <command>`. The process exits 1 only if a non-advisory check fails.
 
@@ -330,7 +329,6 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 |---|---|---|
 | `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/whatsapp_sum` | Postgres connection string |
 | `DATA_DIR` | `./data` | Directory for auth state, media downloads, and exports |
-| `DEFAULT_TENANT_ID` | `00000000-0000-0000-0000-000000000001` | UUID of the (only) tenant that owns all data. Rarely, if ever, changed. |
 | `TRANSCRIPTION_PYTHON` | `python3` | Python interpreter with `faster-whisper` installed. `.env.example` sets this to `./.venv/bin/python` for the venv flow above. |
 | `TRANSCRIPTION_MODEL` | `ivrit-ai/whisper-large-v3-turbo-ct2` | HuggingFace model for Hebrew speech-to-text (downloaded on first use) |
 | `FFMPEG_PATH` | `ffmpeg` | Path to ffmpeg binary |

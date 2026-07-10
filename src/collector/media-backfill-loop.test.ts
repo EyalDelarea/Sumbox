@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_TENANT_ID } from "../db/tenant-context.js";
 import { runBackfillBatch, startBackfillLoop } from "./media-backfill-loop.js";
 
 const baseDeps = (over: Partial<any> = {}) => ({
@@ -31,7 +30,6 @@ describe("runBackfillBatch", () => {
     expect(deps.markPresentMedia).toHaveBeenCalledWith(1, null);
     expect(deps.enqueue).toHaveBeenCalledWith("analyze.image", {
       messageId: "1",
-      tenantId: DEFAULT_TENANT_ID, // T2/T3: every payload is tenant-stamped
     });
     // Fix 2: markPresentMedia must be called AFTER enqueue (state gate is last)
     const enqueueOrder = (deps.enqueue as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
@@ -63,7 +61,6 @@ describe("runBackfillBatch", () => {
     await runBackfillBatch(deps as any, 10);
     expect(deps.enqueue).toHaveBeenCalledWith("transcribe.voicenote", {
       messageId: "2",
-      tenantId: DEFAULT_TENANT_ID,
     });
   });
 
@@ -112,7 +109,6 @@ describe("runBackfillBatch", () => {
     await runBackfillBatch(deps as any, 10);
     expect(deps.enqueue).toHaveBeenCalledWith("analyze.video", {
       messageId: "5",
-      tenantId: DEFAULT_TENANT_ID,
     });
   });
 

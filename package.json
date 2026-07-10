@@ -2,7 +2,7 @@
   "name": "sumbox",
   "version": "0.1.0",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "sumbox": "./dist/cli.js"
@@ -23,7 +23,6 @@
     "eval:people-intent": "vitest run --config vitest.eval.config.ts"
   },
   "dependencies": {
-    "@node-rs/argon2": "^2.0.2",
     "@whiskeysockets/baileys": "^7.0.0-rc13",
     "amqplib": "^2.0.1",
     "commander": "^15.0.0",

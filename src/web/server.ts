@@ -2,7 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_TENANT_ID, scopedPool, withTenant } from "../db/tenant-context.js";
+import { withTransaction } from "../db/transaction.js";
 import type { ServerDeps } from "./handlers/context.js";
 import { handleData } from "./handlers/data.js";
 import { handleGroups } from "./handlers/groups.js";
@@ -40,19 +40,12 @@ export function createServer(deps: ServerDeps): http.Server {
     }
 
     if (url.pathname.startsWith("/api/")) {
-      // Single-user mode: every request is scoped to the default tenant —
-      // identical local behavior, now explicitly attributed.
-      const tenantId = DEFAULT_TENANT_ID;
-      // Onboarding talks to the registry, not the DB pool — route it with the raw
-      // tenantId before the pool-scoped dispatch.
-      if (onboardingRoutes && (await onboardingRoutes.handle(req, res, url, tenantId))) return;
-      const scoped: ServerDeps = {
+      // Onboarding talks to the session adapter, not the DB pool.
+      if (onboardingRoutes && (await onboardingRoutes.handle(req, res, url))) return;
+      dispatchApi(url, req, res, {
         ...deps,
-        tenantId,
-        pool: scopedPool(deps.pool, () => tenantId),
-        withTx: (fn) => withTenant(deps.pool, tenantId, fn),
-      };
-      dispatchApi(url, req, res, scoped);
+        withTx: (fn) => withTransaction(deps.pool, fn),
+      });
       return;
     }
 

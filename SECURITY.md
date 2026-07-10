@@ -22,9 +22,10 @@ You should receive a response within 48 hours. If you don't, follow up.
 ## Out of scope
 
 - The `.env` file (secret rotation is the user's responsibility).
-- Weak local DB passwords that are documented as defaults (see
-  `src/db/migrations/1748649600024_create_app_roles.ts` and the README
-  rotation note).
+- The `catchapp_app` / `catchapp_operator` roles created by
+  `src/db/migrations/1748649600024_create_app_roles.ts`. Their passwords are
+  committed, but the roles are revoked and set `NOLOGIN` by a later migration
+  and nothing connects as them.
 
 ## Safe harbor
 

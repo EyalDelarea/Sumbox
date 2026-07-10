@@ -1,4 +1,3 @@
-import { currentTenantId } from "../../db/tenant-context.js";
 import type { RunImportInput, RunImportResult } from "../../importer/run-import.js";
 import type { JobBus } from "../../jobs/job-bus.js";
 import type { Job } from "../../jobs/job-types.js";
@@ -39,7 +38,7 @@ export function makeImportFileHandler(deps: ImportFileHandlerDeps) {
 
     // Step 3: enqueue one transcribe job per voice note
     for (const messageId of messageIds) {
-      await deps.bus.enqueue("transcribe.voicenote", { messageId, tenantId: currentTenantId() });
+      await deps.bus.enqueue("transcribe.voicenote", { messageId });
     }
   };
 }

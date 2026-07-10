@@ -10,7 +10,6 @@
  */
 
 import type { PendingMedia } from "../db/repositories/message-media.js";
-import { currentTenantId } from "../db/tenant-context.js";
 import type { JobType } from "../jobs/job-types.js";
 
 /** Filename extension per media kind, for the backfill writeFile sink. */
@@ -174,7 +173,6 @@ export async function runBackfillBatch(deps: BackfillDeps, limit: number): Promi
         if (analyze)
           await deps.enqueue(job, {
             messageId: String(row.messageId),
-            tenantId: currentTenantId(),
           });
       }
       await deps.markPresentMedia(row.messageId, null);

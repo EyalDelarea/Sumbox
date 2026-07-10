@@ -14,18 +14,9 @@ export const SUMBOX_FALLBACK_N = 25;
 export type ServerDeps = {
   pool: pg.Pool;
   /**
-   * The resolved tenant for this request. Set by server.ts (the session's tenant in
-   * multi-tenant mode, else the default tenant). Optional so the many handler tests that
-   * build a ServerDeps directly need no change; handlers that need an explicit tenant_id
-   * (the destructive data-deletion endpoints) fall back to the default tenant.
-   */
-  tenantId?: string;
-  /**
-   * Run fn inside ONE tenant-scoped transaction (BEGIN + SET LOCAL app.tenant_id +
-   * COMMIT/ROLLBACK). Injected per-request by server.ts so handlers get atomicity
-   * AND RLS scoping without touching the scopedPool adapter (whose connect() is
-   * unscoped). When absent (tests/CLI with a real owner pool), handlers fall back
-   * to withTenant() on deps.pool directly.
+   * Run fn inside ONE transaction (BEGIN + COMMIT/ROLLBACK). Injected per-request by
+   * server.ts so handlers get atomicity. When absent (tests / CLI), handlers fall back
+   * to running directly on deps.pool.
    */
   withTx?: <T>(fn: (client: pg.PoolClient) => Promise<T>) => Promise<T>;
   summarizer: StreamingSummarizer;

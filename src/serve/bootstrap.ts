@@ -1,15 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backfillGroup } from "../collector/backfill.js";
+import { OnboardingAdapter } from "../collector/onboarding-adapter.js";
 import { recoverOnReconnect } from "../collector/reconnect-recovery.js";
-import { SingleTenantOnboardingAdapter } from "../collector/single-tenant-onboarding.js";
 import { loadConfig } from "../config.js";
-import { createAppPool, createDbClient, createOperatorPool } from "../db/client.js";
+import { createDbClient } from "../db/client.js";
 import { countReadableSince, getNewestReadableSentAt } from "../db/repositories/messages.js";
 import { getLastRun, recordRun } from "../db/repositories/scheduler-state.js";
 import { getServiceStatus, isStale } from "../db/repositories/service-status.js";
-import { getTenantDigestTimes } from "../db/repositories/user-preferences.js";
-import { DEFAULT_TENANT_ID, scopedPool } from "../db/tenant-context.js";
+import { getPreferences } from "../db/repositories/user-preferences.js";
 import { PostgresJobRunRecorder } from "../jobs/job-run-recorder.js";
 import { RabbitMqJobBus } from "../jobs/rabbitmq-bus.js";
 import { logLifecycle } from "../logging/lifecycle.js";
@@ -50,13 +49,7 @@ export async function startServe(options: { port?: string; collect?: boolean }):
     reconnect: getLogger("reconnect-sync"),
     cli: getLogger("cli"),
   };
-  // T2 cutover: this process talks to Postgres as the RLS-enforced catchapp_app role.
-  // The web server scopes each request to its session's tenant; everything else here
-  // (schedulers, collector, backfill, reconnect recovery) is default-tenant work and
-  // runs through a default-scoped adapter — identical local behavior, now attributed.
-  const appPool = createAppPool();
-  const pool = scopedPool(appPool, () => DEFAULT_TENANT_ID);
-  const operatorPool = createOperatorPool();
+  const pool = createDbClient();
   const summarizer = new OllamaSummarizer({
     host: config.summarization.ollamaHost,
     model: config.summarization.model,
@@ -68,8 +61,7 @@ export async function startServe(options: { port?: string; collect?: boolean }):
   // Build a RabbitMQ bus for best-effort queue depth queries.
   // When --collect is active this same bus is reused for enqueuing transcription
   // jobs so we never create a second connection.
-  const dbClient = createDbClient();
-  const recorder = new PostgresJobRunRecorder(dbClient);
+  const recorder = new PostgresJobRunRecorder(pool);
   const brokerBus = new RabbitMqJobBus({ url: config.broker.url, recorder });
   const getQueueDepths = async () => {
     const types = ["import.file", "transcribe.voicenote"] as const;
@@ -147,20 +139,19 @@ export async function startServe(options: { port?: string; collect?: boolean }):
       }
     : {};
 
-  // Single-user QR-link onboarding, backed by the legacy --collect session. Whenever
-  // --collect runs it owns the default tenant's WhatsApp session, so expose
-  // /api/onboarding/* over it. Built here because createServer reads deps.onboarding at
-  // construction; the live session is bridged in below once the --collect block starts it.
-  let singleUserOnboarding: SingleTenantOnboardingAdapter | null = null;
+  // QR-link onboarding, backed by the --collect session that owns the WhatsApp link.
+  // Built here because createServer reads deps.onboarding at construction; the live
+  // session is bridged in below once the --collect block starts it.
+  let onboarding: OnboardingAdapter | null = null;
   if (options.collect) {
     const authDir = path.join(config.dataDir, "baileys-auth");
-    singleUserOnboarding = new SingleTenantOnboardingAdapter({
+    onboarding = new OnboardingAdapter({
       initiallyLinked: fs.existsSync(path.join(authDir, "creds.json")),
     });
   }
 
   const server = createServer({
-    pool: appPool, // raw app pool — createServer scopes it per request
+    pool,
     summarizer,
     tokenBudget: config.summarization.tokenBudget,
     model: config.summarization.model,
@@ -171,7 +162,7 @@ export async function startServe(options: { port?: string; collect?: boolean }):
       await brokerBus.enqueue(type, payload);
     },
     logger: webLogger,
-    onboarding: singleUserOnboarding ?? undefined,
+    onboarding: onboarding ?? undefined,
     ...collectDeps,
   });
   server.on("error", (err: Error) => {
@@ -186,13 +177,11 @@ export async function startServe(options: { port?: string; collect?: boolean }):
   // ── Scheduled digest runner ──────────────────────────────────────────────
   let schedulerHandle: { stop: () => void } = { stop: () => {} };
   try {
-    // Per-tenant digest times (S5): prefer the default tenant's saved
-    // user_preferences.digest_times, falling back to the env DIGEST_TIMES default.
-    // Read via the operator pool so it works regardless of run mode. Changes take
-    // effect on restart; live-on-PUT + multi-tenant per-tenant loops are follow-ups.
+    // Prefer the saved user_preferences.digest_times, falling back to the env
+    // DIGEST_TIMES default. Changes take effect on restart; live-on-PUT is a follow-up.
     let storedDigestTimes: string | null = null;
     try {
-      storedDigestTimes = await getTenantDigestTimes(operatorPool, DEFAULT_TENANT_ID);
+      storedDigestTimes = (await getPreferences(pool))?.digestTimes ?? null;
     } catch (err) {
       log.scheduler.error({ err }, "reading saved digest times failed; using env default");
     }
@@ -257,9 +246,8 @@ export async function startServe(options: { port?: string; collect?: boolean }):
 
   // ── Retention sweep ──────────────────────────────────────────────────────
   // Auto-purge of dormant unselected chats. Configured via the RETENTION_DAYS env var
-  // (default OFF → no-op), so single-user zero-config is unaffected. There is no settings
-  // UI, so the env var is the only source: when set, it applies to the single default
-  // tenant. Runs on the operator pool.
+  // (default OFF → no-op), so zero-config is unaffected. There is no settings UI, so
+  // the env var is the only source.
   const retentionDays = Number(process.env["RETENTION_DAYS"]) || 0;
   let retentionHandle: { stop: () => void } = { stop: () => {} };
   try {
@@ -267,12 +255,14 @@ export async function startServe(options: { port?: string; collect?: boolean }):
     const { purgeUnselectedChats, unlinkMediaFiles } = await import(
       "../db/repositories/data-deletion.js"
     );
+    const { withTransaction } = await import("../db/transaction.js");
     retentionHandle = startRetentionSweep(
       {
-        listTenants: async () =>
-          retentionDays > 0 ? [{ tenantId: DEFAULT_TENANT_ID, retentionDays }] : [],
-        purgeChats: (tenantId, olderThanDays) =>
-          purgeUnselectedChats(operatorPool, tenantId, { olderThanDays }),
+        retentionDays: async () => retentionDays,
+        // One transaction so a mid-sweep failure can't leave a chat half-purged
+        // (the function's contract; the web caller wraps it the same way via withTx).
+        purgeChats: (olderThanDays) =>
+          withTransaction(pool, (c) => purgeUnselectedChats(c, { olderThanDays })),
         unlink: (paths) => unlinkMediaFiles(paths),
         log: {
           info: (msg) => log.scheduler.info(msg),
@@ -327,7 +317,7 @@ export async function startServe(options: { port?: string; collect?: boolean }):
       liveSession = session;
 
       // 021 — light up the web QR + scan-progress streams for single-user onboarding.
-      singleUserOnboarding?.attachSession(session);
+      onboarding?.attachSession(session);
 
       // Snapshot the heartbeat BEFORE the collector connects (the heartbeat loop
       // writes a fresh value immediately on connect). A stale value means the
@@ -586,9 +576,7 @@ export async function startServe(options: { port?: string; collect?: boolean }):
     mediaPurgeHandle?.stop();
     server.close();
     brokerBus.close().catch(() => {});
-    dbClient.end().catch(() => {});
-    operatorPool.end().catch(() => {});
-    appPool
+    pool
       .end()
       .catch(() => {})
       // Flush the shutdown event + any batched lines before exiting, with a

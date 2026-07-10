@@ -1,7 +1,6 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { recordLink } from "../db/repositories/identity-links.js";
-import { DEFAULT_TENANT_ID } from "../db/tenant-context.js";
 import { createTestDatabase } from "../test/db.js";
 import { reconcileIdentities } from "./identity-reconcile.js";
 
@@ -26,7 +25,7 @@ describe("reconcileIdentities", () => {
     ]);
     await recordLink(pool, { lidJid: lid, pnJid: pn, source: "message_alt" });
 
-    const merged = await reconcileIdentities(pool, DEFAULT_TENANT_ID);
+    const merged = await reconcileIdentities(pool);
     expect(merged).toBe(1);
 
     // Exactly one of the two rows remains, and it is named (not a raw jid).
@@ -39,7 +38,7 @@ describe("reconcileIdentities", () => {
   });
 
   it("returns 0 when there is nothing to merge", async () => {
-    const merged = await reconcileIdentities(pool, DEFAULT_TENANT_ID);
+    const merged = await reconcileIdentities(pool);
     expect(merged).toBe(0);
   });
 });

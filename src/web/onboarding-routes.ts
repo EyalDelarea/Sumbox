@@ -1,26 +1,18 @@
 import type http from "node:http";
-import type { SessionHealth, TenantSessionStatus } from "../collector/tenant-session-registry.js";
+import type { SessionHealth, SessionStatus } from "../collector/session-status.js";
 import { sseFrame } from "./sse.js";
 
 /**
- * T4 — web onboarding (register → verify → scan QR → "connected").
+ * Web onboarding (scan QR → "connected").
  *
- * The /api/onboarding/* surface is a thin adapter over the TenantSessionRegistry: it
- * starts the requesting tenant's session, streams that tenant's QR refreshes over SSE,
- * and reports link status. Everything is scoped to the AUTHENTICATED tenant the server
- * resolves — a tenant can only ever link/observe its own session.
+ * The /api/onboarding/* surface is a thin adapter over the collector session: it starts
+ * the session, streams QR refreshes over SSE, and reports link status.
  */
 
-/** The slice of TenantSessionRegistry onboarding needs (the real registry satisfies it). */
+/** The slice of the onboarding adapter these routes need. */
 export interface OnboardingRegistry {
-  start(tenantId: string): Promise<void>;
-  snapshot(): SessionHealth[];
-  /**
-   * Whether the tenant has persisted Baileys creds on disk (i.e. has already linked).
-   * Optional: the single-user adapter already reports "connected" when initiallyLinked,
-   * so only the multi-tenant TenantSessionRegistry needs to implement this.
-   */
-  hasLinkedAuth?(tenantId: string): boolean;
+  start(): Promise<void>;
+  snapshot(): SessionHealth;
   on(event: string, listener: (...args: unknown[]) => void): unknown;
   off(event: string, listener: (...args: unknown[]) => void): unknown;
 }
@@ -29,8 +21,8 @@ export type OnboardingStatus = "unlinked" | "connecting" | "connected" | "logged
 
 export type OnboardingRoutesOptions = { registry: OnboardingRegistry };
 
-/** Collapse the registry's fine-grained session status into what the onboarding UI needs. */
-function toOnboardingStatus(status: TenantSessionStatus | undefined): OnboardingStatus {
+/** Collapse the session's fine-grained status into what the onboarding UI needs. */
+function toOnboardingStatus(status: SessionStatus | undefined): OnboardingStatus {
   switch (status) {
     case "connected":
       return "connected";
@@ -49,53 +41,37 @@ function toOnboardingStatus(status: TenantSessionStatus | undefined): Onboarding
 export function makeOnboardingRoutes(opts: OnboardingRoutesOptions) {
   const { registry } = opts;
 
-  const statusOf = (tenantId: string): OnboardingStatus => {
-    const health = registry.snapshot().find((h) => h.tenantId === tenantId);
-    const live = toOnboardingStatus(health?.status);
-    // A tenant with persisted creds has already completed onboarding; the live socket
-    // may still be (re)connecting right after login or a server restart, or not started
-    // yet (startDiscovered staggers connects). Don't re-onboard for that transient state —
-    // only "logged-out" (revoked creds) needs a re-link. Mirrors the single-user adapter's
-    // initiallyLinked → "connected".
-    if (live !== "connected" && live !== "logged-out" && registry.hasLinkedAuth?.(tenantId)) {
-      return "connected";
-    }
-    return live;
-  };
+  const statusOf = (): OnboardingStatus => toOnboardingStatus(registry.snapshot().status);
 
-  /**
-   * Handle an /api/onboarding/* request for the already-authenticated `tenantId`.
-   * Returns true when handled.
-   */
+  /** Handle an /api/onboarding/* request. Returns true when handled. */
   const handle = async (
     req: http.IncomingMessage,
     res: http.ServerResponse,
     url: URL,
-    tenantId: string,
   ): Promise<boolean> => {
     if (!url.pathname.startsWith("/api/onboarding/")) return false;
 
     if (req.method === "GET" && url.pathname === "/api/onboarding/status") {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ status: statusOf(tenantId) }));
+      res.end(JSON.stringify({ status: statusOf() }));
       return true;
     }
 
     if (req.method === "POST" && url.pathname === "/api/onboarding/link") {
       // Fire-and-forget: start() supervises its own retries; the QR arrives over SSE.
-      void registry.start(tenantId).catch(() => {});
+      void registry.start().catch(() => {});
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ status: "connecting" }));
       return true;
     }
 
     if (req.method === "GET" && url.pathname === "/api/onboarding/qr") {
-      streamQr(req, res, tenantId);
+      streamQr(req, res);
       return true;
     }
 
     if (req.method === "GET" && url.pathname === "/api/onboarding/progress") {
-      streamProgress(req, res, tenantId);
+      streamProgress(req, res);
       return true;
     }
 
@@ -104,11 +80,7 @@ export function makeOnboardingRoutes(opts: OnboardingRoutesOptions) {
     return true;
   };
 
-  const streamQr = (
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    tenantId: string,
-  ): void => {
+  const streamQr = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     res.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache",
@@ -126,26 +98,23 @@ export function makeOnboardingRoutes(opts: OnboardingRoutesOptions) {
     };
 
     const onQr = (...args: unknown[]): void => {
-      if (args[0] !== tenantId) return;
       // Render server-side to a data URL so the browser just shows an <img> — no
       // client-side QR library (and no CSP exception) needed.
       enqueue(async () => {
-        const dataUrl = await renderQrDataUrl(String(args[1]));
+        const dataUrl = await renderQrDataUrl(String(args[0]));
         send("qr", { dataUrl });
       });
     };
-    const onConnected = (...args: unknown[]): void => {
-      if (args[0] !== tenantId) return;
+    const onConnected = (): void => {
       enqueue(() => {
-        send("connected", { tenantId });
+        send("connected", {});
         cleanup();
         res.end();
       });
     };
-    const onLoggedOut = (...args: unknown[]): void => {
-      if (args[0] !== tenantId) return;
+    const onLoggedOut = (): void => {
       enqueue(() => {
-        send("logged-out", { tenantId });
+        send("logged-out", {});
         cleanup();
         res.end();
       });
@@ -165,23 +134,19 @@ export function makeOnboardingRoutes(opts: OnboardingRoutesOptions) {
 
     // Opening the onboarding pane should produce a QR even on first visit, so kick the
     // session off if nothing is in flight yet. start() is idempotent while a session exists.
-    const current = registry.snapshot().find((h) => h.tenantId === tenantId)?.status;
+    const current = registry.snapshot().status;
     if (current !== "connecting" && current !== "connected") {
-      void registry.start(tenantId).catch(() => {});
+      void registry.start().catch(() => {});
     }
   };
 
   /**
-   * S5 — stream WhatsApp's history-sync progress (0–100) for this tenant after the
-   * link connects, so the onboarding pane can show a live "scanning your chats" ring.
-   * Each forwarded `history-progress` becomes a `progress` frame; reaching 100 emits a
-   * terminal `done` frame and ends the stream. Scoped to the requesting tenant only.
+   * S5 — stream WhatsApp's history-sync progress (0–100) after the link connects, so
+   * the onboarding pane can show a live "scanning your chats" ring. Each forwarded
+   * `history-progress` becomes a `progress` frame; reaching 100 emits a terminal
+   * `done` frame and ends the stream.
    */
-  const streamProgress = (
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    tenantId: string,
-  ): void => {
+  const streamProgress = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     res.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache",
@@ -190,13 +155,12 @@ export function makeOnboardingRoutes(opts: OnboardingRoutesOptions) {
     const send = (event: string, data: unknown) => res.write(sseFrame(event, data));
 
     const onProgress = (...args: unknown[]): void => {
-      if (args[0] !== tenantId) return;
-      const info = args[1] as { progress?: number | null; count?: number } | undefined;
+      const info = args[0] as { progress?: number | null; count?: number } | undefined;
       const progress = info?.progress ?? null;
       send("progress", { progress, count: info?.count ?? 0 });
       // WhatsApp reports 100 on the final chunk; treat that as completion.
       if (progress != null && progress >= 100) {
-        send("done", { tenantId });
+        send("done", {});
         cleanup();
         res.end();
       }

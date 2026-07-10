@@ -1,35 +1,24 @@
-import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { appPool, createTestDatabase } from "../../test/db.js";
+import { createTestDatabase } from "../../test/db.js";
 import { createAdminPool } from "../client.js";
-import { DEFAULT_TENANT_ID, withTenant } from "../tenant-context.js";
+import { withTransaction } from "../transaction.js";
 import { recordLink, siblingForJid } from "./identity-links.js";
 
-const TENANT_A = DEFAULT_TENANT_ID;
-
 describe("identity-links repository", () => {
-  let app: pg.Pool;
-  let admin: pg.Pool;
-  let TENANT_B: string;
+  let pool: pg.Pool;
 
   beforeAll(async () => {
     const uri = await createTestDatabase();
-    app = appPool(uri);
-    admin = createAdminPool(uri);
-    TENANT_B = randomUUID();
-    await admin.query(`INSERT INTO tenants (id, name, status) VALUES ($1, 'B', 'active')`, [
-      TENANT_B,
-    ]);
+    pool = createAdminPool(uri);
   });
 
   afterAll(async () => {
-    await app?.end();
-    await admin?.end();
+    await pool?.end();
   });
 
   it("records a link and resolves the sibling in both directions", async () => {
-    await withTenant(app, TENANT_A, async (c) => {
+    await withTransaction(pool, async (c) => {
       await recordLink(c, {
         lidJid: "123@lid",
         pnJid: "972500000000@s.whatsapp.net",
@@ -41,7 +30,7 @@ describe("identity-links repository", () => {
   });
 
   it("is idempotent on repeat and updates source", async () => {
-    await withTenant(app, TENANT_A, async (c) => {
+    await withTransaction(pool, async (c) => {
       await recordLink(c, {
         lidJid: "456@lid",
         pnJid: "972511111111@s.whatsapp.net",
@@ -59,21 +48,8 @@ describe("identity-links repository", () => {
   });
 
   it("returns null for an unknown jid", async () => {
-    await withTenant(app, TENANT_A, async (c) => {
+    await withTransaction(pool, async (c) => {
       expect(await siblingForJid(c, "nope@lid")).toBeNull();
-    });
-  });
-
-  it("isolates links per tenant", async () => {
-    await withTenant(app, TENANT_A, async (c) => {
-      await recordLink(c, {
-        lidJid: "789@lid",
-        pnJid: "972522222222@s.whatsapp.net",
-        source: "bridge",
-      });
-    });
-    await withTenant(app, TENANT_B, async (c) => {
-      expect(await siblingForJid(c, "789@lid")).toBeNull();
     });
   });
 });

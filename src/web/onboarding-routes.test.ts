@@ -2,48 +2,41 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import type { SessionHealth } from "../collector/tenant-session-registry.js";
+import type { SessionHealth } from "../collector/session-status.js";
 import { makeOnboardingRoutes, type OnboardingRegistry } from "./onboarding-routes.js";
 
 /**
- * T4 — web onboarding: register → (verify) → scan QR → "connected". These tests drive
- * the /api/onboarding/* surface against a fake registry (the real Baileys registry is
- * an EventEmitter with the same start/snapshot/on shape).
+ * Web onboarding: scan QR → "connected". These tests drive the /api/onboarding/* surface
+ * against a fake adapter (the real one is an EventEmitter with the same start/snapshot/on
+ * shape).
  */
 
-const TENANT = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-
 class FakeRegistry extends EventEmitter implements OnboardingRegistry {
-  started: string[] = [];
-  health = new Map<string, SessionHealth>();
-  linked = new Set<string>();
-  async start(tenantId: string): Promise<void> {
-    this.started.push(tenantId);
+  startCount = 0;
+  health: SessionHealth = {
+    status: "stopped",
+    restarts: 0,
+    lastError: null,
+    lastConnectedAt: null,
+  };
+  async start(): Promise<void> {
+    this.startCount++;
   }
-  snapshot(): SessionHealth[] {
-    return [...this.health.values()];
+  snapshot(): SessionHealth {
+    return this.health;
   }
-  hasLinkedAuth(tenantId: string): boolean {
-    return this.linked.has(tenantId);
-  }
-  setStatus(tenantId: string, status: SessionHealth["status"]): void {
-    this.health.set(tenantId, {
-      tenantId,
-      status,
-      restarts: 0,
-      lastError: null,
-      lastConnectedAt: null,
-    });
+  setStatus(status: SessionHealth["status"]): void {
+    this.health = { ...this.health, status };
   }
 }
 
 let server: http.Server | null = null;
 
-function listen(registry: OnboardingRegistry, tenantId = TENANT): Promise<string> {
+function listen(registry: OnboardingRegistry): Promise<string> {
   const routes = makeOnboardingRoutes({ registry });
   server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    void routes.handle(req, res, url, tenantId).then((handled) => {
+    void routes.handle(req, res, url).then((handled) => {
       if (!handled) {
         res.writeHead(404);
         res.end("nope");
@@ -61,68 +54,43 @@ afterEach(async () => {
 });
 
 describe("GET /api/onboarding/status", () => {
-  it("reports 'unlinked' when the tenant has no session yet", async () => {
+  it("reports 'unlinked' when there is no session yet", async () => {
     const base = await listen(new FakeRegistry());
     const r = await fetch(`${base}/api/onboarding/status`);
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ status: "unlinked" });
   });
 
-  it("maps the registry health to a coarse onboarding status", async () => {
+  it("maps the session health to a coarse onboarding status", async () => {
     const reg = new FakeRegistry();
-    reg.setStatus(TENANT, "connected");
+    reg.setStatus("connected");
     const base = await listen(reg);
     expect(await (await fetch(`${base}/api/onboarding/status`)).json()).toEqual({
       status: "connected",
     });
   });
 
-  it("only ever reports the requesting tenant's own status (isolation)", async () => {
+  it("collapses 'disconnected' to 'connecting'", async () => {
     const reg = new FakeRegistry();
-    reg.setStatus("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "connected");
-    const base = await listen(reg, TENANT);
-    expect(await (await fetch(`${base}/api/onboarding/status`)).json()).toEqual({
-      status: "unlinked",
-    });
-  });
-
-  // Regression: a tenant who already linked WhatsApp (creds.json on disk) must not be
-  // re-onboarded just because their socket is mid-(re)connect right after login or a
-  // server restart. Onboarding completion is the persisted-link fact, not live health.
-  it("reports 'connected' for a linked tenant whose socket is still connecting", async () => {
-    const reg = new FakeRegistry();
-    reg.linked.add(TENANT);
-    reg.setStatus(TENANT, "connecting");
+    reg.setStatus("disconnected");
     const base = await listen(reg);
     expect(await (await fetch(`${base}/api/onboarding/status`)).json()).toEqual({
-      status: "connected",
+      status: "connecting",
     });
   });
 
-  it("reports 'connected' for a linked tenant with no live session yet (post-restart)", async () => {
+  it("still requires re-link when logged out (revoked creds)", async () => {
     const reg = new FakeRegistry();
-    reg.linked.add(TENANT); // creds on disk; startDiscovered hasn't reached it yet
-    const base = await listen(reg);
-    expect(await (await fetch(`${base}/api/onboarding/status`)).json()).toEqual({
-      status: "connected",
-    });
-  });
-
-  it("still requires re-link when a linked tenant is logged out (revoked creds)", async () => {
-    const reg = new FakeRegistry();
-    reg.linked.add(TENANT);
-    reg.setStatus(TENANT, "logged-out");
+    reg.setStatus("logged-out");
     const base = await listen(reg);
     expect(await (await fetch(`${base}/api/onboarding/status`)).json()).toEqual({
       status: "logged-out",
     });
   });
 
-  // The mask must be load-bearing on the link fact: a tenant with NO persisted creds
-  // and a connecting socket is still mid-first-link and must NOT be skipped past onboarding.
-  it("does NOT mask 'connecting' to 'connected' for a tenant with no persisted creds", async () => {
-    const reg = new FakeRegistry(); // linked stays empty
-    reg.setStatus(TENANT, "connecting");
+  it("does NOT mask 'connecting' to 'connected'", async () => {
+    const reg = new FakeRegistry();
+    reg.setStatus("connecting");
     const base = await listen(reg);
     expect(await (await fetch(`${base}/api/onboarding/status`)).json()).toEqual({
       status: "connecting",
@@ -131,17 +99,17 @@ describe("GET /api/onboarding/status", () => {
 });
 
 describe("POST /api/onboarding/link", () => {
-  it("starts the tenant's session and returns 202", async () => {
+  it("starts the session and returns 202", async () => {
     const reg = new FakeRegistry();
     const base = await listen(reg);
     const r = await fetch(`${base}/api/onboarding/link`, { method: "POST" });
     expect(r.status).toBe(202);
-    expect(reg.started).toEqual([TENANT]);
+    expect(reg.startCount).toBe(1);
   });
 });
 
 describe("GET /api/onboarding/qr (SSE)", () => {
-  it("streams the tenant's QR codes, then a connected event, ignoring other tenants", async () => {
+  it("streams QR codes, then a connected event", async () => {
     const reg = new FakeRegistry();
     const base = await listen(reg);
 
@@ -149,18 +117,16 @@ describe("GET /api/onboarding/qr (SSE)", () => {
 
     // The handler subscribes synchronously when the request lands; emit on the next tick.
     await new Promise((r) => setTimeout(r, 20));
-    reg.emit("qr", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "OTHER-TENANT-QR"); // ignored
-    reg.emit("qr", TENANT, "QR-PAYLOAD-1");
+    reg.emit("qr", "QR-PAYLOAD-1");
     // connected ends the stream — the server serializes it AFTER the async qr render, so
     // the qr frame is always present (no sleep needed; deterministic by construction).
-    reg.emit("connected", TENANT);
+    reg.emit("connected");
 
     const res = await resPromise;
     expect(res.headers.get("content-type")).toContain("text/event-stream");
     const text = await res.text();
     expect(text).toContain("event: qr");
     expect(text).toContain("data:image/png;base64"); // rendered server-side, browser shows <img>
-    expect(text).not.toContain("OTHER-TENANT-QR");
     expect(text).toContain("event: connected");
     // Ordering guarantee: the qr frame precedes the connected frame.
     expect(text.indexOf("event: qr")).toBeLessThan(text.indexOf("event: connected"));
@@ -172,22 +138,21 @@ describe("GET /api/onboarding/qr (SSE)", () => {
     const controller = new AbortController();
     void fetch(`${base}/api/onboarding/qr`, { signal: controller.signal }).catch(() => {});
     await new Promise((r) => setTimeout(r, 30));
-    expect(reg.started).toEqual([TENANT]);
+    expect(reg.startCount).toBe(1);
     controller.abort();
   });
 });
 
 describe("GET /api/onboarding/progress (SSE)", () => {
-  it("streams the tenant's history-sync progress, then a done event at 100, ignoring other tenants", async () => {
+  it("streams history-sync progress, then a done event at 100", async () => {
     const reg = new FakeRegistry();
     const base = await listen(reg);
 
     const resPromise = fetch(`${base}/api/onboarding/progress`);
     await new Promise((r) => setTimeout(r, 20));
 
-    reg.emit("history-progress", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", { progress: 99 }); // ignored
-    reg.emit("history-progress", TENANT, { progress: 30, count: 12 });
-    reg.emit("history-progress", TENANT, { progress: 100, count: 40 }); // terminal → done + end
+    reg.emit("history-progress", { progress: 30, count: 12 });
+    reg.emit("history-progress", { progress: 100, count: 40 }); // terminal → done + end
 
     const res = await resPromise;
     expect(res.headers.get("content-type")).toContain("text/event-stream");
@@ -195,8 +160,6 @@ describe("GET /api/onboarding/progress (SSE)", () => {
     expect(text).toContain("event: progress");
     expect(text).toContain('"progress":30');
     expect(text).toContain("event: done");
-    // The other tenant's 99 must never appear, and progress precedes done.
-    expect(text).not.toContain('"progress":99');
     expect(text.indexOf("event: progress")).toBeLessThan(text.indexOf("event: done"));
   });
 
@@ -208,7 +171,7 @@ describe("GET /api/onboarding/progress (SSE)", () => {
     const resPromise = fetch(`${base}/api/onboarding/progress`, { signal: controller.signal });
     await new Promise((r) => setTimeout(r, 20));
 
-    reg.emit("history-progress", TENANT, { progress: null, count: 5 });
+    reg.emit("history-progress", { progress: null, count: 5 });
     await new Promise((r) => setTimeout(r, 20));
     // Stream is still open (no done frame) — abort to finish the test.
     controller.abort();

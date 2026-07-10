@@ -3,7 +3,6 @@ import { analysisJobFor } from "../../collector/media-backfill-loop.js";
 import { listScopes, type ScopeUpdate, upsertScopes } from "../../db/repositories/chat-scopes.js";
 import { findGroupByName } from "../../db/repositories/groups.js";
 import { selectPresentUnanalyzedMediaByGroup } from "../../db/repositories/message-media.js";
-import { currentTenantId } from "../../db/tenant-context.js";
 import { getLogger } from "../../logging/log.js";
 import type { ServerDeps } from "./context.js";
 
@@ -122,14 +121,13 @@ async function putScopes(
     // enqueue). Log it and move on.
     if (deps.enqueue) {
       try {
-        const tenantId = currentTenantId();
         for (const update of updates) {
           if (update.included !== true) continue;
           const media = await selectPresentUnanalyzedMediaByGroup(deps.pool, update.groupId);
           for (const row of media) {
             const job = analysisJobFor(row.mediaKind);
             if (job) {
-              await deps.enqueue(job, { messageId: String(row.messageId), tenantId });
+              await deps.enqueue(job, { messageId: String(row.messageId) });
             }
           }
         }
