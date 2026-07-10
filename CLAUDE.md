@@ -9,13 +9,16 @@ models). See `PROJECT_OVERVIEW.md` and `README.md` for the full picture.
 > **Agent behavior contract:** @GOVERNANCE.md — the three immutable layers
 > (Spec · Verifier · Environment) that govern how agents work here. Read it.
 
-**Single-user, zero-config.** There is no login and no server-side accounts —
-everything runs against one Postgres database as a single fixed tenant. The
-`tenant_id` columns and Postgres RLS policies on those tables are dormant
-plumbing left in place from an earlier design; the app connects as the DB
-owner and never exercises them at runtime. Don't build new user-facing
-features on top of them — treat them as inert history, not an available
-capability.
+**Single-user, zero-config, local-only.** There is no login, no accounts, and no
+multi-tenancy — everything runs against one Postgres database on one machine.
+The application code carries no tenant concept at all.
+
+What remains in the schema is inert: `tenant_id` columns (with a constant
+default), the single-row `tenants` table that ~30 of them foreign-key into, and
+the revoked `NOLOGIN` roles from migration 024. RLS is gone. None of this is an
+available capability — don't read from it, write to it, or build on it. Removing
+the columns would mean reshaping primary keys and foreign keys across the whole
+schema for no gain.
 
 ## Stack
 
@@ -83,7 +86,9 @@ code** — run `npm run check --write` before committing. CI runs on GitHub-host
   the filename so parallel branches can't collide; never hand-number. (`migrations.test.ts`
   fails CI on any duplicate number as a backstop.)
 - Migrations are never rewritten or squashed after merge — dead columns/tables from
-  removed features stay as inert history rather than being retrofitted.
+  removed features stay as inert history rather than being retrofitted. To *remove* a
+  feature, add new forward migrations that `DROP` what it added (see the tenancy/RLS
+  removal), never edit the historical `up`/`down`.
 
 ## Code style
 

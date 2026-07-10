@@ -78,12 +78,15 @@ confirm; never assume that gate or claim it on the user's behalf.
 | Path | Purpose |
 |---|---|
 | `src/collector/` | WhatsApp link + ingest (Baileys session) |
+| `src/importer/` | WhatsApp export (`.zip`/`.txt`) parsing + bulk import |
 | `src/db/` · `…/repositories/` · `…/migrations/` | Postgres source of truth · repository pattern · `node-pg-migrate` (one concern, up+down) |
 | `src/jobs/` · `src/workers/` · `…/handlers/` | RabbitMQ bus · workers · per-job handler logic |
-| `src/serve/` · `src/web/` (`…/public/`) | HTTP server · RTL mobile web app + static assets |
+| `src/scheduler/` | Twice-daily digest scheduling + run enqueue |
+| `src/serve/` · `src/web/` (`…/public/`) | `serve` composition root · HTTP server (`web/server.ts`) + RTL mobile web app & static assets |
+| `src/service/` | Cross-process liveness / heartbeat |
 | `src/summarization/` | Summary/digest generation pipeline |
 | `src/media/` · `src/transcription/` · `src/vision/` | Media pipeline · faster-whisper STT · local vision |
-| `src/ops/` · `src/doctor/` | Operational tooling · diagnostics |
+| `src/logging/` · `src/ops/` · `src/doctor/` | Structured logging · operational tooling · diagnostics |
 | `src/test/` | Shared test harness (`globalSetup`, isolated DB clones) |
 
 ### ✅ Always Do — autopilot, no need to ask

@@ -97,7 +97,7 @@ WhatsApp export (.txt/.zip) ──(importer)───┘                        
 | `media-backfill [--limit N]` | Download + analyze media descriptors stored at ingest but not yet fetched. |
 | `full-sync` | Pull deep WhatsApp history on a freshly-linked session (onboarding push sync). |
 | `merge-duplicate-chats` | Merge duplicate group rows (e.g. LID/PN identity splits) into one. |
-| `doctor` | Verify prerequisites (Docker, compose, Postgres+migrations, RabbitMQ, Ollama+model, faster-whisper, ffmpeg, DB role passwords). |
+| `doctor` | Verify prerequisites (Docker, compose, Postgres+migrations, RabbitMQ, Ollama+model, faster-whisper, ffmpeg). |
 
 `make dev` is the everyday entry point: brings up the Docker stack, applies
 migrations, and starts the worker + web server + live collector together.
@@ -122,7 +122,9 @@ The web app (`src/web/public/`) has three surfaces:
 |---|---|
 | `collector/` | Baileys live collector, message mapping, name resolution, **outbound-guard** (hardened so it can never send), backfill, session. |
 | `importer/` | WhatsApp `.txt`/`.zip` parsing, normalization, dedupe, bulk import, media extraction. |
-| `db/` | Postgres client, migrations, repositories (groups, messages, summaries, transcripts, media-analyses, job-runs, watermarks, scheduler-state, status-snapshots, chat-scopes, service-status). Carries dormant `tenant_id` columns + Postgres RLS policies from an earlier design; the app connects as the DB owner and runs everything as one fixed tenant — this plumbing is inert, not an active feature. |
+| `db/` | Postgres client, migrations, repositories (groups, messages, summaries, transcripts, media-analyses, job-runs, watermarks, scheduler-state, status-snapshots, chat-scopes, service-status). The schema still carries inert `tenant_id` columns and a single-row `tenants` table from a removed multi-tenancy design; the app has no tenant concept and connects as the DB owner. See `CLAUDE.md`. |
+| `serve/` | The `serve` composition root — wires the collector, scheduler, retention sweep, and web server into one process. |
+| `test/` | Shared Vitest harness: one Postgres container, per-file isolated DB clones. |
 | `jobs/` | Job bus abstraction — in-memory bus (tests) + RabbitMQ bus (prod), job types, run recorder. |
 | `workers/` | Worker process + handlers: `import-file`, `transcribe-voicenote`, `analyze-media`, `summarize-group`, `summarize-total`. |
 | `transcription/` | Python `faster-whisper` worker (`worker.py`), Node wrapper, ivrit-whisper integration. |
