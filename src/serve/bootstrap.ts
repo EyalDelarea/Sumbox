@@ -255,10 +255,14 @@ export async function startServe(options: { port?: string; collect?: boolean }):
     const { purgeUnselectedChats, unlinkMediaFiles } = await import(
       "../db/repositories/data-deletion.js"
     );
+    const { withTransaction } = await import("../db/transaction.js");
     retentionHandle = startRetentionSweep(
       {
         retentionDays: async () => retentionDays,
-        purgeChats: (olderThanDays) => purgeUnselectedChats(pool, { olderThanDays }),
+        // One transaction so a mid-sweep failure can't leave a chat half-purged
+        // (the function's contract; the web caller wraps it the same way via withTx).
+        purgeChats: (olderThanDays) =>
+          withTransaction(pool, (c) => purgeUnselectedChats(c, { olderThanDays })),
         unlink: (paths) => unlinkMediaFiles(paths),
         log: {
           info: (msg) => log.scheduler.info(msg),
