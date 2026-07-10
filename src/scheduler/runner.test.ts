@@ -180,6 +180,36 @@ describe("startScheduler — startup catch-up", () => {
     stop();
   });
 
+  it("does NOT record slots when the enqueue fails (a failed enqueue must not advance the watermark)", async () => {
+    const pool = makeFakePool();
+    const bus = makeFakeBus();
+    const timer = makeFakeTimer();
+
+    // lastRun null → catch-up due, but enqueue rejects.
+    const getLastRun = vi.fn().mockResolvedValue(null);
+    const recordRun = vi.fn().mockResolvedValue(undefined);
+    const enqueue = vi.fn().mockRejectedValue(new Error("enqueue boom"));
+
+    const { stop } = startScheduler({
+      pool,
+      bus,
+      times: TIMES,
+      enabled: true,
+      now: () => NOW_AFTER_FIRST_SLOT,
+      setTimer: timer.setTimer,
+      getLastRun,
+      recordRun,
+      enqueueRun: enqueue,
+      logger: { info: () => {}, error: () => {} },
+    });
+
+    await vi.waitFor(() => expect(enqueue).toHaveBeenCalled(), { timeout: 2000 });
+    // The enqueue threw, so the watermark must NOT advance.
+    expect(recordRun).not.toHaveBeenCalled();
+
+    stop();
+  });
+
   it("enqueues catch-up when lastRun is null (first ever start)", async () => {
     const pool = makeFakePool();
     const bus = makeFakeBus();
