@@ -57,11 +57,8 @@ export function kindFromFilename(filename: string | null | undefined): "image" |
  * Returns true if the media message represents a sticker and should be
  * excluded from visual analysis enqueueing.
  *
- * @param filename       - The media_filename column value (may be null for live messages).
- * @param isStickerFlag  - Explicit sticker flag from the message type / Baileys classification.
- *                         When true, always returns true regardless of filename.
+ * @param isStickerFlag - Explicit sticker flag from the message type / Baileys classification.
  */
-export function isSticker(filename: string | null | undefined, isStickerFlag?: boolean): boolean {
-  if (isStickerFlag === true) return true;
-  return false;
+export function isSticker(isStickerFlag?: boolean): boolean {
+  return isStickerFlag === true;
 }

@@ -61,27 +61,14 @@ describe("kindFromFilename", () => {
 
 describe("isSticker", () => {
   it("returns true when isStickerFlag is true", () => {
-    expect(isSticker(null, true)).toBe(true);
+    expect(isSticker(true)).toBe(true);
   });
 
-  it("returns false when isStickerFlag is false and filename is not sticker", () => {
-    expect(isSticker("photo.jpg", false)).toBe(false);
+  it("returns false when isStickerFlag is false", () => {
+    expect(isSticker(false)).toBe(false);
   });
 
-  it("returns false when isStickerFlag is false and filename is null", () => {
-    expect(isSticker(null, false)).toBe(false);
-  });
-
-  it("returns false when isStickerFlag is undefined and filename is not sticker", () => {
-    expect(isSticker("photo.jpg")).toBe(false);
-  });
-
-  it("returns false when isStickerFlag is undefined and filename is null", () => {
-    expect(isSticker(null)).toBe(false);
-  });
-
-  it("returns true when isStickerFlag is true regardless of filename", () => {
-    expect(isSticker("photo.jpg", true)).toBe(true);
-    expect(isSticker("clip.mp4", true)).toBe(true);
+  it("returns false when isStickerFlag is undefined", () => {
+    expect(isSticker()).toBe(false);
   });
 });
