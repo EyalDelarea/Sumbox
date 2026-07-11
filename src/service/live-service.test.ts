@@ -83,6 +83,35 @@ describe("attachCollector", () => {
     expect(recordHeartbeat).toHaveBeenCalled();
   });
 
+  it("fires the onConnected hook on 'connected' (after heartbeat) and not after stop()", async () => {
+    const { session, bus, setConnected, recordHeartbeat, handleMessage } = makeFakeDeps();
+    const onConnected = vi.fn();
+
+    const handle = attachCollector({
+      session: session as unknown as CollectorSession,
+      pool: fakePool,
+      bus,
+      dataDir: "/tmp/data",
+      setConnected,
+      recordHeartbeat,
+      handleMessage,
+      heartbeatMs: 60_000,
+      onConnected,
+    });
+
+    session.emit("connected");
+    await Promise.resolve();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    // Hook runs as part of the connect path, after the heartbeat is (re)started.
+    expect(recordHeartbeat).toHaveBeenCalled();
+
+    // After stop(), the stopped-latch means a further 'connected' fires nothing.
+    handle.stop();
+    session.emit("connected");
+    await Promise.resolve();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+  });
+
   it("sets disconnected on 'disconnected' event", async () => {
     const { session, bus, setConnected, recordHeartbeat, handleMessage } = makeFakeDeps();
 

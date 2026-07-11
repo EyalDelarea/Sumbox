@@ -145,47 +145,37 @@ program
     const config = loadConfig();
     const authDir = path.join(config.dataDir, "baileys-auth");
 
-    // Import lazily to avoid loading Baileys at startup for non-collect commands
+    // Import lazily to avoid loading Baileys at startup for non-collect commands.
     const [
       { startSession },
-      { handleIncomingMessage },
-      { maybeHandleSummaryCommand },
-      { getSummaryOutputById },
-      { upsertParticipant },
-      { getSummaryUserMark, upsertSummaryUserMark },
-      { runSummarizeOnPool },
+      { attachCollector },
+      { RabbitMqJobBus },
+      { PostgresJobRunRecorder },
       { createDbClient },
       { setCollectorConnected },
-      { startHeartbeat },
       { makeSummaryCommandDeps },
+      { resolveAllGroupNames },
     ] = await Promise.all([
       import("./collector/session.js"),
-      import("./collector/collector.js"),
-      import("./collector/summary-command.js"),
-      import("./db/repositories/summaries.js"),
-      import("./db/repositories/participants.js"),
-      import("./db/repositories/summary-user-marks.js"),
-      import("./summarization/summarize.js"),
+      import("./service/live-service.js"),
+      import("./jobs/rabbitmq-bus.js"),
+      import("./jobs/job-run-recorder.js"),
       import("./db/client.js"),
       import("./db/repositories/service-status.js"),
-      import("./service/heartbeat.js"),
       import("./serve/summary-command-deps.js"),
+      import("./collector/name-resolver.js"),
     ]);
 
+    // ONE pool serves the collector, the job-run recorder, and the /סיכום command.
     const pool = createDbClient();
-    let storedCount = 0;
-
-    // Cross-process liveness: this standalone collector keeps the shared service_status
-    // row fresh (connected flag + 30s heartbeat) so a SEPARATE `serve` process — e.g.
-    // `make dev-ui` in split dev — sees it as live. Without it, that serve has no live
-    // collector, so /api/status falls back to the (stale) DB row and the UI shows the
-    // "system not responding" banner. Mirrors the serve --collect path (attachCollector
-    // in src/service/live-service.ts). The all-in-one `serve --collect` is one process,
-    // so it never hit this — only the split-dev layout does.
-    let heartbeatHandle: { stop: () => void } | null = null;
-    // Latched on shutdown so the session's final 'disconnected' (emitted by session.stop()
-    // on a later tick) is ignored instead of writing to an already-closing pool.
-    let stopped = false;
+    // The job bus makes captured media transcribable/analyzable in real time —
+    // the same enqueue path `serve --collect` uses. `collect` previously had no
+    // bus, so its downloaded media was stored but never enqueued (split-dev
+    // parity gap). See issue #5.
+    const bus = new RabbitMqJobBus({
+      url: config.broker.url,
+      recorder: new PostgresJobRunRecorder(pool),
+    });
 
     // The /סיכום command's runtime deps. resolveEnabledJids/resolveTrigger read
     // group_command_permissions / user_preferences LIVE, per message — this
@@ -217,123 +207,66 @@ program
       process.stdout.write("Scan the QR code above with WhatsApp to link your account.\n");
     });
 
-    session.on("connected", () => {
-      // Mark the shared row connected and (re)start the heartbeat. The session re-emits
-      // 'connected' on every auto-reconnect, so stop any prior interval first — otherwise
-      // each reconnect orphans the previous timer and they accumulate.
-      if (!stopped) {
-        void setCollectorConnected(pool, true).catch((err: unknown) =>
-          collectorLog.error({ err }, "setCollectorConnected(true) failed"),
-        );
-        heartbeatHandle?.stop();
-        heartbeatHandle = startHeartbeat({ pool, intervalMs: 30_000 });
-      }
-      collectorLog.info({ stored: 0 }, "collecting");
-      logLifecycle("collector.connected");
-      // Proactive name resolution: resolve quiet groups that have never sent
-      // a new live message (fire-and-forget; must not block collection startup).
-      import("./collector/name-resolver.js")
-        .then(({ resolveAllGroupNames }) =>
-          resolveAllGroupNames(pool, {
-            groupSubject: (jid) => session.groupSubject(jid),
-          }),
-        )
-        .then(({ resolved }) => {
-          if (resolved > 0) {
-            nameResolverLog.info({ resolved }, "resolved group name(s)");
-          }
-        })
-        .catch((err: unknown) => {
-          nameResolverLog.error({ err }, "group name resolution error");
-        });
-    });
-
-    session.on("disconnected", () => {
-      if (stopped) return;
-      // Pause the heartbeat while disconnected so the row goes stale (and a separate serve
-      // UI shows the banner) rather than looking live; it resumes on the next 'connected'.
-      heartbeatHandle?.stop();
-      heartbeatHandle = null;
-      void setCollectorConnected(pool, false).catch((err: unknown) =>
-        collectorLog.error({ err }, "setCollectorConnected(false) failed"),
-      );
-    });
-
-    session.on("message", async (msg) => {
-      try {
-        const stored = await handleIncomingMessage(pool, msg, {
-          dataDir: config.dataDir,
-          downloadVoiceNote: (m) => session.downloadMedia(m),
-          downloadImage: (m) => session.downloadMedia(m),
-          downloadVideo: (m) => session.downloadMedia(m),
+    // The collector lifecycle — connect/disconnect status, the 30s heartbeat with
+    // reconnect de-dup, per-message crash isolation, media download + job enqueue,
+    // and the /סיכום command — is the SAME wiring `serve --collect` uses. Route
+    // through attachCollector instead of re-hand-coding it; collect's two connect-
+    // time extras (proactive name resolution + a "collecting" log) ride onConnected.
+    const handle = attachCollector({
+      session,
+      pool,
+      bus,
+      dataDir: config.dataDir,
+      log: collectorLog,
+      onError: (err) => collectorLog.warn({ err }, "collector message handler error"),
+      summaryCommand: cmdDeps,
+      onConnected: () => {
+        collectorLog.info({ stored: 0 }, "collecting");
+        logLifecycle("collector.connected");
+        // Proactive name resolution: resolve quiet groups that have never sent a
+        // new live message (fire-and-forget; must not block collection startup).
+        void resolveAllGroupNames(pool, {
           groupSubject: (jid) => session.groupSubject(jid),
-          lidForPn: (pn) => session.lidForPn(pn),
-          pnForLid: (lid) => session.pnForLid(lid),
-          log: collectorLog,
-        });
-        if (stored) {
-          storedCount++;
-          collectorLog.info({ stored: storedCount }, "collecting");
-        }
-      } catch (err) {
-        collectorLog.warn({ err }, "failed to store message");
-      }
-
-      // /סיכום reply. Best-effort and isolated from ingest: a failure here must
-      // never disrupt collection. Always attempted — the matcher's own pre-gate
-      // + DB resolvers cheaply handle "nothing enabled" / "not the trigger".
-      try {
-        await maybeHandleSummaryCommand(msg, {
-          pool,
-          resolveEnabledJids: cmdDeps.resolveEnabledJids,
-          resolveTrigger: cmdDeps.resolveTrigger,
-          sendText: (jid, text, opts) => session.sendText(jid, text, opts),
-          react: (jid, key, emoji) => session.react(jid, key, emoji),
-          inFlight: cmdDeps.inFlight,
-          lastSummaryByUser: cmdDeps.lastSummaryByUser,
-          makeQuoted: (jid, waId, text) => session.quotedFrom(jid, waId, text),
-          resolvePn: (lid) => session.pnForLid(lid),
-          runSummarize: ({ groupId, selection, requesterId }) =>
-            runSummarizeOnPool(pool, groupId, selection, { requesterId }),
-          marks: {
-            resolveParticipantId: (name) => upsertParticipant(pool, name),
-            getMark: (groupId, pid) => getSummaryUserMark(pool, groupId, pid),
-            setMark: (m) => upsertSummaryUserMark(pool, m),
-            getSummaryOutput: (id) => getSummaryOutputById(pool, id),
-          },
-          log: collectorLog,
-        });
-      } catch (err) {
-        collectorLog.warn({ err }, "summary command handler error");
-      }
+        })
+          .then(({ resolved }) => {
+            if (resolved > 0) {
+              nameResolverLog.info({ resolved }, "resolved group name(s)");
+            }
+          })
+          .catch((err: unknown) => {
+            nameResolverLog.error({ err }, "group name resolution error");
+          });
+      },
     });
 
-    // Graceful shutdown on Ctrl-C
+    // Graceful shutdown on Ctrl-C. handle.stop() latches teardown, stops the
+    // heartbeat, session.stop()s, and fires a best-effort setConnected(false).
     process.on("SIGINT", () => {
-      // Latch teardown and stop the heartbeat BEFORE closing the pool, so neither the
-      // interval nor the session's final 'disconnected' writes to a closing pool.
-      stopped = true;
-      heartbeatHandle?.stop();
-      heartbeatHandle = null;
-      collectorLog.info({ stored: storedCount }, "stopping collector");
       logLifecycle("shutdown", { proc: "collect", signal: "SIGINT" });
-      session.stop();
-      // Best-effort: flip the shared row to disconnected so a separate serve UI reflects it
-      // immediately (not only after the staleness window), then close the pool and exit.
+      handle.stop();
+      collectorLog.info("stopping collector");
+      // Await our own setConnected(false) so the shared row is flipped disconnected
+      // BEFORE the pool closes (a separate serve UI reflects it immediately, not only
+      // after the staleness window), then close the bus + pool and exit.
       void setCollectorConnected(pool, false)
         .catch(() => {})
         .finally(() => {
-          pool
-            .end()
+          void bus
+            .close()
             .catch(() => {})
             .finally(() => {
-              const exit = () => process.exit(0);
-              try {
-                getBaseLogger().flush(exit);
-              } catch {
-                exit();
-              }
-              setTimeout(exit, 1000).unref();
+              void pool
+                .end()
+                .catch(() => {})
+                .finally(() => {
+                  const exit = () => process.exit(0);
+                  try {
+                    getBaseLogger().flush(exit);
+                  } catch {
+                    exit();
+                  }
+                  setTimeout(exit, 1000).unref();
+                });
             });
         });
     });
