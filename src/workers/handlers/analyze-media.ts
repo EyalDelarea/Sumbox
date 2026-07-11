@@ -11,6 +11,8 @@
  * All heavy I/O (Ollama, ffmpeg, DB) is injected via deps for testability.
  */
 
+import { makeIdempotentHandler } from "./idempotent-handler.js";
+
 export type AnalyzeMediaHandlerDeps = {
   /**
    * Returns true if a media_analyses row already exists for this messageId.
@@ -30,20 +32,13 @@ export type AnalyzeMediaHandlerDeps = {
  * handler instance can serve both types.
  */
 export function makeAnalyzeMediaHandler(deps: AnalyzeMediaHandlerDeps) {
-  return async function analyzeMediaHandler(
-    job: { payload: { messageId: string } },
-    type: "analyze.image" | "analyze.video",
-  ): Promise<void> {
-    const messageId = Number(job.payload.messageId);
-    const kind: "image" | "video" = type === "analyze.video" ? "video" : "image";
-
-    // Idempotency: skip if already analyzed (handles redelivery safely)
-    const alreadyDone = await deps.hasAnalysis(messageId);
-    if (alreadyDone) {
-      return;
-    }
-
-    // Analyze and persist (throws on failure → bus retries)
-    await deps.analyzeOne(messageId, kind);
-  };
+  // Idempotency (skip if already analyzed) lives in the shared wrapper; the
+  // analyzeOne core throws on failure → the bus retries.
+  return makeIdempotentHandler<
+    [{ payload: { messageId: string } }, "analyze.image" | "analyze.video"]
+  >({
+    isDone: (job) => deps.hasAnalysis(Number(job.payload.messageId)),
+    work: (job, type) =>
+      deps.analyzeOne(Number(job.payload.messageId), type === "analyze.video" ? "video" : "image"),
+  });
 }
