@@ -1,4 +1,5 @@
 import type { Job } from "../../jobs/job-types.js";
+import { makeIdempotentHandler } from "./idempotent-handler.js";
 
 export type TranscribeVoicenoteHandlerDeps = {
   /**
@@ -24,18 +25,10 @@ export type TranscribeVoicenoteHandlerDeps = {
  * All heavy I/O (Python, ffmpeg, DB) is injected via deps for testability.
  */
 export function makeTranscribeVoicenoteHandler(deps: TranscribeVoicenoteHandlerDeps) {
-  return async function transcribeVoicenoteHandler(
-    job: Job<"transcribe.voicenote">,
-  ): Promise<void> {
-    const { messageId } = job.payload;
-
-    // Idempotency: skip if already transcribed (handles redelivery safely)
-    const alreadyDone = await deps.isAlreadyTranscribed(messageId);
-    if (alreadyDone) {
-      return;
-    }
-
-    // Transcribe and persist (throws on failure → bus retries)
-    await deps.transcribeOne(messageId);
-  };
+  // Idempotency (skip if already transcribed) lives in the shared wrapper; the
+  // transcribeOne core throws on failure → the bus retries.
+  return makeIdempotentHandler<[Job<"transcribe.voicenote">]>({
+    isDone: (job) => deps.isAlreadyTranscribed(job.payload.messageId),
+    work: (job) => deps.transcribeOne(job.payload.messageId),
+  });
 }
