@@ -2052,60 +2052,6 @@ body::after {
 }
 .ring--muted { box-shadow: 0 0 0 2px rgba(90, 96, 112, 0.6); }
 
-/* ── Phase Tube loader ──────────────────────────────────── */
-.phase-tube-wrap { padding: 22px 18px 16px; position: relative; overflow: hidden; }
-.phase-tube__aurora {
-  position: absolute;
-  inset: -40% -10% auto -10%;
-  height: 120%;
-  pointer-events: none;
-  opacity: 0.5;
-  background:
-    radial-gradient(200px 120px at 80% 0, rgba(82, 128, 106, 0.4), transparent 60%),
-    radial-gradient(200px 120px at 10% 20%, rgba(82, 128, 106, 0.35), transparent 62%);
-  filter: blur(30px);
-}
-.phase-tube__cap { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 14px; position: relative; }
-.phase-tube__caption { font-size: var(--text-base); color: #bfe0cc; }
-.phase-tube__elapsed { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--accent); }
-.phase-tube {
-  position: relative;
-  height: 34px;
-  border-radius: var(--radius-pill);
-  background: rgba(225, 240, 255, 0.06);
-  border: 1px solid var(--line);
-  overflow: hidden;
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-}
-.phase-tube__liq {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  right: 0;
-  width: 0;
-  background: linear-gradient(270deg, rgba(82, 128, 106, 0.55), rgba(82, 128, 106, 0.9));
-  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
-  overflow: hidden;
-}
-.phase-tube__liq::before, .phase-tube__liq::after {
-  content: "";
-  position: absolute;
-  top: -14px;
-  right: -30%;
-  width: 170%;
-  height: 30px;
-  background: rgba(255, 255, 255, 0.20);
-  border-radius: 42%;
-  animation: tube-wave 2.4s linear infinite;
-}
-.phase-tube__liq::after { background: rgba(255, 255, 255, 0.11); animation-duration: 3.3s; animation-direction: reverse; }
-@keyframes tube-wave { to { transform: rotate(360deg); } }
-.phase-tube__zone { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, 0.12); }
-.phase-tube__labels { display: flex; margin-top: 10px; }
-.phase-tube__label { flex: 1; text-align: center; font-size: var(--text-sm); color: var(--muted); transition: color 0.3s ease, text-shadow 0.3s ease; }
-.phase-tube__label.is-lit { color: #bfe0cc; }
-.phase-tube__label.is-active { color: var(--accent); text-shadow: 0 0 8px rgba(82, 128, 106, 0.7); font-weight: 500; }
-
 /* ── Centered headers (total view) ──────────────────────── */
 .detail-ghead--center { text-align: center; }
 .chips--center { justify-content: center; }
@@ -2197,9 +2143,8 @@ body::after {
 /* ── Reduced motion ─────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .gcard--fresh, .ring--fresh, .feat::after, .feat--ama .feat__ico,
-  .phase-tube__liq::before, .phase-tube__liq::after, .main-welcome__orb { animation: none !important; }
+  .main-welcome__orb { animation: none !important; }
   .gcard, .feat { transform: none !important; }
-  .phase-tube__liq { transition: none !important; }
 }
 
 /* ── T2 auth pane (multi-tenant login/register + verify/reset landing) ────── */
@@ -4519,16 +4464,6 @@ h2.dg-sec{ margin:14px 2px 0; }
   text-align: start;
   width: 100%;
 }
-.phase-tube__liq {
-  background: linear-gradient(270deg, var(--accent), color-mix(in oklab, var(--accent), white 22%));
-}
-.phase-tube__aurora {
-  background:
-    radial-gradient(200px 120px at 80% 0, var(--accent-weak), transparent 60%),
-    radial-gradient(200px 120px at 10% 20%, var(--accent-weak), transparent 62%);
-}
-.phase-tube__caption { color: var(--ink-2); }
-.phase-tube__label.is-lit { color: var(--accent-ink); }
 
 /* ── Summary feedback (👍/👎 + reason chips) ─────────────── */
 .asst-rate { display: flex; gap: 8px; align-items: center; font-size: var(--text-xs); color: var(--muted); }
