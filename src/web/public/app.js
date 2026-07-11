@@ -20,7 +20,6 @@ import { formatAgo, presetToSince, validateRangeInput } from "./lib/time.js";
 import { renderInline, renderMarkdown, toWhatsAppText } from "./lib/markdown.js";
 import { deriveHealth } from "./lib/health.js";
 import { shouldStartBackgroundRefresh } from "./lib/open-state.js";
-import { scanFill } from "./lib/phase-loader.js";
 import { compactUrlLabel, isHttpUrl } from "./lib/url-label.js";
 import { DEMO_GROUPS, DEMO_STRUCTURED, DEMO_SUMMARY, DEMO_SUMMARIES, DEMO_SUMMARY_COMMANDS, DEMO_TOTAL_HIGHLIGHTS, DEMO_TOTAL_PERCHAT } from "./lib/demo-data.js";
 import { applyTheme, readStoredTheme, resolveInitialTheme, setTheme } from "./lib/theme.js";
@@ -741,12 +740,7 @@ function teardownStream() {
 function onSyncing(data) {
   if (detailState.showingCachedCard) return;
   if (data.phase === "start") {
-    detailState.syncingStart = Date.now();
     setSummaryRegion(buildPhaseTube({ phase: "sync", elapsed: 0 }));
-    detailState.syncingTimer = setInterval(() => {
-      const elapsed = Math.round((Date.now() - detailState.syncingStart) / 1000);
-      setTubeElapsed(elapsed);
-    }, 500);
   } else if (data.phase === "done") {
     clearSyncingTimer();
     setSummaryRegion(buildPhaseTube({ phase: "read", elapsed: Math.round(data.fetchMs / 1000), messages: data.fetched }));
@@ -759,10 +753,6 @@ function onStatus(data) {
   const elapsed = detailState.started ? Math.round((Date.now() - detailState.started) / 1000) : 0;
   const mediaJobsAhead = typeof data.mediaJobsAhead === "number" ? data.mediaJobsAhead : 0;
   setSummaryRegion(buildPhaseTube({ phase: "read", messages: data.messages || 0, elapsed, mediaJobsAhead }));
-  detailState.syncingTimer = setInterval(() => {
-    const secs = detailState.started ? Math.round((Date.now() - detailState.started) / 1000) : 0;
-    setTubeElapsed(secs);
-  }, 1000);
 }
 
 function onToken(data) {
@@ -871,8 +861,8 @@ function buildSumLoader(title, quip, compact = false) {
 
 /**
  * Summarize loader (phase-aware copy). Name + signature are kept so existing
- * call sites — and the now no-op tube updaters — need no change; the retired
- * Glacier "phase tube" is replaced by the designed .sumload scene.
+ * call sites need no change; the retired Glacier "phase tube" is replaced by
+ * the designed .sumload scene.
  * @param {{ phase?: string, mediaJobsAhead?: number }} opts
  */
 function buildPhaseTube({ phase = "sync", mediaJobsAhead = 0 } = {}) {
@@ -887,18 +877,6 @@ function buildPhaseTube({ phase = "sync", mediaJobsAhead = 0 } = {}) {
     ? `מנתח עוד ${mediaJobsAhead} פריטי מדיה ברקע — הסיכום ימשיך`
     : defaultQuip;
   return buildSumLoader(title, quip);
-}
-
-/** Update the live elapsed counter inside the tube. */
-function setTubeElapsed(sec) {
-  const el = document.getElementById("tube-elapsed");
-  if (el) el.textContent = `${sec}ש׳`;
-}
-
-/** Update the liquid fill width (used by the total-view scan). */
-function setTubeFill(pct) {
-  const liq = document.querySelector(".phase-tube__liq");
-  if (liq) liq.style.width = `${pct}%`;
 }
 
 function buildSummaryCardStreaming(text) {
@@ -1315,25 +1293,12 @@ function runTotal({ since }) {
   if (perChatEl) perChatEl.innerHTML = "";
   if (errorEl) errorEl.hidden = true;
 
-  const startedAt = Date.now();
   showTotalLoader("read");
-  totalLoaderTimer = setInterval(() => {
-    setTubeElapsed(Math.round((Date.now() - startedAt) / 1000));
-  }, 1000);
 
   let raw = "";
   let loaderActive = true;
   const es = new EventSource(`/api/total-summary?since=${encodeURIComponent(since)}`);
   activeEventSource = es;
-
-  es.addEventListener("status", (e) => {
-    const d = JSON.parse(e.data);
-    if (d.phase === "chat" && loaderActive) {
-      const cap = document.querySelector("#total-loader .phase-tube__caption");
-      if (cap) cap.textContent = `📖 מסכם את "${d.name}" · צ׳אט ${d.index} מתוך ${d.total}`;
-      if (d.total > 0) setTubeFill(scanFill(d.index - 1, d.total));
-    }
-  });
 
   es.addEventListener("token", (e) => {
     if (loaderActive) { loaderActive = false; clearTotalLoader(); }
