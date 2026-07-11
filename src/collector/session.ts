@@ -30,6 +30,7 @@ import makeWASocket, {
   type WASocket,
 } from "@whiskeysockets/baileys";
 import { getLogger } from "../logging/log.js";
+import { GroupSubjectThrottle } from "./group-subject-throttle.js";
 import { createHistorySyncProgress, type HistorySyncProgress } from "./history-sync-progress.js";
 import { type AllowlistSource, applyOutboundGuard } from "./outbound-guard.js";
 
@@ -75,6 +76,14 @@ export class CollectorSession extends EventEmitter {
    *  guard re-reads it per send and a group enabled at runtime can reply without a
    *  restart; an array is a fixed set. */
   private readonly allowlist: AllowlistSource;
+  /**
+   * Per-JID throttle for group-subject lookups: dedupes concurrent queries and
+   * arms a cooldown after an attempt that yields no usable name, so a burst of
+   * messages from one unresolved group can't hammer WhatsApp's groupMetadata
+   * into a `rate-overlimit` (429). 5-minute window is long enough to shed the
+   * storm yet short enough to self-heal once the rate budget recovers.
+   */
+  private readonly groupSubjectThrottle = new GroupSubjectThrottle(5 * 60_000);
 
   constructor(
     authDir: string,
@@ -202,14 +211,22 @@ export class CollectorSession extends EventEmitter {
    *
    * Thin session glue (untested, like downloadMedia): wraps
    * socket.groupMetadata(jid).subject. Throws if the socket is not connected.
+   *
+   * Routed through {@link groupSubjectThrottle} so concurrent lookups for the
+   * same group collapse to one query and a failed/empty resolution is not
+   * re-attempted for a cooldown window — the guard against the groupMetadata
+   * `rate-overlimit` storm. Returns "" on any resolution failure (never throws
+   * for a connected socket); the caller already treats "" as "no name".
    */
   async groupSubject(jid: string): Promise<string> {
     const sock = this.socket;
     if (!sock) {
       throw new Error("Cannot fetch group subject: socket not connected.");
     }
-    const md = await sock.groupMetadata(jid);
-    return md.subject ?? "";
+    return this.groupSubjectThrottle.resolve(jid, async (id) => {
+      const md = await sock.groupMetadata(id);
+      return md.subject ?? "";
+    });
   }
 
   /** Baileys' lid<->pn mapping store, or null if the socket isn't connected. */
