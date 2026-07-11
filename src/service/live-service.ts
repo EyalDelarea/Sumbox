@@ -67,6 +67,15 @@ export type AttachCollectorDeps = {
   log?: Logger;
   /** Heartbeat interval in ms. Default: 30_000 (30 s). */
   heartbeatMs?: number;
+  /**
+   * Optional hook fired on each session 'connected' (after the heartbeat is
+   * (re)started), and never after stop(). The standalone `collect` CLI uses it
+   * for its connect-time extras — proactive group-name resolution + a
+   * "collecting" log — that have no home in the shared lifecycle. Fire-and-forget
+   * from attachCollector's perspective: throwing/rejecting here is the hook's own
+   * responsibility (it must not break the connect path).
+   */
+  onConnected?: () => void;
   /** Injectable override — defaults to real setCollectorConnected. */
   setConnected?: SetConnectedFn;
   /** Injectable override — defaults to real recordHeartbeat. */
@@ -178,6 +187,9 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
       intervalMs: heartbeatMs,
       recordHeartbeat: _recordHeartbeat,
     });
+
+    // Caller's connect-time extras (e.g. collect's name resolution + log).
+    deps.onConnected?.();
   };
 
   const onDisconnected = () => {
