@@ -4473,6 +4473,7 @@ h2.dg-sec{ margin:14px 2px 0; }
 .asst-rate-b.down:hover { background: var(--warn-weak); color: var(--warn-ink); }
 .asst-rate-q { color: var(--muted); }
 .asst-rate-thanks { color: var(--accent); }
+.asst-rate-error { color: var(--warn-ink); }
 .sum-rate { margin-top: 8px; flex-wrap: wrap; }
 .sum-reason-chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
 /* .chip sets display:inline-flex, which overrides the `hidden` attribute —
