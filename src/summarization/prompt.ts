@@ -138,7 +138,38 @@ export function buildPrompt(messages: PromptMessage[], adjust?: SummaryAdjust): 
   };
 }
 
-/** Rough token estimate (~4 chars/token) for the over-budget guard. */
+/** Hebrew block (U+0590–U+05FF): the alphabet, niqqud, and cantillation. */
+const HEBREW_CHAR = /[֐-׿]/;
+
+/**
+ * Tokens per character, per script — fitted by least squares (no intercept)
+ * against REAL `prompt_eval_count` values from gemma4:26b over eight actual
+ * prompts spanning three chats and 10–46 % Hebrew.
+ *
+ * Gemma tokenizes Hebrew at roughly ONE TOKEN PER CHARACTER (1.28 chars/token);
+ * Latin runs ~3.12 chars/token. The old `chars/4` heuristic was therefore about
+ * right for the Latin half of a prompt and ~2.5x wrong for the Hebrew half, so
+ * its error scaled with how Hebrew a chat was (measured: 1.43x–2.17x). Worst-case
+ * error against the fitted sample: 13 % here vs 53 % for chars/4.
+ *
+ * Rounded slightly ABOVE the fit (0.783 / 0.320). The asymmetry is deliberate:
+ * an over-estimate merely summarizes a few messages fewer, while an under-estimate
+ * lets an oversized prompt past the budget guard, and — because num_ctx is shared
+ * between prompt and response — starves the answer until it is cut off mid-sentence.
+ */
+const HEBREW_TOKENS_PER_CHAR = 0.79;
+const OTHER_TOKENS_PER_CHAR = 0.33;
+
+/**
+ * Estimate the tokens a string costs. Used by the over-budget guard, so it must
+ * err HIGH, never low. See the coefficients above.
+ */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  let hebrew = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (HEBREW_CHAR.test(ch)) hebrew++;
+    else other++;
+  }
+  return Math.ceil(hebrew * HEBREW_TOKENS_PER_CHAR + other * OTHER_TOKENS_PER_CHAR);
 }

@@ -265,9 +265,9 @@ describe("buildPrompt", () => {
 });
 
 describe("estimateTokens", () => {
-  it("approximates ~chars/4 and grows with input", () => {
-    expect(estimateTokens("abcd")).toBe(1);
-    expect(estimateTokens("a".repeat(400))).toBe(100);
+  it("grows with input", () => {
+    // No longer a flat chars/4: Latin now costs ~1 token per 3.1 chars (measured),
+    // and Hebrew ~1 token per 1.28. See the estimateTokens block below.
     expect(estimateTokens("a".repeat(800))).toBeGreaterThan(estimateTokens("a".repeat(400)));
   });
 });
@@ -309,5 +309,55 @@ describe("buildPrompt adjust", () => {
   it("no adjust → no adjustment line, identical to the pre-feature output", () => {
     const s = buildPrompt(msgs(50)).system;
     expect(s).not.toContain("Adjustment:");
+  });
+});
+
+// ── estimateTokens — character-class aware ───────────────────────────────────
+//
+// chars/4 is an English heuristic. Gemma tokenizes Hebrew at roughly ONE TOKEN
+// PER CHARACTER (1.28 chars/token measured) while Latin runs ~3.1 chars/token.
+// So the old estimate was right for the Latin half of a prompt and ~2.5x wrong
+// for the Hebrew half — and it ALWAYS under-counted, which is the direction that
+// silently overflows num_ctx and truncates the summary.
+
+describe("estimateTokens", () => {
+  it("charges Hebrew far more per character than Latin", () => {
+    const hebrew = "שלום".repeat(100); // 400 Hebrew chars
+    const latin = "hello".repeat(80); // 400 Latin chars
+    expect(estimateTokens(hebrew)).toBeGreaterThan(estimateTokens(latin) * 2);
+  });
+
+  it("no longer under-counts Hebrew the way chars/4 did", () => {
+    const hebrew = "בוקר טוב לכולם".repeat(50);
+    // chars/4 would have said this costs a quarter of its length in tokens.
+    expect(estimateTokens(hebrew)).toBeGreaterThan(hebrew.length / 4);
+  });
+
+  it("stays close to Latin's ~3.1 chars/token on ASCII", () => {
+    const latin = "a".repeat(1000);
+    expect(estimateTokens(latin)).toBeGreaterThan(250);
+    expect(estimateTokens(latin)).toBeLessThan(400);
+  });
+
+  it("is empty-safe", () => {
+    expect(estimateTokens("")).toBe(0);
+  });
+
+  // Ground truth: REAL prompt_eval_count values from Ollama (gemma4:26b) over
+  // eight actual prompts across three chats with different Hebrew/Latin mixes.
+  // The estimator must never drift back into large under-counting: an under-count
+  // is what lets an oversized prompt through the budget guard and starves the
+  // response out of num_ctx.
+  it.each([
+    { name: "g70/last20  (10% hebrew)", hebrew: 551, other: 4781, real: 1735 },
+    { name: "g70/last60  (20% hebrew)", hebrew: 1522, other: 6262, real: 3375 },
+    { name: "g70/last150 (38% hebrew)", hebrew: 6998, other: 11216, real: 9287 },
+    { name: "g70/last300 (46% hebrew)", hebrew: 17341, other: 20431, real: 20273 },
+    { name: "g30/last120 (42% hebrew)", hebrew: 8886, other: 12517, real: 10347 },
+    { name: "g219/last120 (31% hebrew)", hebrew: 4377, other: 9898, real: 7226 },
+  ])("is within 20% of the real token count — $name", ({ hebrew, other, real }) => {
+    const text = "א".repeat(hebrew) + "a".repeat(other);
+    const est = estimateTokens(text);
+    expect(Math.abs(est - real) / real).toBeLessThan(0.2);
   });
 });
