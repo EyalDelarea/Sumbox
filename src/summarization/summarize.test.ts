@@ -116,16 +116,26 @@ describe("runSummarize", () => {
     ).rejects.toThrow(/Unknown chat "nope"/);
   });
 
-  it("throws over-budget before calling the engine", async () => {
+  it("trims an over-budget selection and still summarizes, recording what it dropped", async () => {
+    // Previously this threw "Selection too large" and refused to summarize. The
+    // guard only started firing on ordinary requests once the token estimate was
+    // corrected for Hebrew — and an error is a worse answer than a summary of the
+    // most recent messages that fit. See prepare.ts.
     const g = await upsertGroup(pool, { name: "SUM-big", source: "import" });
-    await seedText(g, "x".repeat(500), "big1");
+    for (let i = 0; i < 8; i++) await seedText(g, `הודעה ארוכה ${i} `.repeat(20), `big${i}`);
     const fake = new FakeSummarizer(FAKE_OUT);
-    await expect(
-      runSummarize(
-        { groupName: "SUM-big", selection: { last: 100 } },
-        { databaseUrl: uri, summarizer: fake, model: "fake", tokenBudget: 10 },
-      ),
-    ).rejects.toThrow(/too large/i);
-    expect(fake.calls).toBe(0);
+
+    const result = await runSummarize(
+      { groupName: "SUM-big", selection: { last: 100 } },
+      { databaseUrl: uri, summarizer: fake, model: "fake", tokenBudget: 2200 },
+    );
+
+    expect(result.kind).toBe("ok");
+    expect(fake.calls).toBe(1); // it DID summarize, rather than erroring out
+    const row = await pool.query<{ parameters: Record<string, unknown> }>(
+      "select parameters from summaries order by id desc limit 1",
+    );
+    expect(row.rows[0]?.parameters["trimmed"]).toBe(true);
+    expect(row.rows[0]?.parameters["droppedCount"]).toBeGreaterThan(0);
   });
 });
