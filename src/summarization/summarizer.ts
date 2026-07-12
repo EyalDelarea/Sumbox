@@ -50,16 +50,73 @@ export type SummaryPrompt = {
 };
 
 /**
+ * What one generation actually cost, as reported by Ollama — not estimated.
+ *
+ * `estimateTokens()` is a chars/4 heuristic tuned for English; Hebrew tokenizes
+ * at roughly half that, so it under-counts by ~2.17x. The only way to see the
+ * true size of a prompt (and whether it left the model any room to answer) is to
+ * read back what the engine counted. Persisted onto the summary row so the
+ * token budget can be calibrated against the real distribution.
+ */
+export type GenUsage = {
+  /** Real input tokens (Ollama's `prompt_eval_count`). */
+  promptTokens: number;
+  /** Real output tokens (Ollama's `eval_count`). */
+  evalTokens: number;
+  /** `stop` = finished; `length` = ran out of room. */
+  doneReason: string;
+  /**
+   * The summary was cut off mid-sentence. num_ctx is shared between prompt and
+   * response, so an oversized prompt starves the answer: eval_count comes back
+   * as exactly (num_ctx - prompt_eval_count) and done_reason is `length`.
+   */
+  truncated: boolean;
+  /** Time spent ingesting the prompt — the dominant cost on a large input. */
+  promptMs: number;
+  /** Time spent generating. */
+  evalMs: number;
+};
+
+/** Per-call options shared by the streaming and non-streaming entry points. */
+export type SummarizeOpts = {
+  signal?: AbortSignal;
+  /** Invoked once, after the engine reports what the generation cost. */
+  onUsage?: (usage: GenUsage) => void;
+};
+
+/** Ollama's usage fields, present on the non-streaming body and the final stream chunk. */
+type OllamaDone = {
+  done_reason?: string;
+  prompt_eval_count?: number;
+  eval_count?: number;
+  prompt_eval_duration?: number;
+  eval_duration?: number;
+};
+
+/** Ollama reports durations in nanoseconds. */
+function toUsage(d: OllamaDone): GenUsage {
+  const doneReason = d.done_reason ?? "";
+  return {
+    promptTokens: d.prompt_eval_count ?? 0,
+    evalTokens: d.eval_count ?? 0,
+    doneReason,
+    truncated: doneReason === "length",
+    promptMs: Math.round((d.prompt_eval_duration ?? 0) / 1e6),
+    evalMs: Math.round((d.eval_duration ?? 0) / 1e6),
+  };
+}
+
+/**
  * A summarization engine. summarize() sends an assembled prompt to a model and
  * returns the prose summary. Throws on transport/empty-output failure.
  */
 export interface Summarizer {
-  summarize(prompt: SummaryPrompt): Promise<SummaryOutput>;
+  summarize(prompt: SummaryPrompt, opts?: SummarizeOpts): Promise<SummaryOutput>;
 }
 
 /** A summarizer that can stream its output token-by-token (for the web UI). */
 export interface StreamingSummarizer {
-  summarizeStream(prompt: SummaryPrompt, opts?: { signal?: AbortSignal }): AsyncGenerator<string>;
+  summarizeStream(prompt: SummaryPrompt, opts?: SummarizeOpts): AsyncGenerator<string>;
 }
 
 /**
@@ -201,7 +258,7 @@ export class OllamaSummarizer implements Summarizer, StreamingSummarizer {
     };
   }
 
-  async summarize(prompt: SummaryPrompt, opts?: { signal?: AbortSignal }): Promise<SummaryOutput> {
+  async summarize(prompt: SummaryPrompt, opts?: SummarizeOpts): Promise<SummaryOutput> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.host}/api/chat`, {
@@ -235,7 +292,8 @@ export class OllamaSummarizer implements Summarizer, StreamingSummarizer {
       throw new Error(`Ollama not reachable at ${this.host}: HTTP ${res.status}.`);
     }
 
-    const body = (await res.json()) as { message?: { content?: string } };
+    const body = (await res.json()) as { message?: { content?: string } } & OllamaDone;
+    opts?.onUsage?.(toUsage(body));
     const text = (body.message?.content ?? "").trim();
     if (text.length === 0) {
       throw new Error("Empty model output (no summary text returned).");
@@ -243,10 +301,7 @@ export class OllamaSummarizer implements Summarizer, StreamingSummarizer {
     return { overview: text };
   }
 
-  async *summarizeStream(
-    prompt: SummaryPrompt,
-    opts?: { signal?: AbortSignal },
-  ): AsyncGenerator<string> {
+  async *summarizeStream(prompt: SummaryPrompt, opts?: SummarizeOpts): AsyncGenerator<string> {
     // If already aborted before we even start, return immediately.
     if (opts?.signal?.aborted) return;
 
@@ -306,7 +361,7 @@ export class OllamaSummarizer implements Summarizer, StreamingSummarizer {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
-        let obj: { message?: { content?: string }; done?: boolean };
+        let obj: { message?: { content?: string }; done?: boolean } & OllamaDone;
         try {
           obj = JSON.parse(line);
         } catch {
@@ -314,7 +369,11 @@ export class OllamaSummarizer implements Summarizer, StreamingSummarizer {
         }
         const delta = obj.message?.content;
         if (delta) yield delta;
-        if (obj.done) return;
+        if (obj.done) {
+          // The final chunk is the only one carrying the token counts.
+          opts?.onUsage?.(toUsage(obj));
+          return;
+        }
       }
     }
   }
