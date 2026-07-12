@@ -1,4 +1,5 @@
 import path from "node:path";
+import { effectiveTokenBudget } from "./summarization/budget.js";
 
 export type TranscriptionConfig = {
   /** Path to the Python interpreter that has faster-whisper installed. */
@@ -16,7 +17,17 @@ export type SummarizationConfig = {
   model: string;
   /** Context window requested per call (Ollama defaults to 2048 — must raise). */
   numCtx: number;
-  /** Max estimated input tokens before a selection is rejected as too large. */
+  /**
+   * Max ESTIMATED input tokens a selection's prompt may occupy.
+   *
+   * Always clamped by `effectiveTokenBudget` so the prompt can never claim the
+   * whole of `numCtx` — that window is shared with the response, and a prompt
+   * that fills it leaves the model no room to write, truncating the summary
+   * mid-sentence. Lower than the ceiling on purpose: prompt evaluation dominates
+   * runtime (~89 % of a slow run), so a smaller prompt is the only real lever on
+   * latency. Raise SUMMARY_TOKEN_BUDGET for more coverage per run, at the cost of
+   * a slower run.
+   */
   tokenBudget: number;
   /** Sampling temperature (default 0.7 — 0.2 produced terse summaries). */
   temperature: number;
@@ -144,15 +155,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       model: env.TRANSCRIPTION_MODEL ?? "ivrit-ai/whisper-large-v3-turbo-ct2",
       ffmpegPath: env.FFMPEG_PATH ?? "ffmpeg",
     },
-    summarization: {
-      ollamaHost: env.OLLAMA_HOST ?? "http://localhost:11434",
-      model: env.SUMMARY_MODEL ?? "gemma4:26b",
-      numCtx: Number(env.SUMMARY_NUM_CTX ?? 32768),
-      tokenBudget: Number(env.SUMMARY_TOKEN_BUDGET ?? 24000),
-      temperature: Number(env.SUMMARY_TEMPERATURE ?? 0.7),
-      repeatPenalty: Number(env.SUMMARY_REPEAT_PENALTY ?? 1.1),
-      numPredict: Number(env.SUMMARY_NUM_PREDICT ?? 4096),
-    },
+    summarization: (() => {
+      const numCtx = Number(env.SUMMARY_NUM_CTX ?? 32768);
+      return {
+        ollamaHost: env.OLLAMA_HOST ?? "http://localhost:11434",
+        model: env.SUMMARY_MODEL ?? "gemma4:26b",
+        numCtx,
+        // Clamped so the prompt can never crowd the response out of num_ctx.
+        // The 24000 default was never reachable anyway: it was compared against a
+        // chars/4 estimate that under-counted Hebrew ~2x, so a "14.8k" selection
+        // was really 32.2k tokens and filled the window.
+        tokenBudget: effectiveTokenBudget({
+          numCtx,
+          configured: Number(env.SUMMARY_TOKEN_BUDGET ?? 12000),
+        }),
+        temperature: Number(env.SUMMARY_TEMPERATURE ?? 0.7),
+        repeatPenalty: Number(env.SUMMARY_REPEAT_PENALTY ?? 1.1),
+        numPredict: Number(env.SUMMARY_NUM_PREDICT ?? 4096),
+      };
+    })(),
     vision: {
       model: env.VISION_MODEL ?? "gemma4:26b",
       videoModel: env.VISION_VIDEO_MODEL ?? env.VISION_MODEL ?? "gemma4:26b",

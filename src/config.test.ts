@@ -106,7 +106,11 @@ describe("loadConfig transcription block", () => {
       ollamaHost: "http://localhost:11434",
       model: "gemma4:26b",
       numCtx: 32768,
-      tokenBudget: 24000,
+      // Tighter than the old 24000 on purpose. That number was never reachable:
+      // it was compared against a chars/4 estimate that under-counted Hebrew ~2x,
+      // so a "14.8k" selection was really 32.2k tokens and filled num_ctx. Prompt
+      // eval is ~89% of a slow run, so a smaller prompt is the lever on latency.
+      tokenBudget: 12000,
       temperature: 0.7,
       repeatPenalty: 1.1,
       numPredict: 4096,
@@ -125,10 +129,25 @@ describe("loadConfig transcription block", () => {
       ollamaHost: "http://box:1234",
       model: "gemma4:8b",
       numCtx: 65536,
+      // Under the ceiling for a 64k window ((65536-2048)/1.15 = 55206), so honoured.
       tokenBudget: 50000,
       temperature: 0.9,
       repeatPenalty: 1.05,
       numPredict: 2048,
     });
+  });
+});
+
+describe("loadConfig summarization budget clamp", () => {
+  it("clamps a configured token budget that would crowd the response out of num_ctx", () => {
+    // num_ctx is SHARED between prompt and response. Asking for a 30k-token prompt
+    // in a 32k window leaves the model nothing to write with — which is exactly how
+    // summaries were being cut off mid-sentence (done_reason: 'length').
+    const cfg = loadConfig({
+      SUMMARY_NUM_CTX: "32768",
+      SUMMARY_TOKEN_BUDGET: "30000",
+    } as unknown as NodeJS.ProcessEnv);
+    expect(cfg.summarization.tokenBudget).toBeLessThan(30000);
+    expect(cfg.summarization.tokenBudget).toBeLessThan(32768 - 2048);
   });
 });
