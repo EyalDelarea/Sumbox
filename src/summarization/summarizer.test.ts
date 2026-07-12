@@ -157,6 +157,58 @@ describe("OllamaSummarizer", () => {
     expect(seen[0]?.doneReason).toBe("length");
   });
 
+  it("reports NO usage rather than fabricating zeros when the engine omits the counts", async () => {
+    // A row of zeros is worse than no row: it is indistinguishable from a real
+    // measurement, and it drags the estimated-vs-real ratio DOWN — toward the
+    // false conclusion that the chars/4 estimate is fine. Absent counts must be
+    // absent, not 0.
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          json: async () => ({ message: { content: "סיכום" } }), // no usage fields at all
+        }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    await engine.summarize({ system: "S", user: "U" }, { onUsage: (u) => seen.push(u) });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("never lets a throwing onUsage sink destroy a successful generation", async () => {
+    // Telemetry must not be able to kill the thing it measures. A ~150s local
+    // generation that already succeeded must not be lost to a bookkeeping error.
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          json: async () => ({
+            message: { content: "סיכום" },
+            done_reason: "stop",
+            prompt_eval_count: 10,
+            eval_count: 2,
+          }),
+        }) as unknown as Response,
+    });
+
+    await expect(
+      engine.summarize(
+        { system: "S", user: "U" },
+        {
+          onUsage: () => {
+            throw new Error("metrics sink exploded");
+          },
+        },
+      ),
+    ).resolves.toEqual({ overview: "סיכום" });
+  });
+
   it("does not require onUsage — summarize still works without it", async () => {
     const engine = new OllamaSummarizer({
       host: "http://localhost:11434",
@@ -246,6 +298,66 @@ describe("OllamaSummarizer.summarizeStream", () => {
     expect(seen[0]?.promptTokens).toBe(32342);
     expect(seen[0]?.truncated).toBe(true);
     expect(seen[0]?.promptMs).toBe(124909);
+  });
+
+  it("reports no usage when the stream ends without a done chunk (stream)", async () => {
+    // Transport drop / crashed engine: the reader EOFs cleanly with no AbortError.
+    // Recording zeros here would poison the calibration set with a fake row.
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          body: streamBody([JSON.stringify({ message: { content: "חצי" } })]), // no done:true
+        }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    const out: string[] = [];
+    for await (const d of engine.summarizeStream(
+      { system: "S", user: "U" },
+      { onUsage: (u) => seen.push(u) },
+    )) {
+      out.push(d);
+    }
+    expect(out).toEqual(["חצי"]);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("never lets a throwing onUsage sink destroy a completed stream", async () => {
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          body: streamBody([
+            JSON.stringify({
+              message: { content: "סיכום" },
+              done: true,
+              done_reason: "stop",
+              prompt_eval_count: 10,
+              eval_count: 2,
+            }),
+          ]),
+        }) as unknown as Response,
+    });
+
+    const out: string[] = [];
+    for await (const d of engine.summarizeStream(
+      { system: "S", user: "U" },
+      {
+        onUsage: () => {
+          throw new Error("metrics sink exploded");
+        },
+      },
+    )) {
+      out.push(d);
+    }
+    expect(out).toEqual(["סיכום"]); // the summary survives the telemetry failure
   });
 
   it("throws a clear error when Ollama is unreachable (stream)", async () => {

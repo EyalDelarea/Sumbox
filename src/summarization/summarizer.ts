@@ -1,6 +1,9 @@
 import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
+import { getLogger } from "../logging/log.js";
+
+const log = getLogger("summarizer");
 
 /** A summary bullet, optionally linked to the message it was drawn from. */
 export type SummaryBullet = {
@@ -93,17 +96,46 @@ type OllamaDone = {
   eval_duration?: number;
 };
 
-/** Ollama reports durations in nanoseconds. */
-function toUsage(d: OllamaDone): GenUsage {
-  const doneReason = d.done_reason ?? "";
+/**
+ * Ollama reports durations in nanoseconds.
+ *
+ * Returns undefined — never a zero-filled GenUsage — when the engine did not
+ * report the token counts. This telemetry exists to be calibration data: a row
+ * of fabricated zeros is indistinguishable from a real measurement and would
+ * drag the estimated-vs-real ratio DOWN, toward the false conclusion that the
+ * chars/4 estimate is fine. A missing `done_reason` would likewise silently
+ * disarm `truncated`. Absent must stay absent.
+ */
+function toUsage(d: OllamaDone): GenUsage | undefined {
+  if (d.prompt_eval_count === undefined || d.done_reason === undefined) return undefined;
   return {
-    promptTokens: d.prompt_eval_count ?? 0,
+    promptTokens: d.prompt_eval_count,
     evalTokens: d.eval_count ?? 0,
-    doneReason,
-    truncated: doneReason === "length",
+    doneReason: d.done_reason,
+    truncated: d.done_reason === "length",
     promptMs: Math.round((d.prompt_eval_duration ?? 0) / 1e6),
     evalMs: Math.round((d.eval_duration ?? 0) / 1e6),
   };
+}
+
+/**
+ * Hand usage to the caller's sink. Telemetry must never be able to kill the
+ * generation it measures — a throwing sink would otherwise discard a summary
+ * that already succeeded (and, on the streaming path, one already rendered to
+ * the user). A missing report is logged rather than swallowed: the production
+ * engine is always Ollama, so it should never legitimately fail to report.
+ */
+function reportUsage(usage: GenUsage | undefined, onUsage: SummarizeOpts["onUsage"]): void {
+  if (!onUsage) return;
+  if (!usage) {
+    log.warn("generation reported no usage — this row will carry no token counts");
+    return;
+  }
+  try {
+    onUsage(usage);
+  } catch (err) {
+    log.error({ err }, "onUsage sink threw — telemetry dropped, summary kept");
+  }
 }
 
 /**
@@ -293,9 +325,14 @@ export class OllamaSummarizer implements Summarizer, StreamingSummarizer {
     }
 
     const body = (await res.json()) as { message?: { content?: string } } & OllamaDone;
-    opts?.onUsage?.(toUsage(body));
+    const usage = toUsage(body);
+    reportUsage(usage, opts?.onUsage);
     const text = (body.message?.content ?? "").trim();
     if (text.length === 0) {
+      // No row will be persisted, so these counts are about to be lost — but an
+      // empty output is the STRONGEST signal of context starvation (prompt_eval
+      // near num_ctx, nothing left to generate). Log it or the evidence vanishes.
+      log.error({ usage }, "empty model output — likely no context left to generate into");
       throw new Error("Empty model output (no summary text returned).");
     }
     return { overview: text };
@@ -365,16 +402,26 @@ export class OllamaSummarizer implements Summarizer, StreamingSummarizer {
         try {
           obj = JSON.parse(line);
         } catch {
+          // Once the persisted row depends on the done chunk arriving, dropping a
+          // line without a trace is not acceptable — it could BE the done chunk.
+          log.warn({ line: line.slice(0, 120) }, "unparseable line in Ollama stream — skipped");
           continue;
         }
         const delta = obj.message?.content;
         if (delta) yield delta;
         if (obj.done) {
           // The final chunk is the only one carrying the token counts.
-          opts?.onUsage?.(toUsage(obj));
+          reportUsage(toUsage(obj), opts?.onUsage);
           return;
         }
       }
     }
+
+    // Fell out of the read loop WITHOUT a done chunk — a transport drop or a
+    // crashed engine, neither of which raises AbortError. The caller cannot tell
+    // this apart from a clean finish (the signal was never aborted), so it will
+    // persist whatever prose accumulated as if it were a complete summary. That
+    // is pre-existing behavior; at minimum it must not also be invisible.
+    log.error("Ollama stream ended without a done chunk — summary is likely incomplete");
   }
 }

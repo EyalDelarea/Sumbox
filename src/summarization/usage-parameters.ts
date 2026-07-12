@@ -6,7 +6,15 @@ export type GenTelemetry = {
   genMs: number;
   /** What Ollama actually counted. Absent when the engine reported nothing. */
   usage?: GenUsage;
-  /** What estimateTokens() PREDICTED the prompt would cost. */
+  /**
+   * What estimateTokens() PREDICTED the prompt would cost.
+   *
+   * Measured over the raw system+user text, whereas promptTokens is Ollama's
+   * count of the fully chat-templated input — so the gap between them includes a
+   * little template overhead, not only Hebrew tokenization. The overhead is tens
+   * of tokens against a ~17k gap, so it does not explain the ratio, but a
+   * recalibration should not treat the two as measuring exactly the same string.
+   */
   estimatedTokens?: number;
 };
 
