@@ -118,6 +118,23 @@ function toUsage(d: OllamaDone): GenUsage | undefined {
   };
 }
 
+/** One NDJSON chunk off the stream. */
+type StreamChunk = { message?: { content?: string }; done?: boolean } & OllamaDone;
+
+/**
+ * Parse one stream line, or undefined if it is not JSON. An unparseable line is
+ * logged rather than dropped in silence — now that the persisted row depends on
+ * the done chunk arriving, the line thrown away could BE the done chunk.
+ */
+function parseChunk(line: string): StreamChunk | undefined {
+  try {
+    return JSON.parse(line) as StreamChunk;
+  } catch {
+    log.warn({ line: line.slice(0, 120) }, "unparseable line in Ollama stream — skipped");
+    return undefined;
+  }
+}
+
 /**
  * Hand usage to the caller's sink. Telemetry must never be able to kill the
  * generation it measures — a throwing sink would otherwise discard a summary
@@ -398,19 +415,29 @@ export class OllamaSummarizer implements Summarizer, StreamingSummarizer {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
-        let obj: { message?: { content?: string }; done?: boolean } & OllamaDone;
-        try {
-          obj = JSON.parse(line);
-        } catch {
-          // Once the persisted row depends on the done chunk arriving, dropping a
-          // line without a trace is not acceptable — it could BE the done chunk.
-          log.warn({ line: line.slice(0, 120) }, "unparseable line in Ollama stream — skipped");
-          continue;
-        }
+        const obj = parseChunk(line);
+        if (!obj) continue;
         const delta = obj.message?.content;
         if (delta) yield delta;
         if (obj.done) {
           // The final chunk is the only one carrying the token counts.
+          reportUsage(toUsage(obj), opts?.onUsage);
+          return;
+        }
+      }
+    }
+
+    // The loop above only consumes NEWLINE-TERMINATED lines. If the stream's last
+    // NDJSON object arrives without a trailing "\n" it is still sitting in `buf`
+    // — and that object is the sole carrier of the token counts and the truncated
+    // alarm. Flush it rather than dropping the very signal this feature exists for.
+    const tail = buf.trim();
+    if (tail) {
+      const obj = parseChunk(tail);
+      if (obj) {
+        const delta = obj.message?.content;
+        if (delta) yield delta;
+        if (obj.done) {
           reportUsage(toUsage(obj), opts?.onUsage);
           return;
         }

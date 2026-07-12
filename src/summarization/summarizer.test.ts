@@ -300,6 +300,52 @@ describe("OllamaSummarizer.summarizeStream", () => {
     expect(seen[0]?.promptMs).toBe(124909);
   });
 
+  it("captures usage from a final done chunk that is NOT newline-terminated (stream)", async () => {
+    // The read loop only consumes newline-terminated lines. Ollama normally ends
+    // its NDJSON with a newline, but the done chunk is the SOLE carrier of the
+    // truncated alarm — losing it to a missing trailing \n would silently disarm
+    // the one signal this whole feature exists to raise.
+    const enc = new TextEncoder();
+    const unterminated = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode(`${JSON.stringify({ message: { content: "חצי " } })}\n`));
+        c.enqueue(
+          enc.encode(
+            JSON.stringify({
+              message: { content: "סוף" },
+              done: true,
+              done_reason: "length",
+              prompt_eval_count: 9000,
+              eval_count: 12,
+            }), // no trailing "\n"
+          ),
+        );
+        c.close();
+      },
+    });
+
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () => ({ ok: true, body: unterminated }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    const out: string[] = [];
+    for await (const d of engine.summarizeStream(
+      { system: "S", user: "U" },
+      { onUsage: (u) => seen.push(u) },
+    )) {
+      out.push(d);
+    }
+
+    expect(out).toEqual(["חצי ", "סוף"]); // the trailing prose survives too
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.truncated).toBe(true);
+    expect(seen[0]?.promptTokens).toBe(9000);
+  });
+
   it("reports no usage when the stream ends without a done chunk (stream)", async () => {
     // Transport drop / crashed engine: the reader EOFs cleanly with no AbortError.
     // Recording zeros here would poison the calibration set with a fake row.

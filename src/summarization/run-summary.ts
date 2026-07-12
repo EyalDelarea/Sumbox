@@ -3,7 +3,6 @@ import type { Cursor } from "../db/repositories/read-watermarks.js";
 import type { InsertSummaryInput } from "../db/repositories/summaries.js";
 import { parseStructuredSummary } from "./parse-structured.js";
 import type { PreparedSumbox } from "./prepare-sumbox.js";
-import { estimateTokens } from "./prompt.js";
 import type { GenUsage, SummarizeOpts, SummaryOutput, SummaryPrompt } from "./summarizer.js";
 import { withGenUsage } from "./usage-parameters.js";
 
@@ -204,7 +203,7 @@ export async function summarizeAndPersist(
     parameters: withGenUsage(prepared.parameters, {
       genMs,
       usage,
-      estimatedTokens: estimateTokens(prepared.prompt.system + prepared.prompt.user),
+      estimatedTokens: prepared.estimatedTokens,
     }),
     output,
     model,

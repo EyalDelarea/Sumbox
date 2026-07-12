@@ -78,6 +78,9 @@ describe("summarizeAndPersist — new messages (generated)", () => {
       usedFallback: false,
     },
     messageCount: 5,
+    // The estimate the budget guard ENFORCED — surfaced by prepareSumbox and
+    // recorded verbatim, so guard and telemetry cannot drift apart.
+    estimatedTokens: 3712,
     newWatermark,
     usedFallback: false,
   };
@@ -135,9 +138,10 @@ describe("summarizeAndPersist — new messages (generated)", () => {
       doneReason: "length",
       truncated: true,
     });
-    // estimateTokens() is chars/4 over the prompt — kept next to the real count
-    // so the gap that starves num_ctx is measurable per row.
-    expect(row?.parameters["estimatedTokens"]).toBe(Math.ceil("sysuser prompt".length / 4));
+    // Recorded verbatim from the prepared result — the same figure the token
+    // budget was enforced against, kept next to the real count so the gap that
+    // starves num_ctx is measurable per row.
+    expect(row?.parameters["estimatedTokens"]).toBe(3712);
   });
 
   it("still records genMs when the engine reports no usage", async () => {
@@ -217,6 +221,9 @@ describe("summarizeAndPersist — entity extraction", () => {
       usedFallback: false,
     },
     messageCount: 5,
+    // The estimate the budget guard ENFORCED — surfaced by prepareSumbox and
+    // recorded verbatim, so guard and telemetry cannot drift apart.
+    estimatedTokens: 3712,
     newWatermark,
     usedFallback: false,
   };

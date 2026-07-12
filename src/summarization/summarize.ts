@@ -2,7 +2,6 @@ import pg from "pg";
 import { loadConfig } from "../config.js";
 import { insertSummary } from "../db/repositories/summaries.js";
 import { prepareSummary, prepareSummaryForGroup } from "./prepare.js";
-import { estimateTokens } from "./prompt.js";
 import type { Selection } from "./select.js";
 import {
   type GenUsage,
@@ -98,7 +97,7 @@ export async function runSummarize(
         requesterId: null,
         messageCount: prepared.messageCount,
         genUsage,
-        estimatedTokens: estimateTokens(prepared.prompt.system + prepared.prompt.user),
+        estimatedTokens: prepared.estimatedTokens,
       }),
       output,
       model,
@@ -160,7 +159,7 @@ export async function runSummarizeOnPool(
       requesterId: deps?.requesterId ?? null,
       messageCount: prepared.messageCount,
       genUsage,
-      estimatedTokens: estimateTokens(prepared.prompt.system + prepared.prompt.user),
+      estimatedTokens: prepared.estimatedTokens,
     }),
     output,
     model,

@@ -101,6 +101,9 @@ export type PreparedSumbox =
         backlogRemaining?: number;
       };
       messageCount: number;
+      /** The chars/4 estimate fitToBudget ENFORCED against the budget — recorded as
+       *  telemetry so the guard and the measurement can never silently diverge. */
+      estimatedTokens: number;
       newWatermark: Cursor;
       usedFallback: boolean;
     };
@@ -212,6 +215,9 @@ export async function prepareSumbox(
   if (kept === 1) range = [clampToBudget(range[0]!, tokenBudget)];
 
   const prompt = buildPrompt(range);
+  // The same chars/4 figure fitToBudget just enforced — surfaced (not recomputed
+  // downstream) so the number recorded as telemetry IS the number the guard used.
+  const estimatedTokens = estimateTokens(prompt.system + prompt.user);
   const last = range[range.length - 1]!;
   const newWatermark: Cursor = { sentAt: last.sentAt, messageId: last.messageId };
 
@@ -238,6 +244,7 @@ export async function prepareSumbox(
     summaryType: "watermark",
     parameters,
     messageCount: range.length,
+    estimatedTokens,
     newWatermark,
     usedFallback,
   };

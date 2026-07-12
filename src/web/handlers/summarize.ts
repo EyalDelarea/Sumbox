@@ -8,7 +8,6 @@ import { normalizeSummaryOutput } from "../../summarization/normalize.js";
 import { prepareSummary } from "../../summarization/prepare.js";
 import { prepareRegenerate } from "../../summarization/prepare-regenerate.js";
 import { prepareSumbox } from "../../summarization/prepare-sumbox.js";
-import { estimateTokens } from "../../summarization/prompt.js";
 import { persistSumboxResult, streamSummary } from "../../summarization/run-summary.js";
 import type { Selection } from "../../summarization/select.js";
 import type { GenUsage } from "../../summarization/summarizer.js";
@@ -146,7 +145,7 @@ export async function handleSummarize(
               parameters: withGenUsage(regen.parameters, {
                 genMs: Date.now() - startRegen,
                 usage: regenUsage,
-                estimatedTokens: estimateTokens(regen.prompt.system + regen.prompt.user),
+                estimatedTokens: regen.estimatedTokens,
               }),
               output,
               model: deps.model,
@@ -225,7 +224,7 @@ export async function handleSummarize(
             parameters: withGenUsage(prepared.parameters, {
               genMs: Date.now() - start,
               usage: genUsage,
-              estimatedTokens: estimateTokens(prepared.prompt.system + prepared.prompt.user),
+              estimatedTokens: prepared.estimatedTokens,
             }),
             output,
             model: deps.model,
@@ -317,7 +316,7 @@ export async function handleSummarize(
           parameters: withGenUsage(prepared.parameters, {
             genMs: Date.now() - start,
             usage: genUsage,
-            estimatedTokens: estimateTokens(prepared.prompt.system + prepared.prompt.user),
+            estimatedTokens: prepared.estimatedTokens,
           }),
           output,
           model: deps.model,

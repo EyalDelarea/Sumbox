@@ -15,6 +15,9 @@ export type PreparedSummary =
       summaryType: "last_n" | "since";
       parameters: Record<string, unknown>;
       messageCount: number;
+      /** The chars/4 estimate the token budget was ENFORCED against — recorded as
+       *  telemetry so the guard and the measurement can never silently diverge. */
+      estimatedTokens: number;
     };
 
 /**
@@ -72,5 +75,6 @@ export async function prepareSummaryForGroup(
     summaryType,
     parameters,
     messageCount: messages.length,
+    estimatedTokens: tokens,
   };
 }
