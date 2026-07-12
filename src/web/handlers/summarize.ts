@@ -8,8 +8,11 @@ import { normalizeSummaryOutput } from "../../summarization/normalize.js";
 import { prepareSummary } from "../../summarization/prepare.js";
 import { prepareRegenerate } from "../../summarization/prepare-regenerate.js";
 import { prepareSumbox } from "../../summarization/prepare-sumbox.js";
+import { estimateTokens } from "../../summarization/prompt.js";
 import { persistSumboxResult, streamSummary } from "../../summarization/run-summary.js";
 import type { Selection } from "../../summarization/select.js";
+import type { GenUsage } from "../../summarization/summarizer.js";
+import { withGenUsage } from "../../summarization/usage-parameters.js";
 import { sseFrame } from "../sse.js";
 import { type ServerDeps, SUMBOX_FALLBACK_N } from "./context.js";
 
@@ -124,8 +127,14 @@ export async function handleSummarize(
           mediaJobsAhead,
         });
         const startRegen = Date.now();
+        let regenUsage: GenUsage | undefined;
         const result = await streamSummary({
-          tokens: deps.summarizer.summarizeStream(regen.prompt, { signal: ac.signal }),
+          tokens: deps.summarizer.summarizeStream(regen.prompt, {
+            signal: ac.signal,
+            onUsage: (u) => {
+              regenUsage = u;
+            },
+          }),
           indexMap: regen.indexMap,
           signal: ac.signal,
           onToken: (delta) => send("token", { delta }),
@@ -134,7 +143,11 @@ export async function handleSummarize(
             insertSummary(deps.pool, {
               groupId: regen.groupId,
               summaryType: regen.summaryType,
-              parameters: regen.parameters,
+              parameters: withGenUsage(regen.parameters, {
+                genMs: Date.now() - startRegen,
+                usage: regenUsage,
+                estimatedTokens: estimateTokens(regen.prompt.system + regen.prompt.user),
+              }),
               output,
               model: deps.model,
               regeneratedFromId: regen.regeneratedFromId,
@@ -191,8 +204,14 @@ export async function handleSummarize(
         mediaJobsAhead,
       });
       const start = Date.now();
+      let genUsage: GenUsage | undefined;
       const result = await streamSummary({
-        tokens: deps.summarizer.summarizeStream(prepared.prompt, { signal: ac.signal }),
+        tokens: deps.summarizer.summarizeStream(prepared.prompt, {
+          signal: ac.signal,
+          onUsage: (u) => {
+            genUsage = u;
+          },
+        }),
         indexMap: prepared.indexMap,
         signal: ac.signal,
         onToken: (delta) => send("token", { delta }),
@@ -203,7 +222,11 @@ export async function handleSummarize(
             pool: deps.pool,
             groupId: prepared.groupId,
             summaryType: prepared.summaryType,
-            parameters: prepared.parameters,
+            parameters: withGenUsage(prepared.parameters, {
+              genMs: Date.now() - start,
+              usage: genUsage,
+              estimatedTokens: estimateTokens(prepared.prompt.system + prepared.prompt.user),
+            }),
             output,
             model: deps.model,
             newWatermark: prepared.newWatermark,
@@ -276,8 +299,14 @@ export async function handleSummarize(
     const mediaJobsAhead = await countInFlightMediaJobs(deps.pool);
     send("status", { messages: prepared.messageCount, stale, mediaJobsAhead });
     const start = Date.now();
+    let genUsage: GenUsage | undefined;
     const result = await streamSummary({
-      tokens: deps.summarizer.summarizeStream(prepared.prompt, { signal: ac.signal }),
+      tokens: deps.summarizer.summarizeStream(prepared.prompt, {
+        signal: ac.signal,
+        onUsage: (u) => {
+          genUsage = u;
+        },
+      }),
       indexMap: prepared.indexMap,
       signal: ac.signal,
       onToken: (delta) => send("token", { delta }),
@@ -285,7 +314,11 @@ export async function handleSummarize(
         insertSummary(deps.pool, {
           groupId: prepared.groupId,
           summaryType: prepared.summaryType,
-          parameters: prepared.parameters,
+          parameters: withGenUsage(prepared.parameters, {
+            genMs: Date.now() - start,
+            usage: genUsage,
+            estimatedTokens: estimateTokens(prepared.prompt.system + prepared.prompt.user),
+          }),
           output,
           model: deps.model,
         }),

@@ -3,7 +3,9 @@ import type { Cursor } from "../db/repositories/read-watermarks.js";
 import type { InsertSummaryInput } from "../db/repositories/summaries.js";
 import { parseStructuredSummary } from "./parse-structured.js";
 import type { PreparedSumbox } from "./prepare-sumbox.js";
-import type { SummaryOutput, SummaryPrompt } from "./summarizer.js";
+import { estimateTokens } from "./prompt.js";
+import type { GenUsage, SummarizeOpts, SummaryOutput, SummaryPrompt } from "./summarizer.js";
+import { withGenUsage } from "./usage-parameters.js";
 
 export type { InsertSummaryInput };
 
@@ -117,8 +119,13 @@ export type SummarizeAndPersistDeps = {
     fallbackN: number,
     tokenBudget: number,
   ) => Promise<PreparedSumbox>;
-  /** Calls the summarization model and returns the full output text. */
-  summarize: (prompt: SummaryPrompt) => Promise<string>;
+  /**
+   * Calls the summarization model and returns the full output text. `opts` carries
+   * the onUsage callback — an engine that ignores it simply records no token counts.
+   */
+  summarize: (prompt: SummaryPrompt, opts?: SummarizeOpts) => Promise<string>;
+  /** Injected clock so genMs is deterministic under test. Defaults to Date.now. */
+  now?: () => number;
   /** Persists the summary row. */
   insertSummary: (pool: pg.Pool, input: InsertSummaryInput) => Promise<number>;
   /** Advances the read watermark for the group. */
@@ -167,6 +174,7 @@ export async function summarizeAndPersist(
     groupName,
     refreshEntities,
   } = deps;
+  const now = deps.now ?? Date.now;
 
   const FALLBACK_N = 25;
   const prepared = await prepareSumbox(pool, groupName, FALLBACK_N, tokenBudget);
@@ -176,7 +184,16 @@ export async function summarizeAndPersist(
   }
 
   // kind === "ready"
-  const fullText = await summarize(prepared.prompt);
+  // The scheduled path previously recorded messageCount but no duration at all,
+  // so the runs that hurt most were the ones with no telemetry whatsoever.
+  let usage: GenUsage | undefined;
+  const startedAt = now();
+  const fullText = await summarize(prepared.prompt, {
+    onUsage: (u) => {
+      usage = u;
+    },
+  });
+  const genMs = now() - startedAt;
   const output = parseStructuredSummary(fullText, prepared.indexMap);
 
   // Shared commit step: summary first, watermark second (no partial state).
@@ -184,7 +201,11 @@ export async function summarizeAndPersist(
     pool,
     groupId: prepared.groupId,
     summaryType: prepared.summaryType,
-    parameters: prepared.parameters,
+    parameters: withGenUsage(prepared.parameters, {
+      genMs,
+      usage,
+      estimatedTokens: estimateTokens(prepared.prompt.system + prepared.prompt.user),
+    }),
     output,
     model,
     newWatermark: prepared.newWatermark,
