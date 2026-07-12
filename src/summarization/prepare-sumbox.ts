@@ -75,11 +75,28 @@ function clampToBudget(
   m: SelectedMessageWithCursor,
   tokenBudget: number,
 ): SelectedMessageWithCursor {
-  const empty = buildPrompt([{ ...m, content: "" }]);
-  const overhead = estimateTokens(empty.system + empty.user);
-  const budgetChars = Math.max(0, (tokenBudget - overhead) * 4 - CLAMP_SUFFIX.length);
-  if (m.content.length <= budgetChars) return m;
-  return { ...m, content: m.content.slice(0, budgetChars) + CLAMP_SUFFIX };
+  const tokensAt = (chars: number): number => {
+    const content =
+      chars >= m.content.length ? m.content : m.content.slice(0, chars) + CLAMP_SUFFIX;
+    const p = buildPrompt([{ ...m, content }]);
+    return estimateTokens(p.system + p.user);
+  };
+
+  if (tokensAt(m.content.length) <= tokenBudget) return m;
+
+  // Binary search the longest prefix that fits. Chars-per-token is NOT a constant
+  // — Hebrew runs ~1.28 chars/token and Latin ~3.12 — so the old
+  // `(budget - overhead) * 4` arithmetic over-allocated by ~3x on Hebrew and the
+  // "clamped" message still blew the budget. Searching on the real estimate keeps
+  // this script-agnostic instead of trading one wrong constant for another.
+  let lo = 0;
+  let hi = m.content.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (tokensAt(mid) <= tokenBudget) lo = mid;
+    else hi = mid - 1;
+  }
+  return { ...m, content: m.content.slice(0, lo) + CLAMP_SUFFIX };
 }
 
 export type PreparedSumbox =
@@ -101,8 +118,8 @@ export type PreparedSumbox =
         backlogRemaining?: number;
       };
       messageCount: number;
-      /** The chars/4 estimate fitToBudget ENFORCED against the budget — recorded as
-       *  telemetry so the guard and the measurement can never silently diverge. */
+      /** The estimate fitToBudget ENFORCED against the budget — recorded as telemetry
+       *  so the guard and the measurement can never silently diverge. */
       estimatedTokens: number;
       newWatermark: Cursor;
       usedFallback: boolean;
