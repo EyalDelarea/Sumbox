@@ -62,10 +62,48 @@ describe("prepareSummary", () => {
     );
   });
 
-  it("throws over-budget", async () => {
-    const g = await upsertGroup(pool, { name: "PREP-big", source: "import" });
-    await seedText(g, "x".repeat(500), "pbig");
-    await expect(prepareSummary(pool, "PREP-big", { last: 100 }, 10)).rejects.toThrow(/too large/i);
+  it("trims an over-budget selection to the newest messages that fit, instead of throwing", async () => {
+    // It used to throw "Selection too large". That guard almost never fired,
+    // because the chars/4 estimate under-counted Hebrew ~2x — so oversized
+    // prompts sailed through and got truncated mid-sentence by num_ctx instead.
+    // With the estimate corrected, a plain 3-day /סיכום would now hit the guard,
+    // and an error is a worse answer than a slightly narrower summary.
+    const g = await upsertGroup(pool, { name: "PREP-trim", source: "import" });
+    for (let i = 0; i < 8; i++) await seedText(g, `הודעה מספר ${i} `.repeat(20), `ptrim${i}`);
+
+    // The system prompt alone costs ~1394 tokens; each seeded message ~178.
+    // 2200 fits the instructions plus roughly four messages, so some must drop.
+    const prepared = await prepareSummary(pool, "PREP-trim", { last: 100 }, 2200);
+    if (prepared.kind !== "ready") throw new Error("expected ready");
+
+    expect(prepared.messageCount).toBeGreaterThan(0);
+    expect(prepared.messageCount).toBeLessThan(8); // some were dropped
+    expect(prepared.droppedCount).toBe(8 - prepared.messageCount);
+    expect(prepared.estimatedTokens).toBeLessThanOrEqual(2200); // the budget HOLDS
+    // The row records that this summary covers less than was asked for.
+    expect(prepared.parameters["trimmed"]).toBe(true);
+    expect(prepared.parameters["droppedCount"]).toBe(prepared.droppedCount);
+  });
+
+  it("keeps the NEWEST messages when it trims, not the oldest", async () => {
+    const g = await upsertGroup(pool, { name: "PREP-newest", source: "import" });
+    await seedText(g, "העתיקה ביותר ".repeat(40), "pold");
+    await seedText(g, "החדשה ביותר", "pnew");
+
+    // Fits the instructions + the short new message, but not the long old one.
+    const prepared = await prepareSummary(pool, "PREP-newest", { last: 100 }, 1500);
+    if (prepared.kind !== "ready") throw new Error("expected ready");
+    // A catch-up summary of a too-wide window should cover what just happened.
+    expect(prepared.prompt.user).toContain("החדשה ביותר");
+  });
+
+  it("reports droppedCount 0 and no trimmed flag when everything fits", async () => {
+    const g = await upsertGroup(pool, { name: "PREP-fits", source: "import" });
+    await seedText(g, "שלום", "pfit");
+    const prepared = await prepareSummary(pool, "PREP-fits", { last: 100 }, 12000);
+    if (prepared.kind !== "ready") throw new Error("expected ready");
+    expect(prepared.droppedCount).toBe(0);
+    expect(prepared.parameters["trimmed"]).toBeUndefined();
   });
 
   it("derives since type/params", async () => {
