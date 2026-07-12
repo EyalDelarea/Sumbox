@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseStructuredSummary, splitTrailingMarkers } from "./parse-structured.js";
+import {
+  parseStructuredSummary,
+  splitTrailingMarkers,
+  stripAllMarkers,
+} from "./parse-structured.js";
 
 // index → messages.id, as built from the selection passed to the model.
 const idx = new Map<number, number>([
@@ -28,7 +32,12 @@ describe("parseStructuredSummary", () => {
     const out = parseStructuredSummary(raw, idx);
 
     expect(out.version).toBe(2);
-    expect(out.overview).toBe(raw); // full markdown retained for back-compat + copy
+    // Full markdown retained for back-compat + copy, but WITHOUT the citation
+    // markers — overview is what the CLI/WhatsApp/copy actually render, and a raw
+    // `^N` there is junk to the reader. The ids live on the bullets instead.
+    expect(out.overview).not.toContain("^");
+    expect(out.overview).toContain("## תקציר");
+    expect(out.overview).toContain("דנה העלתה את נושא התקציב");
     expect(out.tldr).toBe("הצוות סיכם את שבוע העבודה והחליט על דדליין.");
     expect(out.topics).toEqual([
       { text: "דנה העלתה את נושא התקציב", sourceMessageId: 1001 },
@@ -133,5 +142,133 @@ describe("splitTrailingMarkers", () => {
 
   it("treats a bare trailing number as content, not a marker", () => {
     expect(splitTrailingMarkers("לשעה 14")).toEqual({ text: "לשעה 14", indices: [] });
+  });
+});
+
+// ── bare, number-less carets ─────────────────────────────────────────────────
+//
+// The prompt asks the model to end a bullet with `^N` citing a source line, and
+// to OMIT the marker when no single line applies. gemma4:26b often does neither:
+// it emits a bare `^` with no number. Every strip regex requires \d+ after the
+// caret, so those carets survived into the rendered Hebrew — observed live in
+// real summaries ("...וצורך בחומרים ^.") including inside ## תקציר, where the
+// prompt forbids markers outright.
+
+describe("bare caret markers (no index)", () => {
+  it("strips a trailing bare caret", () => {
+    const { text, indices } = stripAllMarkers("המטרה היא לחסוך זמן ^");
+    expect(text).toBe("המטרה היא לחסוך זמן");
+    expect(indices).toEqual([]);
+  });
+
+  it("strips a bare caret that sits mid-sentence before punctuation", () => {
+    // The exact shape seen in production: caret, then the sentence continues.
+    const { text } = stripAllMarkers("והמערכת מחשבת אוטומטית זוויות ^. המטרה היא לחסוך זמן ^.");
+    expect(text).toBe("והמערכת מחשבת אוטומטית זוויות. המטרה היא לחסוך זמן.");
+  });
+
+  it("still captures a real ^N and still strips it", () => {
+    const { text, indices } = stripAllMarkers("רועי הציע להשתמש במודל Claude ^7");
+    expect(text).toBe("רועי הציע להשתמש במודל Claude");
+    expect(indices).toEqual([7]);
+  });
+
+  it("handles a bare caret and a numbered one in the same bullet", () => {
+    const { text, indices } = stripAllMarkers("אלכס הציג רעיון ^. רועי הגיב ^12");
+    expect(text).toBe("אלכס הציג רעיון. רועי הגיב");
+    expect(indices).toEqual([12]);
+  });
+
+  it("does not touch a caret that is followed by an index — that is the marker form", () => {
+    // NOTE: a caret followed by digits is INDISTINGUISHABLE from a citation, so
+    // "2^3" is (pre-existing behavior) read as a marker and stripped. Out of scope
+    // here; this test only pins that bare carets are handled without changing that.
+    const { indices } = stripAllMarkers("סעיף ^3");
+    expect(indices).toEqual([3]);
+  });
+});
+
+describe("overview / tldr are marker-free (what the reader actually sees)", () => {
+  // overview is rendered by the CLI, the WhatsApp reply, the legacy history card
+  // and "העתק סיכום". Keeping it byte-verbatim meant every stray caret reached
+  // the reader — this is the junk observed in real summaries.
+  const raw = [
+    "## תקציר",
+    "השיחה עוסקת בפיתוח כלי AI ^. המשתתפים דנו במחירים ^.",
+    "",
+    "## נושאים עיקריים",
+    "* **פיתוח כלי AI:** אלכס הציג רעיון ^[#12].",
+    "* **ניהול רכש:** הקבוצה דנה בהזמנת בד ^7",
+  ].join("\n");
+
+  it("strips markers out of overview but keeps the markdown structure", () => {
+    const out = parseStructuredSummary(raw, new Map([[12, 5000]]));
+    expect(out.overview).not.toContain("^");
+    expect(out.overview).not.toContain("[#12]");
+    // structure survives — headings and bullets still render
+    expect(out.overview).toContain("## תקציר");
+    expect(out.overview).toContain("## נושאים עיקריים");
+    expect(out.overview).toContain("* **פיתוח כלי AI:**");
+    expect(out.overview).toContain("אלכס הציג רעיון.");
+  });
+
+  it("strips a mid-sentence caret from tldr, which stripMarker (trailing-only) missed", () => {
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.tldr).not.toContain("^");
+    expect(out.tldr).toBe("השיחה עוסקת בפיתוח כלי AI. המשתתפים דנו במחירים.");
+  });
+
+  it("still resolves the source id even though the marker is gone from the text", () => {
+    const out = parseStructuredSummary(raw, new Map([[12, 5000]]));
+    expect(out.topics[0]?.sourceMessageId).toBe(5000); // nothing lost
+    expect(out.topics[0]?.text).not.toContain("^");
+  });
+});
+
+// ── misspelled headings ──────────────────────────────────────────────────────
+//
+// Observed live: gemma4:26b wrote "## נושאים עימתיים" instead of "## נושאים
+// עיקריים" (and, in another run, "## נושאים עיקים"). Headings were matched by
+// EXACT string, so a single garbled letter silently discarded the entire section
+// — the bullets were parsed, then dropped on the floor, and the card rendered
+// with no topics at all. The model's Hebrew spelling is imperfect and we do not
+// control it, so the parser must tolerate a near-miss.
+
+describe("misspelled section headings", () => {
+  it("recovers a section whose heading the model garbled", () => {
+    const raw = [
+      "## תקציר",
+      "סיכום קצר.",
+      "## נושאים עימתיים", // should be עיקריים — one garbled word
+      "* דנה העלתה את נושא התקציב",
+      "* יוסי דיווח על התקדמות",
+    ].join("\n");
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.topics.map((t) => t.text)).toEqual([
+      "דנה העלתה את נושא התקציב",
+      "יוסי דיווח על התקדמות",
+    ]);
+  });
+
+  it("recovers the other observed misspelling (נושאים עיקים)", () => {
+    const raw = "## נושאים עיקים\n* נקודה אחת";
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.topics).toHaveLength(1);
+  });
+
+  it("tolerates a garbled decisions heading", () => {
+    const raw = "## החלטות ומשימת\n* הוחלט לשחרר ביום חמישי";
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.decisions).toHaveLength(1);
+  });
+
+  it("does NOT fold a genuinely different heading into a section", () => {
+    // "לפי משתתף" is a real, intentionally-ignored section — it must not be
+    // fuzzy-matched into topics/decisions just because it is Hebrew.
+    const raw = "## לפי משתתף\n* דנה: אמרה שלום";
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.topics).toHaveLength(0);
+    expect(out.decisions).toHaveLength(0);
+    expect(out.openQuestions).toHaveLength(0);
   });
 });

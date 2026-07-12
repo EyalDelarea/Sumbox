@@ -1,6 +1,7 @@
 import pg from "pg";
 import { loadConfig } from "../config.js";
 import { insertSummary } from "../db/repositories/summaries.js";
+import { parseStructuredSummary } from "./parse-structured.js";
 import { prepareSummary, prepareSummaryForGroup } from "./prepare.js";
 import type { Selection } from "./select.js";
 import {
@@ -83,11 +84,16 @@ export async function runSummarize(
 
     let genUsage: GenUsage | undefined;
     const startedAt = now();
-    const output = await summarizer.summarize(prepared.prompt, {
+    const raw = await summarizer.summarize(prepared.prompt, {
       onUsage: (u) => {
         genUsage = u;
       },
     });
+    // Parse like every other path does. This one used to persist the model's raw
+    // text as a legacy {overview}, so the `^N` citation markers were never
+    // stripped — and this is the path behind the CLI and the /סיכום reply, i.e.
+    // exactly where the stray carets were being read.
+    const output = parseStructuredSummary(raw.overview, prepared.indexMap);
     const summaryId = await insertSummary(pool, {
       groupId: prepared.groupId,
       summaryType: prepared.summaryType,
@@ -145,11 +151,12 @@ export async function runSummarizeOnPool(
 
   let genUsage: GenUsage | undefined;
   const startedAt = now();
-  const output = await summarizer.summarize(prepared.prompt, {
+  const raw = await summarizer.summarize(prepared.prompt, {
     onUsage: (u) => {
       genUsage = u;
     },
   });
+  const output = parseStructuredSummary(raw.overview, prepared.indexMap);
   const summaryId = await insertSummary(pool, {
     groupId: prepared.groupId,
     summaryType: prepared.summaryType,

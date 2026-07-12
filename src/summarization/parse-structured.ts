@@ -11,6 +11,49 @@ const HEADINGS: Record<string, "tldr" | "topics" | "decisions" | "openQuestions"
   "שאלות פתוחות": "openQuestions",
 };
 
+/**
+ * Resolve a heading the model wrote to one of the four known sections, tolerating
+ * a garbled word.
+ *
+ * The model's Hebrew spelling is imperfect and we do not control it: it has
+ * written "## נושאים עימתיים" and "## נושאים עיקים" for "## נושאים עיקריים".
+ * Matching headings by exact string meant one wrong letter silently discarded the
+ * WHOLE section — the bullets were parsed and then dropped on the floor, and the
+ * card rendered with no topics at all.
+ *
+ * Edit distance ≤ 2 (and only within 3 characters of the expected length) is
+ * loose enough for a typo and far tighter than the gap between any two real
+ * headings, so a genuinely different section like "לפי משתתף" — which is
+ * deliberately ignored — is never folded in.
+ */
+const HEADING_FUZZ = 2;
+
+function levenshtein(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(
+        prev[j]! + 1,
+        curr[j - 1]! + 1,
+        prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = curr;
+  }
+  return prev[b.length]!;
+}
+
+function resolveHeading(text: string): "tldr" | "topics" | "decisions" | "openQuestions" | null {
+  const exact = HEADINGS[text];
+  if (exact) return exact;
+  for (const [known, section] of Object.entries(HEADINGS)) {
+    if (Math.abs(known.length - text.length) > 3) continue;
+    if (levenshtein(known, text) <= HEADING_FUZZ) return section;
+  }
+  return null;
+}
+
 const HEADING_RE = /^\s*##\s+(.+?)\s*$/;
 const BULLET_RE = /^\s*[-*]\s+(.*)$/;
 
@@ -33,6 +76,20 @@ const MARKER_GLOBAL_RE =
   /\s*(?:\^\s*\[?\s*#?\s*\d+(?:\s*,\s*\^?\s*#?\s*\d+)*\s*\]?|\[\s*#[^\]]*\]|\[\s*#?\s*\d[\d\s,#]*\])/g;
 
 /**
+ * A caret with NO index after it — a citation the model failed to complete.
+ *
+ * The prompt asks for `^N` and says to omit the marker entirely when no single
+ * line applies; gemma4:26b routinely does neither and emits a bare `^`. Every
+ * regex above requires `\d+` after the caret, so these survived into the rendered
+ * Hebrew — seen live as "...וצורך בחומרים ^." and even inside ## תקציר, which the
+ * prompt forbids markers in at all.
+ *
+ * Only strips a caret NOT followed by an index (the lookahead), so real `^N`
+ * citations are still parsed by MARKER_GLOBAL_RE and their source ids captured.
+ */
+const BARE_CARET_RE = /\s*\^(?!\s*\[?\s*#?\s*\d)/g;
+
+/**
  * Parse a Hebrew markdown summary blob into a fielded {@link StructuredSummary}.
  * Pure + total: a model that ignores the format yields `overview = raw` with
  * empty arrays rather than an error, and an out-of-range `^N` marker is dropped
@@ -47,7 +104,12 @@ export function parseStructuredSummary(
 ): StructuredSummary {
   const result: StructuredSummary = {
     version: 2,
-    overview: raw, // full markdown — back-compat field, verbatim for copy
+    // Full markdown, with citation markers removed. `overview` is what the CLI,
+    // the WhatsApp reply, the legacy history card and "העתק סיכום" all render, so
+    // keeping it byte-verbatim meant every raw `^`, `^7` and `^[#75]` the model
+    // emitted was shown to the reader as junk. The source ids they encode are
+    // still captured on each bullet's sourceMessageId, so nothing is lost.
+    overview: stripMarkersForDisplay(raw),
     tldr: "",
     topics: [],
     decisions: [],
@@ -63,13 +125,16 @@ export function parseStructuredSummary(
     const heading = line.match(HEADING_RE);
     if (heading) {
       sawHeading = true;
-      current = HEADINGS[heading[1]!.trim()] ?? null;
+      current = resolveHeading(heading[1]!.trim());
       continue;
     }
     if (current === null) continue; // text before/under an unknown heading
 
     if (current === "tldr") {
-      const text = stripMarker(line.trim()).text;
+      // stripAllMarkers, not stripMarker: the latter only removes a marker at the
+      // END of the line, so a caret mid-sentence ("...זוויות ^. המטרה...") survived.
+      // The prompt forbids markers in ## תקציר outright, so any here are noise.
+      const text = stripAllMarkers(line.trim()).text;
       if (text) tldrLines.push(text);
       continue;
     }
@@ -119,12 +184,38 @@ function stripMarker(line: string): { text: string; n: number | null } {
  * markers never leak into a rendered cell, while every source id is still
  * captured. Leftover whitespace/commas left by removed tokens are tidied.
  */
+/**
+ * Remove every citation marker from a full markdown blob, PRESERVING structure.
+ *
+ * Line-wise on purpose: {@link stripAllMarkers} collapses runs of whitespace,
+ * which would flatten the newlines and destroy the `##` headings and `*` bullets.
+ * Here only intra-line spacing is tidied, so the markdown still renders.
+ */
+function stripMarkersForDisplay(raw: string): string {
+  return raw
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(MARKER_GLOBAL_RE, " ")
+        .replace(BARE_CARET_RE, "")
+        .replace(/[ \t]+([,.;:])/g, "$1") // no space before punctuation a marker left behind
+        .replace(/[ \t]{2,}/g, " ")
+        .replace(/[ \t]+$/, ""),
+    )
+    .join("\n")
+    .trim();
+}
+
 export function stripAllMarkers(value: string): { text: string; indices: number[] } {
   const indices: number[] = [];
-  const stripped = value.replace(MARKER_GLOBAL_RE, (m) => {
-    for (const d of m.matchAll(/\d+/g)) indices.push(Number.parseInt(d[0], 10));
-    return " ";
-  });
+  const stripped = value
+    .replace(MARKER_GLOBAL_RE, (m) => {
+      for (const d of m.matchAll(/\d+/g)) indices.push(Number.parseInt(d[0], 10));
+      return " ";
+    })
+    // Numbered markers are consumed above, so anything still carrying a caret is
+    // an index-less one the model failed to complete. Cites nothing; strip it.
+    .replace(BARE_CARET_RE, "");
   const text = stripped
     .replace(/\s+([,.;:])/g, "$1") // no space before punctuation a token left behind
     .replace(/([,;])(?:\s*[,;])+/g, "$1") // collapse runs of separators
