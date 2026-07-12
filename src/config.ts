@@ -162,12 +162,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         model: env.SUMMARY_MODEL ?? "gemma4:26b",
         numCtx,
         // Clamped so the prompt can never crowd the response out of num_ctx.
-        // The 24000 default was never reachable anyway: it was compared against a
-        // chars/4 estimate that under-counted Hebrew ~2x, so a "14.8k" selection
+        // The old 24000 default was never reachable anyway: it was compared against
+        // a chars/4 estimate that under-counted Hebrew ~2x, so a "14.8k" selection
         // was really 32.2k tokens and filled the window.
+        //
+        // 18000 balances coverage against latency. Prompt eval is ~89% of a slow
+        // run, so budget IS the latency dial: 12000 ran a 3-day window in ~67s but
+        // dropped 290 of 460 messages; 18000 covers most wide windows for ~90s.
+        // Now that oversized prompts no longer truncate (see budget.ts), a bigger
+        // budget costs only time, never correctness.
         tokenBudget: effectiveTokenBudget({
           numCtx,
-          configured: Number(env.SUMMARY_TOKEN_BUDGET ?? 12000),
+          configured: Number(env.SUMMARY_TOKEN_BUDGET ?? 18000),
         }),
         temperature: Number(env.SUMMARY_TEMPERATURE ?? 0.7),
         repeatPenalty: Number(env.SUMMARY_REPEAT_PENALTY ?? 1.1),

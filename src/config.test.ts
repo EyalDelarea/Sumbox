@@ -109,8 +109,8 @@ describe("loadConfig transcription block", () => {
       // Tighter than the old 24000 on purpose. That number was never reachable:
       // it was compared against a chars/4 estimate that under-counted Hebrew ~2x,
       // so a "14.8k" selection was really 32.2k tokens and filled num_ctx. Prompt
-      // eval is ~89% of a slow run, so a smaller prompt is the lever on latency.
-      tokenBudget: 12000,
+      // eval is ~89% of a slow run, so the budget is the latency dial.
+      tokenBudget: 18000,
       temperature: 0.7,
       repeatPenalty: 1.1,
       numPredict: 4096,
