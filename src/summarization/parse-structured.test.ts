@@ -224,3 +224,51 @@ describe("overview / tldr are marker-free (what the reader actually sees)", () =
     expect(out.topics[0]?.text).not.toContain("^");
   });
 });
+
+// ── misspelled headings ──────────────────────────────────────────────────────
+//
+// Observed live: gemma4:26b wrote "## נושאים עימתיים" instead of "## נושאים
+// עיקריים" (and, in another run, "## נושאים עיקים"). Headings were matched by
+// EXACT string, so a single garbled letter silently discarded the entire section
+// — the bullets were parsed, then dropped on the floor, and the card rendered
+// with no topics at all. The model's Hebrew spelling is imperfect and we do not
+// control it, so the parser must tolerate a near-miss.
+
+describe("misspelled section headings", () => {
+  it("recovers a section whose heading the model garbled", () => {
+    const raw = [
+      "## תקציר",
+      "סיכום קצר.",
+      "## נושאים עימתיים", // should be עיקריים — one garbled word
+      "* דנה העלתה את נושא התקציב",
+      "* יוסי דיווח על התקדמות",
+    ].join("\n");
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.topics.map((t) => t.text)).toEqual([
+      "דנה העלתה את נושא התקציב",
+      "יוסי דיווח על התקדמות",
+    ]);
+  });
+
+  it("recovers the other observed misspelling (נושאים עיקים)", () => {
+    const raw = "## נושאים עיקים\n* נקודה אחת";
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.topics).toHaveLength(1);
+  });
+
+  it("tolerates a garbled decisions heading", () => {
+    const raw = "## החלטות ומשימת\n* הוחלט לשחרר ביום חמישי";
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.decisions).toHaveLength(1);
+  });
+
+  it("does NOT fold a genuinely different heading into a section", () => {
+    // "לפי משתתף" is a real, intentionally-ignored section — it must not be
+    // fuzzy-matched into topics/decisions just because it is Hebrew.
+    const raw = "## לפי משתתף\n* דנה: אמרה שלום";
+    const out = parseStructuredSummary(raw, new Map());
+    expect(out.topics).toHaveLength(0);
+    expect(out.decisions).toHaveLength(0);
+    expect(out.openQuestions).toHaveLength(0);
+  });
+});

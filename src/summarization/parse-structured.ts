@@ -11,6 +11,49 @@ const HEADINGS: Record<string, "tldr" | "topics" | "decisions" | "openQuestions"
   "שאלות פתוחות": "openQuestions",
 };
 
+/**
+ * Resolve a heading the model wrote to one of the four known sections, tolerating
+ * a garbled word.
+ *
+ * The model's Hebrew spelling is imperfect and we do not control it: it has
+ * written "## נושאים עימתיים" and "## נושאים עיקים" for "## נושאים עיקריים".
+ * Matching headings by exact string meant one wrong letter silently discarded the
+ * WHOLE section — the bullets were parsed and then dropped on the floor, and the
+ * card rendered with no topics at all.
+ *
+ * Edit distance ≤ 2 (and only within 3 characters of the expected length) is
+ * loose enough for a typo and far tighter than the gap between any two real
+ * headings, so a genuinely different section like "לפי משתתף" — which is
+ * deliberately ignored — is never folded in.
+ */
+const HEADING_FUZZ = 2;
+
+function levenshtein(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(
+        prev[j]! + 1,
+        curr[j - 1]! + 1,
+        prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = curr;
+  }
+  return prev[b.length]!;
+}
+
+function resolveHeading(text: string): "tldr" | "topics" | "decisions" | "openQuestions" | null {
+  const exact = HEADINGS[text];
+  if (exact) return exact;
+  for (const [known, section] of Object.entries(HEADINGS)) {
+    if (Math.abs(known.length - text.length) > 3) continue;
+    if (levenshtein(known, text) <= HEADING_FUZZ) return section;
+  }
+  return null;
+}
+
 const HEADING_RE = /^\s*##\s+(.+?)\s*$/;
 const BULLET_RE = /^\s*[-*]\s+(.*)$/;
 
@@ -82,7 +125,7 @@ export function parseStructuredSummary(
     const heading = line.match(HEADING_RE);
     if (heading) {
       sawHeading = true;
-      current = HEADINGS[heading[1]!.trim()] ?? null;
+      current = resolveHeading(heading[1]!.trim());
       continue;
     }
     if (current === null) continue; // text before/under an unknown heading
