@@ -19,7 +19,11 @@ import type { Job } from "../../jobs/job-types.js";
 import type { PreparedSumbox } from "../../summarization/prepare-sumbox.js";
 import type { InsertSummaryInput } from "../../summarization/run-summary.js";
 import { summarizeAndPersist } from "../../summarization/run-summary.js";
-import type { SummaryOutput, SummaryPrompt } from "../../summarization/summarizer.js";
+import type {
+  SummarizeOpts,
+  SummaryOutput,
+  SummaryPrompt,
+} from "../../summarization/summarizer.js";
 
 export type SummarizeGroupHandlerDeps = {
   pool: pg.Pool;
@@ -29,7 +33,7 @@ export type SummarizeGroupHandlerDeps = {
     fallbackN: number,
     tokenBudget: number,
   ) => Promise<PreparedSumbox>;
-  summarize: (prompt: SummaryPrompt) => Promise<string>;
+  summarize: (prompt: SummaryPrompt, opts?: SummarizeOpts) => Promise<string>;
   insertSummary: (pool: pg.Pool, input: InsertSummaryInput) => Promise<number>;
   updateWatermark: (pool: pg.Pool, groupId: number, cursor: Cursor) => Promise<void>;
   /** Best-effort entity materialization (meetings/todos/people) — see materializeEntities. */

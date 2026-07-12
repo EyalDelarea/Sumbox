@@ -25,6 +25,8 @@ export type PreparedRegenerate =
       /** Reused verbatim from the rated summary so the new row covers the same window. */
       parameters: SumboxParams;
       messageCount: number;
+      /** The chars/4 estimate the token budget was ENFORCED against. */
+      estimatedTokens: number;
       regeneratedFromId: number;
     };
 
@@ -84,6 +86,7 @@ export async function prepareRegenerate(
     summaryType: "watermark",
     parameters: params,
     messageCount: range.length,
+    estimatedTokens: tokens,
     regeneratedFromId: summaryId,
   };
 }

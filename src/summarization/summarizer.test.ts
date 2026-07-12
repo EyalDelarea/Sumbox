@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OllamaSummarizer } from "./summarizer.js";
+import { type GenUsage, OllamaSummarizer } from "./summarizer.js";
 
 function fakeFetch(captured: { body?: any }, content: string) {
   return async (_url: string, init: { body: string }) => {
@@ -92,6 +92,134 @@ describe("OllamaSummarizer", () => {
       /Ollama not reachable/i,
     );
   });
+
+  // ── Generation telemetry ────────────────────────────────────────────
+  //
+  // The real numbers Ollama reports are the only way to see what the chars/4
+  // token estimate hides: a Hebrew prompt that estimates 14.8k tokens really
+  // costs 32.2k, filling num_ctx and leaving the model no room to finish.
+
+  it("reports usage — real token counts and the prompt/generation time split", async () => {
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          json: async () => ({
+            message: { content: "סיכום" },
+            done_reason: "stop",
+            prompt_eval_count: 32176,
+            eval_count: 592,
+            prompt_eval_duration: 124_909_000_000, // ns
+            eval_duration: 23_248_000_000, // ns
+          }),
+        }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    await engine.summarize({ system: "S", user: "U" }, { onUsage: (u) => seen.push(u) });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      promptTokens: 32176,
+      evalTokens: 592,
+      doneReason: "stop",
+      truncated: false,
+      promptMs: 124909,
+      evalMs: 23248,
+    });
+  });
+
+  it("flags truncated:true when the model hit the wall (done_reason 'length')", async () => {
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          json: async () => ({
+            message: { content: "סיכום שנקטע באמצע" },
+            done_reason: "length",
+            prompt_eval_count: 32342,
+            eval_count: 426, // == 32768 - 32342: it ran out of context, it did not stop
+            prompt_eval_duration: 1_000_000,
+            eval_duration: 1_000_000,
+          }),
+        }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    await engine.summarize({ system: "S", user: "U" }, { onUsage: (u) => seen.push(u) });
+    expect(seen[0]?.truncated).toBe(true);
+    expect(seen[0]?.doneReason).toBe("length");
+  });
+
+  it("reports NO usage rather than fabricating zeros when the engine omits the counts", async () => {
+    // A row of zeros is worse than no row: it is indistinguishable from a real
+    // measurement, and it drags the estimated-vs-real ratio DOWN — toward the
+    // false conclusion that the chars/4 estimate is fine. Absent counts must be
+    // absent, not 0.
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          json: async () => ({ message: { content: "סיכום" } }), // no usage fields at all
+        }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    await engine.summarize({ system: "S", user: "U" }, { onUsage: (u) => seen.push(u) });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("never lets a throwing onUsage sink destroy a successful generation", async () => {
+    // Telemetry must not be able to kill the thing it measures. A ~150s local
+    // generation that already succeeded must not be lost to a bookkeeping error.
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          json: async () => ({
+            message: { content: "סיכום" },
+            done_reason: "stop",
+            prompt_eval_count: 10,
+            eval_count: 2,
+          }),
+        }) as unknown as Response,
+    });
+
+    await expect(
+      engine.summarize(
+        { system: "S", user: "U" },
+        {
+          onUsage: () => {
+            throw new Error("metrics sink exploded");
+          },
+        },
+      ),
+    ).resolves.toEqual({ overview: "סיכום" });
+  });
+
+  it("does not require onUsage — summarize still works without it", async () => {
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: fakeFetch({}, "ok"),
+    });
+    await expect(engine.summarize({ system: "S", user: "U" })).resolves.toEqual({
+      overview: "ok",
+    });
+  });
 });
 
 function streamBody(lines: string[]): ReadableStream<Uint8Array> {
@@ -131,6 +259,151 @@ describe("OllamaSummarizer.summarizeStream", () => {
     expect(body.options.num_predict).toBe(4096);
     expect(body.think).toBe(false);
     expect(body.format).toBeUndefined();
+  });
+
+  it("reports usage from the final done chunk (stream)", async () => {
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          body: streamBody([
+            JSON.stringify({ message: { content: "שלום " } }),
+            JSON.stringify({
+              message: { content: "עולם" },
+              done: true,
+              done_reason: "length",
+              prompt_eval_count: 32342,
+              eval_count: 426,
+              prompt_eval_duration: 124_909_000_000,
+              eval_duration: 23_248_000_000,
+            }),
+          ]),
+        }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    const out: string[] = [];
+    for await (const d of engine.summarizeStream(
+      { system: "S", user: "U" },
+      { onUsage: (u) => seen.push(u) },
+    )) {
+      out.push(d);
+    }
+
+    expect(out).toEqual(["שלום ", "עולם"]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.promptTokens).toBe(32342);
+    expect(seen[0]?.truncated).toBe(true);
+    expect(seen[0]?.promptMs).toBe(124909);
+  });
+
+  it("captures usage from a final done chunk that is NOT newline-terminated (stream)", async () => {
+    // The read loop only consumes newline-terminated lines. Ollama normally ends
+    // its NDJSON with a newline, but the done chunk is the SOLE carrier of the
+    // truncated alarm — losing it to a missing trailing \n would silently disarm
+    // the one signal this whole feature exists to raise.
+    const enc = new TextEncoder();
+    const unterminated = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode(`${JSON.stringify({ message: { content: "חצי " } })}\n`));
+        c.enqueue(
+          enc.encode(
+            JSON.stringify({
+              message: { content: "סוף" },
+              done: true,
+              done_reason: "length",
+              prompt_eval_count: 9000,
+              eval_count: 12,
+            }), // no trailing "\n"
+          ),
+        );
+        c.close();
+      },
+    });
+
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () => ({ ok: true, body: unterminated }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    const out: string[] = [];
+    for await (const d of engine.summarizeStream(
+      { system: "S", user: "U" },
+      { onUsage: (u) => seen.push(u) },
+    )) {
+      out.push(d);
+    }
+
+    expect(out).toEqual(["חצי ", "סוף"]); // the trailing prose survives too
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.truncated).toBe(true);
+    expect(seen[0]?.promptTokens).toBe(9000);
+  });
+
+  it("reports no usage when the stream ends without a done chunk (stream)", async () => {
+    // Transport drop / crashed engine: the reader EOFs cleanly with no AbortError.
+    // Recording zeros here would poison the calibration set with a fake row.
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          body: streamBody([JSON.stringify({ message: { content: "חצי" } })]), // no done:true
+        }) as unknown as Response,
+    });
+
+    const seen: GenUsage[] = [];
+    const out: string[] = [];
+    for await (const d of engine.summarizeStream(
+      { system: "S", user: "U" },
+      { onUsage: (u) => seen.push(u) },
+    )) {
+      out.push(d);
+    }
+    expect(out).toEqual(["חצי"]);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("never lets a throwing onUsage sink destroy a completed stream", async () => {
+    const engine = new OllamaSummarizer({
+      host: "http://localhost:11434",
+      model: "gemma4:26b",
+      numCtx: 32768,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          body: streamBody([
+            JSON.stringify({
+              message: { content: "סיכום" },
+              done: true,
+              done_reason: "stop",
+              prompt_eval_count: 10,
+              eval_count: 2,
+            }),
+          ]),
+        }) as unknown as Response,
+    });
+
+    const out: string[] = [];
+    for await (const d of engine.summarizeStream(
+      { system: "S", user: "U" },
+      {
+        onUsage: () => {
+          throw new Error("metrics sink exploded");
+        },
+      },
+    )) {
+      out.push(d);
+    }
+    expect(out).toEqual(["סיכום"]); // the summary survives the telemetry failure
   });
 
   it("throws a clear error when Ollama is unreachable (stream)", async () => {

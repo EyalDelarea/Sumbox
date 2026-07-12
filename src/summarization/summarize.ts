@@ -3,7 +3,13 @@ import { loadConfig } from "../config.js";
 import { insertSummary } from "../db/repositories/summaries.js";
 import { prepareSummary, prepareSummaryForGroup } from "./prepare.js";
 import type { Selection } from "./select.js";
-import { OllamaSummarizer, type Summarizer, type SummaryOutput } from "./summarizer.js";
+import {
+  type GenUsage,
+  OllamaSummarizer,
+  type Summarizer,
+  type SummaryOutput,
+} from "./summarizer.js";
+import { withGenUsage } from "./usage-parameters.js";
 
 export type RunSummarizeInput = {
   groupName: string;
@@ -30,13 +36,24 @@ type RunSummarizeDeps = {
  * panel that otherwise borrows a scheduled job's duration.
  *
  * ponytail: kept in the existing jsonb `parameters` (no migration). Promote to
- * typed columns on `summaries` if Grafana aggregation gets heavy.
+ * typed columns on `summaries` if aggregation gets heavy.
+ *
+ * `withGenUsage` adds the engine-reported half (real token counts, the
+ * prompt-vs-generation split, truncated); this adds the who/why half.
  */
 function withUsage(
   parameters: Record<string, unknown>,
-  usage: { genMs: number; trigger: "command" | "scheduled"; requesterId: number | null },
+  usage: {
+    genMs: number;
+    trigger: "command" | "scheduled";
+    requesterId: number | null;
+    messageCount: number;
+    genUsage?: GenUsage;
+    estimatedTokens: number;
+  },
 ): Record<string, unknown> {
-  return { ...parameters, ...usage };
+  const { genUsage, estimatedTokens, genMs, ...rest } = usage;
+  return withGenUsage({ ...parameters, ...rest }, { genMs, usage: genUsage, estimatedTokens });
 }
 
 export async function runSummarize(
@@ -64,8 +81,13 @@ export async function runSummarize(
     const prepared = await prepareSummary(pool, input.groupName, input.selection, tokenBudget);
     if (prepared.kind === "empty") return { kind: "empty" };
 
+    let genUsage: GenUsage | undefined;
     const startedAt = now();
-    const output = await summarizer.summarize(prepared.prompt);
+    const output = await summarizer.summarize(prepared.prompt, {
+      onUsage: (u) => {
+        genUsage = u;
+      },
+    });
     const summaryId = await insertSummary(pool, {
       groupId: prepared.groupId,
       summaryType: prepared.summaryType,
@@ -73,6 +95,9 @@ export async function runSummarize(
         genMs: now() - startedAt,
         trigger: "scheduled",
         requesterId: null,
+        messageCount: prepared.messageCount,
+        genUsage,
+        estimatedTokens: prepared.estimatedTokens,
       }),
       output,
       model,
@@ -118,8 +143,13 @@ export async function runSummarizeOnPool(
   const prepared = await prepareSummaryForGroup(pool, groupId, selection, tokenBudget);
   if (prepared.kind === "empty") return { kind: "empty" };
 
+  let genUsage: GenUsage | undefined;
   const startedAt = now();
-  const output = await summarizer.summarize(prepared.prompt);
+  const output = await summarizer.summarize(prepared.prompt, {
+    onUsage: (u) => {
+      genUsage = u;
+    },
+  });
   const summaryId = await insertSummary(pool, {
     groupId: prepared.groupId,
     summaryType: prepared.summaryType,
@@ -127,6 +157,9 @@ export async function runSummarizeOnPool(
       genMs: now() - startedAt,
       trigger: "command",
       requesterId: deps?.requesterId ?? null,
+      messageCount: prepared.messageCount,
+      genUsage,
+      estimatedTokens: prepared.estimatedTokens,
     }),
     output,
     model,

@@ -339,8 +339,8 @@ async function main(): Promise<void> {
     handlers["summarize.group"] = makeSummarizeGroupHandler({
       pool,
       prepareSumbox,
-      summarize: async (prompt) => {
-        const result = await ollamaSummarizer.summarize(prompt);
+      summarize: async (prompt, opts) => {
+        const result = await ollamaSummarizer.summarize(prompt, opts);
         return result.overview;
       },
       insertSummary,

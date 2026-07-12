@@ -78,6 +78,9 @@ describe("summarizeAndPersist — new messages (generated)", () => {
       usedFallback: false,
     },
     messageCount: 5,
+    // The estimate the budget guard ENFORCED — surfaced by prepareSumbox and
+    // recorded verbatim, so guard and telemetry cannot drift apart.
+    estimatedTokens: 3712,
     newWatermark,
     usedFallback: false,
   };
@@ -98,10 +101,66 @@ describe("summarizeAndPersist — new messages (generated)", () => {
     expect(result).toEqual({ status: "generated" });
   });
 
-  it("calls summarize with the prepared prompt", async () => {
+  it("persists real token counts, the timing split, and the truncation flag", async () => {
+    // The scheduled path recorded messageCount but NO duration at all, so the
+    // slowest runs were the ones with zero telemetry. It now records both, plus
+    // what the prompt really cost vs what estimateTokens() predicted.
+    let clock = 1000;
+    deps = makeDeps({
+      prepareSumbox: vi.fn().mockResolvedValue(readyResult),
+      insertSummary: vi.fn().mockResolvedValue(99),
+      updateWatermark: vi.fn().mockResolvedValue(undefined),
+      now: () => clock,
+      summarize: vi.fn(async (_p, opts) => {
+        clock += 148_572; // the model spent this long
+        opts?.onUsage?.({
+          promptTokens: 32176,
+          evalTokens: 592,
+          doneReason: "length",
+          truncated: true,
+          promptMs: 124_909,
+          evalMs: 23_248,
+        });
+        return "A truncated summary";
+      }),
+    });
+
+    await summarizeAndPersist(deps, groupId);
+
+    const row = vi.mocked(deps.insertSummary).mock.calls[0]?.[1];
+    expect(row?.parameters).toMatchObject({
+      messageCount: 5, // preserved
+      genMs: 148_572,
+      promptTokens: 32176,
+      evalTokens: 592,
+      promptMs: 124_909,
+      evalMs: 23_248,
+      doneReason: "length",
+      truncated: true,
+    });
+    // Recorded verbatim from the prepared result — the same figure the token
+    // budget was enforced against, kept next to the real count so the gap that
+    // starves num_ctx is measurable per row.
+    expect(row?.parameters["estimatedTokens"]).toBe(3712);
+  });
+
+  it("still records genMs when the engine reports no usage", async () => {
+    // A non-Ollama engine (or a fake) may never call onUsage — the duration must
+    // survive anyway rather than silently vanishing from the row.
+    await summarizeAndPersist(deps, groupId);
+    const row = vi.mocked(deps.insertSummary).mock.calls[0]?.[1];
+    expect(row?.parameters).toHaveProperty("genMs");
+    expect(row?.parameters).not.toHaveProperty("promptTokens");
+  });
+
+  it("calls summarize with the prepared prompt and an onUsage sink", async () => {
     await summarizeAndPersist(deps, groupId);
     expect(deps.summarize).toHaveBeenCalledOnce();
-    expect(deps.summarize).toHaveBeenCalledWith({ system: "sys", user: "user prompt" });
+    expect(deps.summarize).toHaveBeenCalledWith(
+      { system: "sys", user: "user prompt" },
+      // The engine reports real token counts back through this callback.
+      expect.objectContaining({ onUsage: expect.any(Function) }),
+    );
   });
 
   it("calls insertSummary with the generated text", async () => {
@@ -162,6 +221,9 @@ describe("summarizeAndPersist — entity extraction", () => {
       usedFallback: false,
     },
     messageCount: 5,
+    // The estimate the budget guard ENFORCED — surfaced by prepareSumbox and
+    // recorded verbatim, so guard and telemetry cannot drift apart.
+    estimatedTokens: 3712,
     newWatermark,
     usedFallback: false,
   };
