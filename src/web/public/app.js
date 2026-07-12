@@ -1058,10 +1058,22 @@ function wireSummaryRate() {
     const row = e.target.closest(".sum-rate[data-summary-id]");
     if (!row) return;
     const summaryId = Number(row.dataset.summaryId);
+    // A rating that fails to save must not look like one that saved. Both call
+    // sites used to swallow the error with .catch(() => {}), and the 👍 branch
+    // painted "✓ תודה על המשוב" before the request had even resolved — so a
+    // failed write was indistinguishable from a successful one, and the quality
+    // signal it exists to collect vanished with no trace.
+    const rateFailed = (err) => {
+      console.error("[sumbox] rating failed", err);
+      row.innerHTML = `<span class="asst-rate-error">לא הצלחנו לשמור את המשוב</span>`;
+    };
+
     const chip = e.target.closest(".sum-reason-chip[data-reason]");
     if (chip) {
       const reason = chip.dataset.reason;
-      void rateSummary(summaryId, -1, reason).catch(() => {});
+      // The regenerate still runs on its own — a lost rating shouldn't cost the
+      // user the re-run they asked for — but the failure is surfaced, not hidden.
+      rateSummary(summaryId, -1, reason).catch(rateFailed);
       if (detailState.group) {
         runSummary({ mode: "sumbox", group: detailState.group, regenerate: summaryId, reason }, false);
       }
@@ -1074,8 +1086,11 @@ function wireSummaryRate() {
     }
     const up = e.target.closest(".asst-rate-b:not(.down)");
     if (up) {
-      void rateSummary(summaryId, 1).catch(() => {});
-      row.innerHTML = `<span class="asst-rate-thanks">✓ תודה על המשוב</span>`;
+      rateSummary(summaryId, 1)
+        .then(() => {
+          row.innerHTML = `<span class="asst-rate-thanks">✓ תודה על המשוב</span>`;
+        })
+        .catch(rateFailed);
     }
   });
 }
