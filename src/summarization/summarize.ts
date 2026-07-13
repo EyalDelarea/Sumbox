@@ -19,7 +19,15 @@ export type RunSummarizeInput = {
 
 export type RunSummarizeResult =
   | { kind: "empty" }
-  | { kind: "ok"; output: SummaryOutput; summaryId: number };
+  | {
+      kind: "ok";
+      output: SummaryOutput;
+      summaryId: number;
+      /** sent_at of the OLDEST message actually summarized (see PreparedSummary). */
+      coveredFrom: Date;
+      /** Messages the budget forced out of this summary (0 = the full window fit). */
+      droppedCount: number;
+    };
 
 type RunSummarizeDeps = {
   databaseUrl: string;
@@ -108,7 +116,13 @@ export async function runSummarize(
       output,
       model,
     });
-    return { kind: "ok", output, summaryId };
+    return {
+      kind: "ok",
+      output,
+      summaryId,
+      coveredFrom: prepared.coveredFrom,
+      droppedCount: prepared.droppedCount,
+    };
   } finally {
     await pool.end();
   }
@@ -171,5 +185,11 @@ export async function runSummarizeOnPool(
     output,
     model,
   });
-  return { kind: "ok", output, summaryId };
+  return {
+    kind: "ok",
+    output,
+    summaryId,
+    coveredFrom: prepared.coveredFrom,
+    droppedCount: prepared.droppedCount,
+  };
 }

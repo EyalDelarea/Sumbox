@@ -20,6 +20,12 @@ export type PreparedSummary =
       estimatedTokens: number;
       /** Messages dropped because the selection did not fit the budget (0 = full coverage). */
       droppedCount: number;
+      /**
+       * sent_at of the OLDEST message actually summarized — not the requested
+       * window start. When a wide selection is trimmed to fit the budget, the two
+       * differ, and only this one is true of the summary we are about to produce.
+       */
+      coveredFrom: Date;
     };
 
 /**
@@ -114,5 +120,6 @@ export async function prepareSummaryForGroup(
     messageCount: messages.length,
     estimatedTokens: tokens,
     droppedCount: dropped,
+    coveredFrom: messages[0]!.sentAt,
   };
 }
