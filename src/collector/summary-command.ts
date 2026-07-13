@@ -50,6 +50,7 @@ import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
 import type { SummaryUserMark } from "../db/repositories/summary-user-marks.js";
 import { normalizeSummaryOutput } from "../summarization/normalize.js";
+import { stripAllMarkers } from "../summarization/parse-structured.js";
 import type { RunSummarizeResult } from "../summarization/summarize.js";
 import type { SummaryBullet, SummaryOutput } from "../summarization/summarizer.js";
 import { mapWaMessage } from "./message-mapper.js";
@@ -244,7 +245,13 @@ export async function maybeHandleSummaryCommand(
     const selection = anchor ? { since: anchor } : { last: FALLBACK_LAST_N };
 
     const result = await deps.runSummarize({ groupId, selection, requesterId: participantId });
-    const text = result.kind === "empty" ? EMPTY_REPLY : buildWhatsAppReply(result.output);
+    const text =
+      result.kind === "empty"
+        ? EMPTY_REPLY
+        : buildWhatsAppReply(result.output, {
+            coveredFrom: result.coveredFrom,
+            droppedCount: result.droppedCount,
+          });
 
     // Quote the asker's OWN previous summary to chain their thread. Prefer the
     // live in-memory message; else reconstruct it from their mark (survives a
@@ -300,8 +307,37 @@ export async function maybeHandleSummaryCommand(
  * rows into the same sections; `tldr` is always populated, so every reply gets
  * at least 📝 *תקציר*, and richer summaries add the other section emojis.
  */
-export function buildWhatsAppReply(output: SummaryOutput): string {
+/**
+ * The "מסכם מ־…" line at the top of the reply, so the reader knows WHICH window
+ * the summary covers instead of having to guess.
+ *
+ * `coveredFrom` is the oldest message actually summarized — NOT the requested
+ * window start. When the token budget trims a wide selection, the two differ, and
+ * printing the request would claim coverage the summary does not have. When
+ * messages were dropped, that is stated outright rather than left implicit.
+ */
+function buildWindowHeader(window: SummaryWindow): string {
+  const when = window.coveredFrom.toLocaleString("he-IL", {
+    day: "numeric",
+    month: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const dropped = window.droppedCount > 0 ? ` · ${window.droppedCount} הודעות ישנות לא נכללו` : "";
+  return `🕐 _מסכם מ־${when}${dropped}_`;
+}
+
+/** What the reply says about its own coverage. */
+export type SummaryWindow = {
+  /** sent_at of the OLDEST message actually summarized. */
+  coveredFrom: Date;
+  /** Messages the token budget forced out of this summary. */
+  droppedCount: number;
+};
+
+export function buildWhatsAppReply(output: SummaryOutput, window?: SummaryWindow): string {
   const n = normalizeSummaryOutput(output);
+  const header = window ? buildWindowHeader(window) : null;
   const parts: string[] = [];
   const push = (emoji: string, title: string, body: string) => {
     const b = body.trim();
@@ -320,9 +356,11 @@ export function buildWhatsAppReply(output: SummaryOutput): string {
   push("❓", "שאלות פתוחות", bullets(n.openQuestions));
 
   // Fallback: if normalization yielded no sections (shouldn't happen — tldr is
-  // populated for any non-empty summary), send the raw overview reshaped.
-  if (parts.length === 0) return formatSummaryForWhatsApp(n.overview);
-  return parts.join("\n\n");
+  // populated for any non-empty summary), send the raw overview reshaped. The
+  // header is checked against the SECTIONS, not the header itself, so a
+  // header-only reply can never be mistaken for a real summary.
+  const body = parts.length === 0 ? formatSummaryForWhatsApp(n.overview) : parts.join("\n\n");
+  return header ? `${header}\n\n${body}` : body;
 }
 
 /** Reshape a single inline fragment: strip citations, `**bold**` → `*bold*`. */
@@ -345,13 +383,17 @@ const HEADING_EMOJI: Record<string, string> = {
   "לפי משתתף": "👤",
 };
 
+/**
+ * Strip source citations from a WhatsApp fragment.
+ *
+ * Delegates to the summarization layer's stripper rather than keeping a third
+ * private copy of the same regexes. The private copy is what leaked `^` into the
+ * live /סיכום reply: like the two it duplicated, both of its patterns required a
+ * digit after the caret, so the model's frequent index-less `^` sailed through —
+ * fixing the shared stripper did nothing for the one surface that mattered most.
+ */
 function stripCitations(text: string): string {
-  return text
-    .replace(/\^?\[#?\d+(?:,\s*#?\d+)*\]/g, "")
-    .replace(/\^#?\d+(?:,\s*#?\d+)*/g, "")
-    .replace(/ +([,.;:])/g, "$1")
-    .replace(/,(\s*[.;:])/g, "$1")
-    .replace(/ {2,}/g, " ");
+  return stripAllMarkers(text).text;
 }
 
 /** Reshape a summary's overview markdown into WhatsApp-native plain text. */

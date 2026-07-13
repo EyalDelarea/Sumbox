@@ -3,6 +3,7 @@ import type pg from "pg";
 import { describe, expect, it, vi } from "vitest";
 import type { RunSummarizeResult } from "../summarization/summarize.js";
 import {
+  buildWhatsAppReply,
   formatSummaryForWhatsApp,
   maybeHandleSummaryCommand,
   SUMMARY_COMMAND,
@@ -47,7 +48,14 @@ function fakePool(opts: {
 }
 
 function okResult(overview: string): RunSummarizeResult {
-  return { kind: "ok", output: { overview } as never, summaryId: 1 };
+  return {
+    kind: "ok",
+    output: { overview } as never,
+    summaryId: 1,
+    // The reply header reports the window it actually covers.
+    coveredFrom: new Date("2026-07-12T20:47:00Z"),
+    droppedCount: 0,
+  };
 }
 
 const SENT = { key: { id: "sent-1", remoteJid: JID } } as unknown as WAMessage;
@@ -236,7 +244,13 @@ describe("maybeHandleSummaryCommand — reply content", () => {
       actionItems: [],
     };
     const deps = baseDeps({
-      runSummarize: vi.fn(async () => ({ kind: "ok", output: structured, summaryId: 1 })),
+      runSummarize: vi.fn(async () => ({
+        kind: "ok" as const,
+        output: structured,
+        summaryId: 1,
+        coveredFrom: new Date("2026-07-12T20:47:00Z"),
+        droppedCount: 0,
+      })),
       sendText: send,
     });
     await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps);
@@ -484,5 +498,53 @@ describe("formatSummaryForWhatsApp", () => {
 
   it("returns empty string for blank input", () => {
     expect(formatSummaryForWhatsApp("   ")).toBe("");
+  });
+});
+
+// ── reply header + citation stripping ────────────────────────────────────────
+
+describe("buildWhatsAppReply", () => {
+  const output = {
+    version: 2 as const,
+    overview: "## תקציר\nתמצית.",
+    tldr: "תמצית.",
+    topics: [{ text: "אלכס הציג רעיון ^" }, { text: "רועי הגיב ^12" }],
+    decisions: [],
+    openQuestions: [],
+    actionItems: [],
+  };
+
+  it("strips the model's index-less caret, which the collector's own regex let through", () => {
+    // The live /סיכום reply was full of stray "^" — the collector kept a THIRD
+    // private copy of the citation regexes, and like the two it duplicated, both
+    // required a digit after the caret.
+    const reply = buildWhatsAppReply(output);
+    expect(reply).not.toContain("^");
+    expect(reply).toContain("אלכס הציג רעיון");
+    expect(reply).toContain("רועי הגיב");
+  });
+
+  it("puts a Hebrew 'summarizing from …' line at the very top", () => {
+    const reply = buildWhatsAppReply(output, {
+      coveredFrom: new Date("2026-07-12T20:47:00Z"),
+      droppedCount: 0,
+    });
+    expect(reply.split("\n")[0]).toMatch(/^🕐 _מסכם מ־/);
+    // The reader must be able to see WHEN the summary starts from.
+    expect(reply.split("\n")[0]).toContain("12.7");
+  });
+
+  it("says so when the budget forced messages out, rather than overstating coverage", () => {
+    // coveredFrom is the oldest message ACTUALLY summarized, so the timestamp is
+    // already honest; this makes the omission explicit too.
+    const reply = buildWhatsAppReply(output, {
+      coveredFrom: new Date("2026-07-12T20:47:00Z"),
+      droppedCount: 213,
+    });
+    expect(reply.split("\n")[0]).toContain("213");
+  });
+
+  it("omits the header entirely when there is no window to report", () => {
+    expect(buildWhatsAppReply(output).startsWith("🕐")).toBe(false);
   });
 });
