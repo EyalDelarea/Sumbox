@@ -1,5 +1,4 @@
 import type pg from "pg";
-import { searchMessagesByEmbedding } from "../db/repositories/message-embeddings.js";
 import { estimateTokens } from "../summarization/prompt.js";
 import type { Embedder } from "./embedder.js";
 import {
@@ -9,6 +8,7 @@ import {
   NOT_IN_CHAT,
   NOT_INDEXED,
 } from "./prompt.js";
+import { searchMessagesHybrid } from "./retrieval.js";
 
 /** Generates the answer text from a built prompt (wraps the Ollama LLM). */
 export interface AskLlm {
@@ -47,7 +47,12 @@ export async function answerQuestion(
   const budget = deps.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
 
   const queryEmbedding = await deps.embedder.embed(input.question);
-  const retrieved = await searchMessagesByEmbedding(deps.pool, input.groupId, queryEmbedding, k);
+  const retrieved = await searchMessagesHybrid(
+    deps.pool,
+    input.groupId,
+    { embedding: queryEmbedding, text: input.question },
+    k,
+  );
   if (retrieved.length === 0) {
     // Empty means this group has NO embedded content messages — i.e. it isn't
     // indexed yet, an operational state — NOT that the answer wasn't discussed.
