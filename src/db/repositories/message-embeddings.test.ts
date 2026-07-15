@@ -147,4 +147,15 @@ describe("searchMessagesLexical", () => {
     await seed(pool2, g, "משהו", "lex-empty");
     expect(await searchMessagesLexical(pool2, g, "!!! ??? ...", 10)).toEqual([]);
   });
+
+  it("strips tsquery operator chars from a mixed query and still matches (to_tsquery never throws)", async () => {
+    // to_tsquery is strict — it raises on raw `& | ! ( )`. The alphanumeric
+    // tokenization must neutralize them so a query like this runs safely AND
+    // still finds the keyword message. This actually reaches to_tsquery.
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const g = await upsertGroup(pool2, { name: "LEX-ops", source: "import" });
+    const id = await seed(pool2, g, "תובל 21 רמת גן", "lex-ops");
+    const hits = await searchMessagesLexical(pool2, g, "כתובת & | ! (תובל)", 10);
+    expect(hits.map((h) => h.messageId)).toContain(id);
+  });
 });

@@ -147,9 +147,12 @@ export async function searchMessagesLexical(
 ): Promise<RetrievedMessage[]> {
   // OR the query's words, not AND. websearch/plainto_tsquery AND every term, so
   // "כמה משולשים" would require BOTH — but a message that says only "משולשים" is
-  // exactly the exact-keyword hit we want. Tokenize to alphanumerics (any script)
-  // so the terms are safe to feed to to_tsquery, and join with `|` (OR). ts_rank
-  // still orders by how well each row matches, so more overlap ranks higher.
+  // exactly the exact-keyword hit we want. So build the query for the strict
+  // `to_tsquery` and join the terms with `|` (OR). `to_tsquery` DOES raise on
+  // malformed syntax — the safety here comes from the tokenization below, NOT the
+  // function: `[\p{L}\p{N}]+` keeps only alphanumeric runs (any script), stripping
+  // every tsquery operator, so the terms can never form invalid syntax or inject.
+  // ts_rank still orders by how well each row matches, so more overlap ranks higher.
   const tokens = queryText.match(/[\p{L}\p{N}]+/gu) ?? [];
   if (tokens.length === 0) return []; // nothing lexical to search
   const tsquery = [...new Set(tokens)].join(" | ");
