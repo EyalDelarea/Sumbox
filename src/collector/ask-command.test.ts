@@ -1,6 +1,6 @@
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { upsertGroup } from "../db/repositories/groups.js";
 import { createTestDatabase } from "../test/db.js";
 import { type AskCommandDeps, maybeHandleAskCommand } from "./ask-command.js";
