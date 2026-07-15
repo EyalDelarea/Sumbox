@@ -21,6 +21,13 @@ function neutralizeFence(text: string): string {
 /** The exact Hebrew strings AIDA must use when it can't or won't answer. */
 export const NOT_IN_CHAT = "לא מצאתי את זה בשיחה.";
 export const OFF_TOPIC = "אני עונה רק על מה שנאמר בשיחה בקבוצה.";
+/**
+ * Distinct from NOT_IN_CHAT: retrieval found NOTHING because this group's
+ * messages aren't embedded yet (fresh group, or the sweep is behind) — an
+ * operational state, not a factual "it wasn't discussed". Saying "I didn't find
+ * it in the chat" there would be a false claim about the conversation.
+ */
+export const NOT_INDEXED = "עדיין אין לי גישה להודעות של הקבוצה הזו — נסו שוב עוד רגע.";
 
 const SYSTEM = [
   "You are Aida (אידה), answering a question inside a WhatsApp group by reading ONLY that group's messages.",

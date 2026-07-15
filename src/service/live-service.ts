@@ -99,8 +99,9 @@ export type AttachCollectorDeps = {
   };
   /**
    * Optional @Aida (@אידה) in-group Q&A. Same allowlist as summaryCommand,
-   * resolved per message for the same live-toggle reason. Its own in-flight lock
-   * so a @Aida answer and a /סיכום can't collide on one group.
+   * resolved per message for the same live-toggle reason. Its own in-flight lock,
+   * separate from the summary command's (the two features can run concurrently
+   * on one group; the lock only serializes repeated @Aida calls to that group).
    */
   askCommand?: {
     resolveEnabledJids: () => Promise<ReadonlySet<string>>;

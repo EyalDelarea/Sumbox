@@ -2,7 +2,13 @@ import type pg from "pg";
 import { searchMessagesByEmbedding } from "../db/repositories/message-embeddings.js";
 import { estimateTokens } from "../summarization/prompt.js";
 import type { Embedder } from "./embedder.js";
-import { type AskContextMessage, type AskPrompt, buildAskPrompt, NOT_IN_CHAT } from "./prompt.js";
+import {
+  type AskContextMessage,
+  type AskPrompt,
+  buildAskPrompt,
+  NOT_IN_CHAT,
+  NOT_INDEXED,
+} from "./prompt.js";
 
 /** Generates the answer text from a built prompt (wraps the Ollama LLM). */
 export interface AskLlm {
@@ -43,8 +49,10 @@ export async function answerQuestion(
   const queryEmbedding = await deps.embedder.embed(input.question);
   const retrieved = await searchMessagesByEmbedding(deps.pool, input.groupId, queryEmbedding, k);
   if (retrieved.length === 0) {
-    // Nothing embedded for this group / no neighbors → refuse rather than invent.
-    return NOT_IN_CHAT;
+    // Empty means this group has NO embedded content messages — i.e. it isn't
+    // indexed yet, an operational state — NOT that the answer wasn't discussed.
+    // Say so honestly instead of falsely claiming "not in the chat".
+    return NOT_INDEXED;
   }
 
   const context = fitToBudget(input.question, retrieved, budget);

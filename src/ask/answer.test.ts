@@ -75,17 +75,17 @@ describe("answerQuestion", () => {
     expect(prompt.user).toContain("נפגשים ב-21:00 אצל אלכס"); // the group's message reached the LLM
   });
 
-  it("returns the grounded refusal when the group has no embedded messages", async () => {
+  it("returns NOT_INDEXED (not NOT_IN_CHAT) when the group has no embeddings yet", async () => {
+    // An un-indexed group must not be told "I didn't find it in the chat" — that
+    // is a false claim about the conversation; it's an operational state.
+    const { NOT_INDEXED } = await import("./prompt.js");
     const g = await upsertGroup(pool, { name: "ANS-empty", source: "import" });
     const llm: AskLlm = { answer: vi.fn(async () => "should not be called") };
     const out = await answerQuestion(
       { pool, embedder: fixedEmbedder, llm },
-      {
-        groupId: g,
-        question: "מה קורה?",
-      },
+      { groupId: g, question: "מה קורה?" },
     );
-    expect(out).toBe(NOT_IN_CHAT);
+    expect(out).toBe(NOT_INDEXED);
     expect(llm.answer).not.toHaveBeenCalled(); // never asks the LLM with no context
   });
 

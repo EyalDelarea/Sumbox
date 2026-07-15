@@ -10,7 +10,14 @@ export type EmbeddingSweepDeps = {
   embedder: Embedder;
   /** Model label stored on each row (e.g. "bge-m3"). */
   model: string;
-  log?: { info: (o: unknown, m?: string) => void; warn: (o: unknown, m?: string) => void };
+  /** `error` is required so a systemic failure (Ollama down, dim mismatch) can be
+   *  escalated above the per-message `warn` noise — otherwise a dead feature and
+   *  one odd message look identical in the logs. */
+  log?: {
+    info: (o: unknown, m?: string) => void;
+    warn: (o: unknown, m?: string) => void;
+    error: (o: unknown, m?: string) => void;
+  };
 };
 
 export type SweepResult = { embedded: number; failed: number; remaining: number };
@@ -63,6 +70,12 @@ export function startEmbeddingSweep(
   opts: { intervalMs: number; batchSize: number },
 ): EmbeddingSweepHandle {
   let running = false;
+  // Consecutive batches that made NO progress while trying (all-failed, or the
+  // whole batch threw). A handful in a row means the feature is broken (Ollama
+  // down, wrong model/dim, DB error) rather than a lone pathological message —
+  // escalate ONCE to error so it's visible, not buried in per-message warns.
+  let deadStreak = 0;
+  const DEAD_STREAK_ALERT = 3;
   const tick = async () => {
     if (running) return;
     running = true;
@@ -71,8 +84,23 @@ export function startEmbeddingSweep(
       if (r.embedded || r.failed) {
         deps.log?.info({ ...r }, "embedding sweep: batch done");
       }
+      // Progress resets the streak; a batch that only failed advances it.
+      if (r.embedded > 0) deadStreak = 0;
+      else if (r.failed > 0) deadStreak++;
+      if (deadStreak === DEAD_STREAK_ALERT) {
+        deps.log?.error(
+          { deadStreak },
+          "embedding sweep: no message embedded across several batches — @Aida retrieval is going stale (Ollama down? wrong model/dim?)",
+        );
+      }
     } catch (err) {
-      deps.log?.warn({ err }, "embedding sweep: batch threw");
+      // A batch-level throw (e.g. the DB select failed) is also "no progress".
+      deadStreak++;
+      if (deadStreak >= DEAD_STREAK_ALERT) {
+        deps.log?.error({ err, deadStreak }, "embedding sweep: batch failing repeatedly");
+      } else {
+        deps.log?.warn({ err }, "embedding sweep: batch threw");
+      }
     } finally {
       running = false;
     }

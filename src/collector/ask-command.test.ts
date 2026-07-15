@@ -90,6 +90,29 @@ describe("maybeHandleAskCommand", () => {
     expect(d.answer).not.toHaveBeenCalled();
   });
 
+  it("a DB error in the group lookup surfaces ❌ + error reply, not a silent drop", async () => {
+    // Regression: the group lookup used to sit OUTSIDE the try, so a DB hiccup
+    // dropped the answer with no feedback — contradicting the design promise.
+    const react = vi.fn(async () => {});
+    const badPool = {
+      query: vi.fn(async () => {
+        throw new Error("db hiccup");
+      }),
+    } as unknown as pg.Pool;
+    const d = deps({ pool: badPool, react });
+    expect(await maybeHandleAskCommand(askMsg("@אידה מה?"), d)).toBe(false);
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "❌");
+    expect(d.sendText).toHaveBeenCalledWith(JID, expect.stringMatching(/סליחה/), expect.anything());
+  });
+
+  it("does not release another call's in-flight lock when it skips as already-running", async () => {
+    // The finally must only delete the lock THIS call acquired.
+    const inFlight = new Set<number>([groupId]); // another call holds it
+    const d = deps({ inFlight });
+    await maybeHandleAskCommand(askMsg("@אידה מה?"), d);
+    expect(inFlight.has(groupId)).toBe(true); // still held — not stolen
+  });
+
   it("sends an error reply (not silence) when answering throws, and releases the lock", async () => {
     const inFlight = new Set<number>();
     const d = deps({

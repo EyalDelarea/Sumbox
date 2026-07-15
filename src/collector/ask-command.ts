@@ -82,10 +82,17 @@ export async function maybeHandleAskCommand(
   }
 
   // Canonicalize a 1:1 @lid to its phone JID (the allowlist stores that form).
+  // A resolver failure here is BEFORE the group is verified as enabled, so fail
+  // CLOSED (no reply) rather than act on an unverified chat.
   let jid = mapped.remoteJid;
   if (jid.endsWith("@lid") && deps.resolvePn) {
-    const pn = await deps.resolvePn(jid);
-    if (pn) jid = pn;
+    try {
+      const pn = await deps.resolvePn(jid);
+      if (pn) jid = pn;
+    } catch (err) {
+      deps.log?.warn({ err, jid }, "@Aida: lid resolve failed; fail-closed");
+      return false;
+    }
   }
   if (!allowlist.has(jid)) return false;
 
@@ -95,22 +102,6 @@ export async function maybeHandleAskCommand(
     return false;
   }
 
-  const { rows } = await deps.pool.query<{ id: string }>(
-    `SELECT id FROM groups WHERE whatsapp_id = $1 LIMIT 1`,
-    [jid],
-  );
-  const group = rows[0];
-  if (!group) {
-    deps.log?.warn({ jid }, "@Aida: group not found for JID");
-    return false;
-  }
-  const groupId = Number(group.id);
-
-  if (deps.inFlight.has(groupId)) {
-    deps.log?.info({ groupId }, "@Aida: already answering, skipping");
-    return false;
-  }
-  deps.inFlight.add(groupId);
   const react = async (emoji: string) => {
     try {
       await deps.react?.(jid, msg.key, emoji);
@@ -119,7 +110,33 @@ export async function maybeHandleAskCommand(
     }
   };
 
+  // From here the message IS a @Aida mention in an enabled group, so EVERY
+  // failure must surface (❌ + error reply), never a silent no-op — including a
+  // DB error in the group lookup, which previously sat outside the guard and
+  // dropped the answer with no feedback. `acquired` tracks whether THIS call took
+  // the in-flight lock, so the finally can't release another call's lock.
+  let groupId: number | null = null;
+  let acquired = false;
   try {
+    const { rows } = await deps.pool.query<{ id: string }>(
+      `SELECT id FROM groups WHERE whatsapp_id = $1 LIMIT 1`,
+      [jid],
+    );
+    const group = rows[0];
+    if (!group) {
+      // Not an error — an unknown chat; skip quietly, no ❌.
+      deps.log?.warn({ jid }, "@Aida: group not found for JID");
+      return false;
+    }
+    groupId = Number(group.id);
+
+    if (deps.inFlight.has(groupId)) {
+      deps.log?.info({ groupId }, "@Aida: already answering, skipping");
+      return false;
+    }
+    deps.inFlight.add(groupId);
+    acquired = true;
+
     await react("⏳");
     // groupId is the VERIFIED inbound id — the privacy boundary for retrieval.
     const answer = await deps.answer({ groupId, question: match.question });
@@ -137,6 +154,6 @@ export async function maybeHandleAskCommand(
     }
     return false;
   } finally {
-    deps.inFlight.delete(groupId);
+    if (acquired && groupId !== null) deps.inFlight.delete(groupId);
   }
 }

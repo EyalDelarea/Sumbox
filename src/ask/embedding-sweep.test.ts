@@ -110,4 +110,30 @@ describe("embedPendingBatch", () => {
     const r = await embedPendingBatch({ pool, embedder: fakeEmbedder(), model: "bge-m3" }, 1);
     expect(r.remaining).toBe(1); // batch of 1 was full → drain again
   });
+
+  it("escalates to error after several consecutive all-failed batches", async () => {
+    // A dead feature (Ollama down / wrong dim) must not hide as per-message warn
+    // noise forever — it escalates ONCE to error so it's visible.
+    const g = await upsertGroup(pool, { name: "SWEEP-dead", source: "import" });
+    for (let i = 0; i < 6; i++) await seed(pool, g, `dead msg ${i}`, `sw-dead-${i}`);
+    const embedder: Embedder = {
+      embed: async () => {
+        throw new Error("ollama down");
+      },
+    };
+    const error = vi.fn();
+    const log = { info: vi.fn(), warn: vi.fn(), error };
+
+    const { startEmbeddingSweep } = await import("./embedding-sweep.js");
+    const handle = startEmbeddingSweep(
+      { pool, embedder, model: "bge-m3", log },
+      { intervalMs: 15, batchSize: 2 },
+    );
+    // Poll until it escalates (or time out), then stop.
+    for (let i = 0; i < 40 && error.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    handle.stop();
+    expect(error).toHaveBeenCalled(); // escalated, not just warned
+  });
 });
