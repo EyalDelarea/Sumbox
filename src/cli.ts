@@ -645,6 +645,78 @@ program
   });
 
 program
+  .command("ask-embed-backfill")
+  .description("Embed all un-embedded messages now (bge-m3) so @Aida can search history")
+  .option("--batch <n>", "Messages per batch", "64")
+  .action(async (options: { batch?: string }) => {
+    const { createDbClient } = await import("./db/client.js");
+    const { OllamaEmbedder } = await import("./ask/embedder.js");
+    const { embedPendingBatch } = await import("./ask/embedding-sweep.js");
+    const config = loadConfig();
+    const pool = createDbClient();
+    const embedder = new OllamaEmbedder({
+      host: config.embedding.ollamaHost,
+      model: config.embedding.model,
+      dim: config.embedding.dim,
+    });
+    const batch = Number(options.batch ?? 64);
+    try {
+      let total = 0;
+      let failed = 0;
+      for (;;) {
+        const r = await embedPendingBatch({ pool, embedder, model: config.embedding.model }, batch);
+        total += r.embedded;
+        failed += r.failed;
+        if (r.embedded || r.failed)
+          process.stdout.write(`  embedded ${total} (failed ${failed})\r`);
+        if (r.remaining === 0) break; // queue drained
+      }
+      process.stdout.write(`\nDone. Embedded ${total} messages (${failed} failed).\n`);
+    } catch (err) {
+      process.stderr.write(`Error: ask-embed-backfill failed: ${(err as Error).message}\n`);
+      process.exit(1);
+    } finally {
+      await pool.end();
+    }
+  });
+
+program
+  .command("ask-search")
+  .description("Probe: semantic-search a group's history (verifies retrieval + scoping)")
+  .argument("<group>", "Group display name")
+  .argument("<query>", "Natural-language query")
+  .option("--k <n>", "How many messages to retrieve", "8")
+  .action(async (groupName: string, query: string, options: { k?: string }) => {
+    const { createDbClient } = await import("./db/client.js");
+    const { findGroupByName } = await import("./db/repositories/groups.js");
+    const { OllamaEmbedder } = await import("./ask/embedder.js");
+    const { searchMessagesByEmbedding } = await import("./db/repositories/message-embeddings.js");
+    const config = loadConfig();
+    const pool = createDbClient();
+    try {
+      const group = await findGroupByName(pool, groupName);
+      if (!group) {
+        process.stderr.write(`Error: unknown chat "${groupName}".\n`);
+        process.exit(1);
+      }
+      const embedder = new OllamaEmbedder({
+        host: config.embedding.ollamaHost,
+        model: config.embedding.model,
+        dim: config.embedding.dim,
+      });
+      const qv = await embedder.embed(query);
+      const hits = await searchMessagesByEmbedding(pool, group.id, qv, Number(options.k ?? 8));
+      process.stdout.write(`\n${hits.length} matches in "${groupName}" for: ${query}\n\n`);
+      for (const h of hits) {
+        const ts = h.sentAt.toISOString().slice(0, 16).replace("T", " ");
+        process.stdout.write(`  [${ts}] ${h.sender}: ${h.content.slice(0, 160)}\n`);
+      }
+    } finally {
+      await pool.end();
+    }
+  });
+
+program
   .command("merge-duplicate-chats")
   .description(
     "Merge @lid/@s.whatsapp.net duplicate chats of the same person (dry-run unless --apply)",
