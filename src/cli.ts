@@ -220,6 +220,8 @@ program
       log: collectorLog,
       onError: (err) => collectorLog.warn({ err }, "collector message handler error"),
       summaryCommand: cmdDeps,
+      // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
+      askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, inFlight: new Set() },
       onConnected: () => {
         collectorLog.info({ stored: 0 }, "collecting");
         logLifecycle("collector.connected");

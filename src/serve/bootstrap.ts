@@ -473,6 +473,8 @@ export async function startServe(options: { port?: string; collect?: boolean }):
         // by maybeHandleSummaryCommand (D1: unconditionally wired, even with nothing
         // enabled yet).
         summaryCommand: cmdDeps,
+        // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
+        askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, inFlight: new Set() },
       });
 
       // ── Deferred media backfill loop ─────────────────────────────────────
