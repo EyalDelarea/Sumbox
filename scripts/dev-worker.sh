@@ -18,5 +18,5 @@ ensure_stack
 
 echo "▶ Starting worker…"
 npx tsx src/workers/worker.ts \
-  --types import.file,transcribe.voicenote,analyze.image,analyze.video,summarize.group,summarize.total,suggest.generate \
+  --types import.file,transcribe.voicenote,analyze.image,analyze.video,summarize.group,summarize.total \
   2>&1 | pretty

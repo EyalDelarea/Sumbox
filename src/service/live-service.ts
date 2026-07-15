@@ -97,6 +97,16 @@ export type AttachCollectorDeps = {
     /** Per-user memory of the last summary sent (key `${groupId}:${participantId}`). */
     lastSummaryByUser: Map<string, WAMessage>;
   };
+  /**
+   * Optional @Aida (@אידה) in-group Q&A. Same allowlist as summaryCommand,
+   * resolved per message for the same live-toggle reason. Its own in-flight lock,
+   * separate from the summary command's (the two features can run concurrently
+   * on one group; the lock only serializes repeated @Aida calls to that group).
+   */
+  askCommand?: {
+    resolveEnabledJids: () => Promise<ReadonlySet<string>>;
+    inFlight: Set<number>;
+  };
 };
 
 export type LiveServiceHandle = {
@@ -268,6 +278,54 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
             setMark: (m) => upsertSummaryUserMark(p, m),
             getSummaryOutput: (id) => getSummaryOutputById(p, id),
           },
+          log,
+        });
+      })().catch((err: unknown) => onError(err));
+    }
+
+    // @Aida (@אידה) in-group Q&A — separate best-effort path, isolated from
+    // ingest exactly like the summary command. Its matcher's own "@"-pre-gate +
+    // allowlist resolve handle "not a mention" / "not enabled" cheaply.
+    const ac = deps.askCommand;
+    if (ac) {
+      void (async () => {
+        const { maybeHandleAskCommand } = await import("../collector/ask-command.js");
+        const { answerQuestion } = await import("../ask/answer.js");
+        const { OllamaEmbedder } = await import("../ask/embedder.js");
+        const { OllamaSummarizer } = await import("../summarization/summarizer.js");
+        const { loadConfig } = await import("../config.js");
+        const cfg = loadConfig();
+        const p = pool as pg.Pool;
+        const embedder = new OllamaEmbedder({
+          host: cfg.embedding.ollamaHost,
+          model: cfg.embedding.model,
+          dim: cfg.embedding.dim,
+        });
+        // Reuse the summarizer as the generic gemma "prompt → text" LLM.
+        const summarizer = new OllamaSummarizer({
+          host: cfg.summarization.ollamaHost,
+          model: cfg.summarization.model,
+          numCtx: cfg.summarization.numCtx,
+          temperature: cfg.summarization.temperature,
+          repeatPenalty: cfg.summarization.repeatPenalty,
+          numPredict: cfg.summarization.numPredict,
+        });
+        return maybeHandleAskCommand(msg, {
+          pool: p,
+          resolveEnabledJids: ac.resolveEnabledJids,
+          sendText: (jid, text, opts) => session.sendText(jid, text, opts),
+          react: (jid, key, emoji) => session.react(jid, key, emoji),
+          inFlight: ac.inFlight,
+          resolvePn: (lid) => session.pnForLid(lid),
+          answer: ({ groupId, question }) =>
+            answerQuestion(
+              {
+                pool: p,
+                embedder,
+                llm: { answer: (prompt) => summarizer.summarize(prompt).then((o) => o.overview) },
+              },
+              { groupId, question },
+            ),
           log,
         });
       })().catch((err: unknown) => onError(err));

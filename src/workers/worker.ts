@@ -52,9 +52,12 @@ export function opForJobType(type: JobType): string {
  * Returns a close function for graceful shutdown.
  * The returned promise rejects if any consumer registration fails at startup.
  */
-export async function buildWorker(
-  opts: BuildWorkerOptions,
-): Promise<{ close: () => Promise<void> }> {
+export async function buildWorker(opts: BuildWorkerOptions): Promise<{
+  close: () => Promise<void>;
+  /** The Ollama serialization gate, exposed so the embedding sweep can run its
+   *  bge-m3 calls on the SAME slot as the LLM jobs (no concurrent model swap). */
+  withOllamaSlot: <T>(fn: () => Promise<T>) => Promise<T>;
+}> {
   const { bus, handlers, concurrency } = opts;
   const log = opts.logger ?? noopLogger;
 
@@ -64,7 +67,7 @@ export async function buildWorker(
   // source of the timeouts). Multiple worker processes each hold their own gate; add a
   // distributed lock only if we ever run >1 worker against one Ollama.
   let _ollamaTail: Promise<void> = Promise.resolve();
-  const withOllamaSlot = (fn: () => Promise<void>): Promise<void> => {
+  const withOllamaSlot = <T>(fn: () => Promise<T>): Promise<T> => {
     const result = _ollamaTail.then(fn);
     _ollamaTail = result.then(
       () => {},
@@ -122,6 +125,7 @@ export async function buildWorker(
 
   return {
     close: () => bus.close(),
+    withOllamaSlot,
   };
 }
 
@@ -394,12 +398,36 @@ async function main(): Promise<void> {
     onError: (err) => logger.warn({ err }, "identity reconcile tick failed"),
   });
 
+  // Keep message embeddings current for the `ask` (@Aida) feature: one sweep
+  // drains both the stale historical backlog and every newly ingested message.
+  // Lives in the worker because it is Ollama-bound (bge-m3), like the LLM jobs.
+  const { startEmbeddingSweep } = await import("../ask/embedding-sweep.js");
+  const { OllamaEmbedder } = await import("../ask/embedder.js");
+  const baseEmbedder = new OllamaEmbedder({
+    host: config.embedding.ollamaHost,
+    model: config.embedding.model,
+    dim: config.embedding.dim,
+  });
+  // Route every embed through the SAME Ollama gate the LLM jobs use, one call at
+  // a time — bge-m3 and gemma running concurrently is exactly the model-swap the
+  // gate exists to prevent. Per-call (not per-batch) so a 64-message sweep never
+  // starves a waiting summary job.
+  const gatedEmbedder = {
+    embed: (text: string): Promise<number[]> =>
+      worker.withOllamaSlot(() => baseEmbedder.embed(text)),
+  };
+  const embeddingSweep = startEmbeddingSweep(
+    { pool, embedder: gatedEmbedder, model: config.embedding.model, log: logger },
+    { intervalMs: 30_000, batchSize: 64 },
+  );
+
   // Graceful shutdown (both SIGINT and SIGTERM)
   let shuttingDown = false;
   const gracefulShutdown = (signal: NodeJS.Signals) => {
     if (shuttingDown) return;
     shuttingDown = true;
     reconcile.stop();
+    embeddingSweep.stop();
     logLifecycle("shutdown", { proc: "worker", signal });
     void worker.close().then(() => {
       void pool.end();
