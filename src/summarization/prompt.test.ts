@@ -176,18 +176,18 @@ describe("buildPrompt", () => {
       ).toBe(true);
     });
 
-    it("covers the substance while trimming only filler / play-by-play", () => {
+    it("biases toward brevity — a fast catch-up, not a full record", () => {
       const { system } = buildPrompt(msgs);
       const lower = system.toLowerCase();
-      expect(lower).toContain("cover what matters");
-      expect(lower).toContain("play-by-play");
+      expect(lower).toContain("favor brevity");
+      expect(lower).toContain("fast catch-up");
     });
 
-    it("sets a substance floor instead of an aggressive bullet cap", () => {
+    it("caps bullets and merges related points instead of enumerating everything", () => {
       const { system } = buildPrompt(msgs);
       const lower = system.toLowerCase();
-      expect(lower).toContain("one clear bullet per real point");
-      expect(lower).toContain("never drop a substantive point");
+      expect(lower).toContain("merge related points");
+      expect(lower).toContain("3–5 most important bullets");
     });
 
     it("marks the per-participant section as clearly optional, not a default", () => {
@@ -206,28 +206,39 @@ describe("buildPrompt", () => {
       );
     });
 
-    it("25–99 messages: several sections tier guidance", () => {
+    it("25–99 messages: short tier guidance", () => {
       const { system } = buildPrompt(makeMessages(50));
       const lower = system.toLowerCase();
-      expect(lower.includes("section") || lower.includes("several")).toBe(true);
+      expect(lower).toContain("keep it short");
     });
 
-    it("100–299 messages: comprehensive / multiple sections tier guidance", () => {
+    it("100–299 messages: compact-but-busy tier guidance (still bias-brief)", () => {
       const { system } = buildPrompt(makeMessages(120));
       const lower = system.toLowerCase();
-      expect(
-        lower.includes("comprehensive") ||
-          lower.includes("all relevant") ||
-          lower.includes("multiple"),
-      ).toBe(true);
+      // The busy tier still tells the model to stay short and merge, not to be
+      // comprehensive — length is deliberately biased toward a fast skim.
+      expect(lower).toContain("stay tight");
+      expect(lower).toContain("merge");
+      expect(lower).not.toContain("comprehensive");
     });
 
-    it(">= 300 messages: extensive / all sections in depth tier guidance", () => {
+    it(">= 300 messages: broad-but-not-sprawling tier guidance", () => {
       const { system } = buildPrompt(makeMessages(350));
       const lower = system.toLowerCase();
-      expect(
-        lower.includes("extensive") || lower.includes("in depth") || lower.includes("thorough"),
-      ).toBe(true);
+      // Even the largest tier is told to merge and not enumerate every thread.
+      expect(lower.includes("not an essay") || lower.includes("merging")).toBe(true);
+      expect(lower).not.toContain("extensive");
+    });
+
+    it("biases brief but keeps the non-negotiable guardrails", () => {
+      const { system } = buildPrompt(makeMessages(120));
+      const lower = system.toLowerCase();
+      // Bias flipped toward brevity...
+      expect(lower).toContain("favor brevity");
+      expect(lower).not.toContain("under-summarizing"); // the old anti-terse rule is gone
+      // ...but the things that make a catch-up useful are still protected:
+      expect(lower).toContain("decisions, action items"); // never dropped
+      expect(lower).toContain("do not pad or invent"); // no hallucinated brevity
     });
 
     it("boundary: exactly 25 messages uses the mid tier (not brief)", () => {
@@ -288,22 +299,22 @@ describe("buildPrompt adjust", () => {
     expect(shorter).not.toBe(plain);
   });
 
-  it("too_short shifts a 50-msg chat up to the tier-2 (comprehensive) directive", () => {
+  it("too_short shifts a 50-msg chat up to the tier-2 (compact-but-busy) directive", () => {
     const longer = buildPrompt(msgs(50), "too_short").system; // tier 2 (<300)
     expect(longer).toContain(buildPrompt(msgs(150)).system.split("\n").at(-2) ?? "");
-    expect(longer).toContain("comprehensive");
+    expect(longer).toContain("stay tight");
   });
 
   it("clamps at the extremes (no-op tiers)", () => {
     expect(buildPrompt(msgs(10), "too_long").system).toContain("brief"); // tier 0 stays 0
-    expect(buildPrompt(msgs(350), "too_short").system).toContain("extensive"); // tier 3 stays 3
+    expect(buildPrompt(msgs(350), "too_short").system).toContain("not an essay"); // tier 3 stays 3
   });
 
   it("appends a reason-specific adjustment line for missed / inaccurate (no tier change)", () => {
     expect(buildPrompt(msgs(50), "missed").system).toContain("missed important content");
     expect(buildPrompt(msgs(50), "inaccurate").system).toContain("inaccuracies");
     // missed keeps the tier-1 directive (no shift)
-    expect(buildPrompt(msgs(50), "missed").system).toContain("several sections");
+    expect(buildPrompt(msgs(50), "missed").system).toContain("keep it short");
   });
 
   it("no adjust → no adjustment line, identical to the pre-feature output", () => {

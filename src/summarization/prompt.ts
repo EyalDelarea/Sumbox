@@ -36,9 +36,9 @@ const BASE_INSTRUCTIONS = [
   "",
   "Rules:",
   "- Include a section ONLY when it has real content. A sparse chat may be just ## תקציר.",
-  "- Cover what matters, completely: the decisions, action items, owners, outcomes, plans, and the topics that genuinely mattered — each with the concrete specifics that give it meaning (names, numbers, prices, places, links). The goal is that someone who missed the chat understands what actually happened, with nothing important left out.",
-  "- Trim only genuine filler: greetings, small talk, reactions, and the play-by-play of how the conversation got there — not the substance itself. Never drop a substantive point just to be short; under-summarizing so the reader misses what mattered is worse than a slightly longer summary.",
-  "- One clear bullet per real point — don't force-merge distinct points to hit a smaller number, and don't split one point across many bullets. Make each bullet a full, informative sentence with the concrete specifics (who said/decided what, names, numbers, dates, places, links, outcomes), not a vague fragment.",
+  "- Favor brevity. This is a fast catch-up, not a record: keep the outcomes, the decisions and action items with their owners, and the handful of topics that genuinely mattered — with the concrete specifics that give them meaning (names, numbers, prices, places, links). Drop minor threads, tangents, and play-by-play a catch-up reader doesn't need. A tight summary that covers the essentials is better than a complete one.",
+  "- Decisions, action items, and their owners are the one thing never to drop — a reader can skim topics but must not miss what was agreed or who owns what.",
+  "- Merge related points into a single bullet, and cap each section at roughly its 3–5 most important bullets. Don't enumerate every sub-thread. Keep each bullet to ONE sentence — informative and specific (who said/decided what, names, numbers, dates, outcomes), but a single sentence, not a mini-paragraph.",
   "- Do not pad or invent content; detail must come from what was actually said. If little of substance was discussed, say so briefly and honestly.",
   "- Write the summary in the SAME LANGUAGE as the conversation (Hebrew in → Hebrew out).",
   "- Write fluent, correctly-spelled Hebrew — correct grammar and standard spelling, no typos or invented words. Copy people's names, numbers, dates, places, and links exactly as they appear in the transcript; never re-spell, translate, or alter them.",
@@ -47,10 +47,10 @@ const BASE_INSTRUCTIONS = [
 ].join("\n");
 
 const LENGTH_DIRECTIVES = [
-  "Length guidance: this is a brief, small exchange — keep it concise but complete: ## תקציר plus a bullet for each substantive point in every relevant section. Short because the chat was short, never because real content was dropped.",
-  "Length guidance: write several sections in good detail — ## תקציר plus the relevant topic, decision, and question sections, each a bulleted list that captures every substantive point (typically several bullets), where every bullet is an informative, specific sentence.",
-  "Length guidance: write a comprehensive summary covering all relevant sections — main topics broken out, decisions with their owners, and open questions — thorough on substance while trimming filler and play-by-play; don't cap a section short of the points that actually matter.",
-  "Length guidance: write an extensive, thorough summary that populates all relevant sections — the major threads, all major decisions (with owners when stated), and open questions — rich and specific; trim only greetings, small talk, and repetition, never substantive detail, and never invent content.",
+  "Length guidance: a few lines. Just ## תקציר, plus at most a bullet or two for any real decision or task. Most short chats need only the תקציר.",
+  "Length guidance: keep it short. ## תקציר plus the 2–4 most important points in each relevant section. Merge related threads into one bullet; skip the minor ones.",
+  "Length guidance: stay tight even though the chat was busy. ## תקציר plus AT MOST the 3–4 topics that mattered most, the decisions with their owners, and any real open questions — one short bullet each, merging related threads. When in doubt, cut. A reader should skim the whole thing in about half a minute.",
+  "Length guidance: a long, busy chat still gets a tight catch-up, not an essay. ## תקציר plus AT MOST the 4–5 threads that genuinely mattered, the key decisions with owners, and real open questions — one short bullet each, aggressively merging related points; never enumerate every sub-thread. When in doubt, cut.",
 ] as const;
 
 function lengthTier(count: number): 0 | 1 | 2 | 3 {
