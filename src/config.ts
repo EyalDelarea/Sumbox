@@ -37,6 +37,19 @@ export type SummarizationConfig = {
   numPredict: number;
 };
 
+export type EmbeddingConfig = {
+  /** Base URL of the local Ollama server (reuses the summarization host). */
+  ollamaHost: string;
+  /** Ollama embedding model tag. bge-m3 → 1024-dim, strong on Hebrew. */
+  model: string;
+  /**
+   * Embedding dimension. MUST match the `message_embeddings.embedding vector(N)`
+   * column (1024 for bge-m3) — a mismatch is a hard insert error, not a silent
+   * wrong answer, which is the safe failure.
+   */
+  dim: number;
+};
+
 export type WebConfig = {
   /** Port the local web UI server binds to. */
   port: number;
@@ -128,6 +141,7 @@ export type AppConfig = {
   dataDir: string;
   transcription: TranscriptionConfig;
   summarization: SummarizationConfig;
+  embedding: EmbeddingConfig;
   vision: VisionConfig;
   web: WebConfig;
   broker: BrokerConfig;
@@ -180,6 +194,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         numPredict: Number(env.SUMMARY_NUM_PREDICT ?? 4096),
       };
     })(),
+    embedding: {
+      ollamaHost: env.OLLAMA_HOST ?? "http://localhost:11434",
+      model: env.EMBEDDING_MODEL ?? "bge-m3",
+      dim: Number(env.EMBEDDING_DIM ?? 1024),
+    },
     vision: {
       model: env.VISION_MODEL ?? "gemma4:26b",
       videoModel: env.VISION_VIDEO_MODEL ?? env.VISION_MODEL ?? "gemma4:26b",
