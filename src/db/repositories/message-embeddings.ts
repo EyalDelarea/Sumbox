@@ -119,12 +119,70 @@ export async function searchMessagesByEmbedding(
       LIMIT $3`,
     [groupId, toVectorLiteral(queryEmbedding), k],
   );
-  return res.rows
-    .map((r) => ({
-      messageId: Number(r.id),
-      sentAt: r.sent_at,
-      sender: r.sender,
-      content: r.content,
-    }))
-    .sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime());
+  return res.rows.map((r) => ({
+    messageId: Number(r.id),
+    sentAt: r.sent_at,
+    sender: r.sender,
+    content: r.content,
+  }));
+}
+
+/**
+ * Lexical (keyword) retrieval for THIS group, ranked by `ts_rank`. Uses the
+ * existing `messages_text_fts_idx` GIN index over `to_tsvector('simple',
+ * text_content)`, so it matches exact tokens the semantic ranker can miss
+ * (names, numbers, addresses). `websearch_to_tsquery` is input-safe — it never
+ * throws on odd user text, it just yields fewer/zero matches.
+ *
+ * NOTE: the FTS index covers `text_content` only, not transcripts/descriptions,
+ * so lexical recall is text-message-only; the semantic search covers the rest.
+ * Same `WHERE m.group_id = $1` privacy boundary. Returned in RANK order (best
+ * first) so the caller can fuse it with the semantic ranking.
+ */
+export async function searchMessagesLexical(
+  client: pg.Pool | pg.PoolClient,
+  groupId: number,
+  queryText: string,
+  limit: number,
+): Promise<RetrievedMessage[]> {
+  // OR the query's words, not AND. websearch/plainto_tsquery AND every term, so
+  // "כמה משולשים" would require BOTH — but a message that says only "משולשים" is
+  // exactly the exact-keyword hit we want. So build the query for the strict
+  // `to_tsquery` and join the terms with `|` (OR). `to_tsquery` DOES raise on
+  // malformed syntax — the safety here comes from the tokenization below, NOT the
+  // function: `[\p{L}\p{N}]+` keeps only alphanumeric runs (any script), stripping
+  // every tsquery operator, so the terms can never form invalid syntax or inject.
+  // ts_rank still orders by how well each row matches, so more overlap ranks higher.
+  const tokens = queryText.match(/[\p{L}\p{N}]+/gu) ?? [];
+  if (tokens.length === 0) return []; // nothing lexical to search
+  const tsquery = [...new Set(tokens)].join(" | ");
+
+  const res = await client.query<{
+    id: string;
+    sent_at: Date;
+    sender: string;
+    content: string;
+  }>(
+    `SELECT m.id,
+            m.sent_at,
+            COALESCE(p.display_name, 'Unknown') AS sender,
+            ${CONTENT_EXPR} AS content
+       FROM messages m
+       ${CONTENT_JOINS}
+       , to_tsquery('simple', $2) q
+      WHERE m.group_id = $1
+        AND m.message_type <> 'system'
+        AND to_tsvector('simple', coalesce(m.text_content, '')) @@ q
+        AND ${CONTENT_EXPR} <> ''
+      ORDER BY ts_rank(to_tsvector('simple', coalesce(m.text_content, '')), q) DESC,
+               m.sent_at DESC
+      LIMIT $3`,
+    [groupId, tsquery, limit],
+  );
+  return res.rows.map((r) => ({
+    messageId: Number(r.id),
+    sentAt: r.sent_at,
+    sender: r.sender,
+    content: r.content,
+  }));
 }

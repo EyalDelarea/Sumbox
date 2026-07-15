@@ -118,3 +118,44 @@ describe("message-embeddings repository", () => {
     expect(pending.every((m) => m.content.trim() !== "")).toBe(true);
   });
 });
+
+describe("searchMessagesLexical", () => {
+  let pool2: pg.Pool;
+  beforeAll(async () => {
+    pool2 = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+  afterAll(async () => {
+    await pool2?.end();
+  }, 30_000);
+
+  it("finds an exact keyword and stays scoped to the group", async () => {
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const gA = await upsertGroup(pool2, { name: "LEX-A", source: "import" });
+    const gB = await upsertGroup(pool2, { name: "LEX-B", source: "import" });
+    const inA = await seed(pool2, gA, "תובל 21 רמת גן משרד 66", "lex-a");
+    await seed(pool2, gB, "תובל אחר בקבוצה ב", "lex-b"); // same keyword, other group
+
+    const hits = await searchMessagesLexical(pool2, gA, "כתובת תובל", 10);
+    const ids = hits.map((h) => h.messageId);
+    expect(ids).toContain(inA);
+    expect(hits.every((h) => !h.content.includes("קבוצה ב"))).toBe(true); // B excluded
+  });
+
+  it("returns [] for a query with no searchable words (never throws)", async () => {
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const g = await upsertGroup(pool2, { name: "LEX-empty", source: "import" });
+    await seed(pool2, g, "משהו", "lex-empty");
+    expect(await searchMessagesLexical(pool2, g, "!!! ??? ...", 10)).toEqual([]);
+  });
+
+  it("strips tsquery operator chars from a mixed query and still matches (to_tsquery never throws)", async () => {
+    // to_tsquery is strict — it raises on raw `& | ! ( )`. The alphanumeric
+    // tokenization must neutralize them so a query like this runs safely AND
+    // still finds the keyword message. This actually reaches to_tsquery.
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const g = await upsertGroup(pool2, { name: "LEX-ops", source: "import" });
+    const id = await seed(pool2, g, "תובל 21 רמת גן", "lex-ops");
+    const hits = await searchMessagesLexical(pool2, g, "כתובת & | ! (תובל)", 10);
+    expect(hits.map((h) => h.messageId)).toContain(id);
+  });
+});
