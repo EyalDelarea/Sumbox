@@ -23,6 +23,7 @@
     "eval:people-intent": "vitest run --config vitest.eval.config.ts"
   },
   "dependencies": {
+    "@langfuse/client": "^5.9.1",
     "@langfuse/otel": "^5.9.1",
     "@langfuse/vercel-ai-sdk": "^5.9.1",
     "@opentelemetry/sdk-node": "^0.220.0",
