@@ -291,6 +291,9 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
       void (async () => {
         const { maybeHandleAskCommand } = await import("../collector/ask-command.js");
         const { answerQuestion } = await import("../ask/answer.js");
+        const { answerAida } = await import("../ask/answer-dispatch.js");
+        const { answerAgentic } = await import("../ask/agentic-answer.js");
+        const { makeAgenticModel } = await import("../ask/ai-model.js");
         const { OllamaEmbedder } = await import("../ask/embedder.js");
         const { OllamaSummarizer } = await import("../summarization/summarizer.js");
         const { loadConfig } = await import("../config.js");
@@ -310,6 +313,10 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           repeatPenalty: cfg.summarization.repeatPenalty,
           numPredict: cfg.summarization.numPredict,
         });
+        const agenticModel = makeAgenticModel({
+          host: cfg.summarization.ollamaHost,
+          model: cfg.summarization.model,
+        });
         return maybeHandleAskCommand(msg, {
           pool: p,
           resolveEnabledJids: ac.resolveEnabledJids,
@@ -318,11 +325,22 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           inFlight: ac.inFlight,
           resolvePn: (lid) => session.pnForLid(lid),
           answer: ({ groupId, question }) =>
-            answerQuestion(
+            answerAida(
               {
-                pool: p,
-                embedder,
-                llm: { answer: (prompt) => summarizer.summarize(prompt).then((o) => o.overview) },
+                agentic: cfg.ask.agentic,
+                runAgentic: (i) => answerAgentic({ pool: p, embedder, model: agenticModel }, i),
+                runSingleShot: (i) =>
+                  answerQuestion(
+                    {
+                      pool: p,
+                      embedder,
+                      llm: {
+                        answer: (prompt) => summarizer.summarize(prompt).then((o) => o.overview),
+                      },
+                    },
+                    i,
+                  ),
+                log,
               },
               { groupId, question },
             ),
