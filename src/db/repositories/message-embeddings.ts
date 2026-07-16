@@ -32,6 +32,14 @@ const CONTENT_JOINS = `
   LEFT JOIN media_analyses a ON a.message_id = m.id AND a.status = 'completed'
 `;
 
+/**
+ * Exclude @Aida command messages from RETRIEVAL. Like the summary path drops the
+ * /סיכום trigger, an "@אידה …" message is a command, not conversation — and the
+ * triggering question would otherwise retrieve ITSELF as context (self-reference
+ * noise that dilutes the real signal). Case-insensitive, both scripts.
+ */
+const EXCLUDE_ASK_MENTION = `AND coalesce(m.text_content, '') !~* '@(אידה|aida)'`;
+
 export type UnembeddedMessage = { id: number; content: string };
 
 /**
@@ -87,8 +95,8 @@ export type RetrievedMessage = {
 
 /**
  * The `k` messages of THIS group most semantically similar to `queryEmbedding`,
- * by cosine distance (`<=>`), returned in chronological order so the model reads
- * them as a mini-transcript.
+ * by cosine distance (`<=>`), returned in RANK order (best first) so the caller
+ * can fuse it with the lexical ranking. @Aida command messages are excluded.
  *
  * The `WHERE m.group_id = $1` is the privacy boundary — do not remove it, and do
  * not add an entry point that searches without a group id.
@@ -114,6 +122,7 @@ export async function searchMessagesByEmbedding(
        ${CONTENT_JOINS}
       WHERE m.group_id = $1
         AND m.message_type <> 'system'
+        ${EXCLUDE_ASK_MENTION}
         AND ${CONTENT_EXPR} <> ''
       ORDER BY e.embedding <=> $2::vector
       LIMIT $3`,
@@ -172,6 +181,7 @@ export async function searchMessagesLexical(
        , to_tsquery('simple', $2) q
       WHERE m.group_id = $1
         AND m.message_type <> 'system'
+        ${EXCLUDE_ASK_MENTION}
         AND to_tsvector('simple', coalesce(m.text_content, '')) @@ q
         AND ${CONTENT_EXPR} <> ''
       ORDER BY ts_rank(to_tsvector('simple', coalesce(m.text_content, '')), q) DESC,
