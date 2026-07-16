@@ -112,3 +112,30 @@ describe("searchMessagesHybrid", () => {
     expect(times).toEqual([...times].sort((a, b) => a - b));
   });
 });
+
+describe("retrieval excludes @Aida command messages", () => {
+  let pool: pg.Pool;
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  it("never returns the @אידה question message itself (self-reference noise)", async () => {
+    const g = await upsertGroup(pool, { name: "HYB-selfref", source: "import" });
+    // The command message shares the query's keyword ("אתמול") and vector, so it
+    // WOULD rank top — but as a command it must be excluded from context.
+    await seed(pool, g, "@אידה האם נפגשנו אתמול?", "hyb-cmd", 1);
+    const real = await seed(pool, g, "יפה הייתה זרימה טובה אתמול", "hyb-real", 1);
+
+    const hits = await searchMessagesHybrid(
+      pool,
+      g,
+      { embedding: vec(1), text: "נפגשנו אתמול" },
+      10,
+    );
+    expect(hits.some((h) => h.content.includes("@אידה"))).toBe(false); // command excluded
+    expect(hits.map((h) => h.messageId)).toContain(real); // real content still there
+  });
+});
