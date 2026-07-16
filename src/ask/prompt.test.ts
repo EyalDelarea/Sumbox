@@ -36,6 +36,17 @@ describe("buildAskPrompt", () => {
     expect(system).toContain("never say only 'תכף תכף'");
   });
 
+  it("carries the people-safety guardrail (no defamation amplification)", () => {
+    // Peer testing surfaced @Aida flatly repeating group banter as serious fact
+    // ("X 100% abuses his friends"). The prompt must instruct it not to amplify
+    // insults or render verdicts on real people.
+    const { system } = buildAskPrompt("x", ctx);
+    const lower = system.toLowerCase();
+    expect(lower).toContain("people-safety");
+    expect(lower).toContain("never repeat an insult");
+    expect(lower).toContain("do not render a verdict");
+  });
+
   it("permits grounded inference but forbids inventing specific facts", () => {
     // The refuse-everything-not-verbatim prompt made @Aida useless for "did we
     // meet?"-style questions. It may now infer from what messages IMPLY, while
