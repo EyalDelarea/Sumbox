@@ -89,6 +89,29 @@ assurance you can watch their traffic with a sidecar sharing their netns, e.g.
 tcpdump -n 'tcp and not (dst net 127.0.0.0/8 or dst net 172.16.0.0/12)'` while
 using the UI (expect no external destinations).
 
+## Sandbox: bulk-sample @Aida over real data (no sends)
+
+`ask-sandbox` runs @Aida's **real agentic loop** against a real group's history
+with tracing on, **sending nothing to WhatsApp** — so you can generate many
+inspectable traces on demand. Read-only (`search_chat` only SELECTs; this path
+never calls send/react). Needs a live Ollama + the Langfuse stack up +
+`LANGFUSE_ENABLED=true`.
+
+```bash
+npm run dev -- groups                          # find a group id
+npm run dev -- ask-sandbox --group 70          # runs the red-team probes (guardrails)
+npm run dev -- ask-sandbox --group 70 --questions ops/my-questions.txt   # your own questions
+```
+
+- `--questions <file>` — one question per line, `#` comments ignored (see
+  `ops/aida-sandbox-questions.example.txt`). Without it, the committed red-team
+  probes run. Everyday questions exercise **retrieval/answer quality**; the
+  red-team probes exercise the **refusal guardrails** (they mostly abstain
+  without searching).
+- Each run traces under `environment=sandbox`, session `sandbox:group:<id>`, with
+  the question id as the trace `user` — filter on any of those in the UI. Answers
+  also stream to the terminal.
+
 ## Notes
 
 - **Secrets are local dev values on purpose** — the stack binds to localhost and

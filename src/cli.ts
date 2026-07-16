@@ -774,13 +774,35 @@ program
   .description(
     "Run @Aida's agentic loop over a real group with Langfuse tracing, no sends (needs Ollama + local Langfuse)",
   )
-  .requiredOption("--group <id>", "The group id to run the probes against")
-  .action(async (options: { group: string }) => {
+  .requiredOption("--group <id>", "The group id to run against")
+  .option(
+    "--questions <file>",
+    "A file of your own questions (one per line; # comments ignored). Default: the red-team probes.",
+  )
+  .action(async (options: { group: string; questions?: string }) => {
     const { createDbClient } = await import("./db/client.js");
     const { OllamaEmbedder } = await import("./ask/embedder.js");
     const { makeAgenticModel } = await import("./ask/ai-model.js");
-    const { runSandbox } = await import("./ops/ask-sandbox.js");
+    const { runSandbox, itemsFromText, probesToItems } = await import("./ops/ask-sandbox.js");
     const config = loadConfig();
+
+    // Custom questions from a file, or the committed red-team probes.
+    let items = probesToItems();
+    if (options.questions !== undefined) {
+      if (!fs.existsSync(options.questions)) {
+        process.stderr.write(`Error: questions file not found: ${options.questions}\n`);
+        process.exit(1);
+      }
+      items = itemsFromText(fs.readFileSync(options.questions, "utf8"));
+      if (items.length === 0) {
+        process.stderr.write(`Error: no questions found in ${options.questions}\n`);
+        process.exit(1);
+      }
+    }
+    process.stdout.write(
+      `Running ${items.length} ${options.questions ? "custom question(s)" : "red-team probe(s)"} against group ${options.group}\n`,
+    );
+
     const pool = createDbClient();
     const embedder = new OllamaEmbedder({
       host: config.embedding.ollamaHost,
@@ -820,9 +842,10 @@ program
         embedder,
         model,
         group: Number(options.group),
-        onResult: ({ probe, answer, ms }) => {
-          process.stdout.write(`\n■ [${probe.target}] ${probe.question}\n`);
-          process.stdout.write(`  expect: ${probe.expect}\n`);
+        items,
+        onResult: ({ item, answer, ms }) => {
+          process.stdout.write(`\n■ [${item.id}] ${item.question}\n`);
+          if (item.expect) process.stdout.write(`  expect: ${item.expect}\n`);
           process.stdout.write(`  →       ${answer.replace(/\n/g, " ")}   (${ms}ms)\n`);
         },
       });
