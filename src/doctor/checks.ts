@@ -27,6 +27,13 @@ export type CheckEntry = {
   name: string;
   fix: string;
   detail?: string;
+  /**
+   * "warn" makes a non-ok result advisory rather than a hard failure — for a
+   * check whose subject degrades Sumbox without breaking it. Without this every
+   * check is pass/fail, so an advisory condition can only be reported as broken,
+   * which trains people to ignore the doctor.
+   */
+  level?: "warn";
   onProbeError?: "fail" | "pass";
   probe: () => Promise<boolean>;
 };
@@ -46,9 +53,10 @@ export async function runCheck(entry: CheckEntry): Promise<CheckResult> {
     healthy = false;
   }
   if (healthy) return { name, ok: true };
-  return entry.detail
-    ? { name, ok: false, detail: entry.detail, fix: entry.fix }
-    : { name, ok: false, fix: entry.fix };
+  const base: CheckResult = { name, ok: false, fix: entry.fix };
+  if (entry.level) base.level = entry.level;
+  if (entry.detail) base.detail = entry.detail;
+  return base;
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -203,6 +211,27 @@ async function realFfmpegProbe(ffmpegPath: string): Promise<boolean> {
  * inconclusive-probe policy (a probe throw is not treated as corruption — see
  * realIndexIntegrityProbe for why glibc/ICU collation drift is the real signal).
  */
+/**
+ * Is @Aida's semantic search current?
+ *
+ * Advisory ("warn"), not a hard failure: a stale sweep is a degraded @Aida, not
+ * a broken Sumbox — everything else keeps working. But it must be VISIBLE,
+ * because the failure is otherwise completely silent and she answers "לא מצאתי"
+ * about messages she simply cannot see.
+ */
+async function realEmbeddingFreshnessProbe(databaseUrl: string): Promise<boolean> {
+  const [{ default: pg }, { probeEmbeddingFreshness, isFresh }] = await Promise.all([
+    import("pg"),
+    import("./embedding-freshness.js"),
+  ]);
+  const pool = new pg.Pool({ connectionString: databaseUrl });
+  try {
+    return isFresh(await probeEmbeddingFreshness(pool));
+  } finally {
+    await pool.end();
+  }
+}
+
 export function checkEntries(config: AppConfig): CheckEntry[] {
   return [
     { name: "Docker running", fix: "start Docker Desktop", probe: realDockerProbe },
@@ -239,6 +268,17 @@ export function checkEntries(config: AppConfig): CheckEntry[] {
       name: "ffmpeg on PATH",
       fix: "brew install ffmpeg",
       probe: () => realFfmpegProbe(config.transcription.ffmpegPath),
+    },
+    // App health last — everything above is a prerequisite for it.
+    {
+      name: "@Aida embeddings current",
+      level: "warn",
+      fix: "start the worker (make dev-worker) — it owns the embedding sweep; or run: npm run dev -- ask-embed-backfill",
+      probe: () => realEmbeddingFreshnessProbe(config.databaseUrl),
+      // A throw here means the DB is unreachable, which the Postgres check
+      // already reports — surfacing it twice is noise that trains people to skim
+      // the doctor output.
+      onProbeError: "pass",
     },
   ];
 }
