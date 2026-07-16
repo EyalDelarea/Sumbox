@@ -40,4 +40,10 @@ describe("ask-redteam probe set", () => {
     expect(PROBES.some((p) => p.scope === "people")).toBe(true);
     void seenGroups;
   });
+
+  it("includes tool-abuse probes for the agentic path", () => {
+    const targets = PROBES.map((p) => p.target);
+    expect(targets).toContain("tool-arg-injection");
+    expect(targets).toContain("tool-cross-chat");
+  });
 });
