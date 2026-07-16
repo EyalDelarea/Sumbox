@@ -1,6 +1,7 @@
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { upsertGroup } from "../db/repositories/groups.js";
 import { createTestDatabase } from "../test/db.js";
 import { type AskCommandDeps, maybeHandleAskCommand } from "./ask-command.js";
@@ -12,6 +13,15 @@ function askMsg(body: string, jid = JID, tsSec = Date.now() / 1000): WAMessage {
     key: { id: "m1", remoteJid: jid, fromMe: false },
     message: { conversation: body },
     messageTimestamp: Math.floor(tsSec),
+  } as unknown as WAMessage;
+}
+
+/** A reply quoting `quotedId`, exactly as Baileys shapes a swipe-reply. */
+function replyMsg(body: string, quotedId: string, jid = JID): WAMessage {
+  return {
+    key: { id: "r1", remoteJid: jid, fromMe: false },
+    message: { extendedTextMessage: { text: body, contextInfo: { stanzaId: quotedId } } },
+    messageTimestamp: Math.floor(Date.now() / 1000),
   } as unknown as WAMessage;
 }
 
@@ -124,5 +134,79 @@ describe("maybeHandleAskCommand", () => {
     expect(await maybeHandleAskCommand(askMsg("@אידה מה?"), d)).toBe(false);
     expect(d.sendText).toHaveBeenCalledWith(JID, expect.stringMatching(/סליחה/), expect.anything());
     expect(inFlight.has(groupId)).toBe(false); // lock released even on failure
+  });
+});
+
+describe("reply-threading", () => {
+  let pool: pg.Pool;
+  let groupId: number;
+  const RJID = "120363-thread@g.us";
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+    groupId = await upsertGroup(pool, { name: "ASK-thread", source: "import" });
+    await pool.query("UPDATE groups SET whatsapp_id=$1 WHERE id=$2", [RJID, groupId]);
+  }, 120_000);
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  const deps = (over: Partial<AskCommandDeps> = {}): AskCommandDeps => ({
+    pool,
+    resolveEnabledJids: async () => new Set([RJID]),
+    sendText: vi.fn(async () => ({ key: { id: "sent-1" } }) as WAMessage),
+    inFlight: new Set<number>(),
+    answer: vi.fn(async () => "תכף תכף... אתמול דיברנו על זה."),
+    ...over,
+  });
+
+  it("fires on a reply to HER message with NO @Aida tag", async () => {
+    await recordAidaMessage(pool, { groupId, externalId: "aida-said-this" });
+    const d = deps();
+    const ok = await maybeHandleAskCommand(replyMsg("ומה לגבי אתמול?", "aida-said-this", RJID), d);
+    expect(ok).toBe(true);
+    // The whole body is the question — there is no tag to strip.
+    expect(d.answer).toHaveBeenCalledWith({ groupId, question: "ומה לגבי אתמול?" });
+  });
+
+  it("does NOT fire on a reply to someone else's message", async () => {
+    // The load-bearing case: from_me is true for the OWNER's messages too, so
+    // without the marker a reply to Eyal's own message would wake her.
+    const d = deps();
+    const ok = await maybeHandleAskCommand(replyMsg("ומה לגבי אתמול?", "eyal-said-this", RJID), d);
+    expect(ok).toBe(false);
+    expect(d.answer).not.toHaveBeenCalled();
+  });
+
+  it("is scoped per group — her message in another group does not arm a thread here", async () => {
+    const other = await upsertGroup(pool, { name: "ASK-other", source: "import" });
+    await recordAidaMessage(pool, { groupId: other, externalId: "cross-group" });
+    const d = deps();
+    expect(await maybeHandleAskCommand(replyMsg("שאלה", "cross-group", RJID), d)).toBe(false);
+  });
+
+  it("still fires on an @Aida tag with no reply at all", async () => {
+    const d = deps();
+    expect(await maybeHandleAskCommand(askMsg("@אידה מה קורה?", RJID), d)).toBe(true);
+  });
+
+  it("threads on a reply of ANY age — liveness gates replay, not thread age", async () => {
+    await recordAidaMessage(pool, { groupId, externalId: "old-aida-msg" });
+    const d = deps();
+    // The quoted message is ancient; the REPLY is live, which is all that matters.
+    expect(await maybeHandleAskCommand(replyMsg("עדיין רלוונטי?", "old-aida-msg", RJID), d)).toBe(
+      true,
+    );
+  });
+
+  it("records her reply so the NEXT reply can thread off it", async () => {
+    await recordAidaMessage(pool, { groupId, externalId: "chain-start" });
+    const d = deps();
+    await maybeHandleAskCommand(replyMsg("שאלה ראשונה", "chain-start", RJID), d);
+    // sendText returned key.id "sent-1" — that must now be threadable.
+    const { rows } = await pool.query(
+      "SELECT 1 FROM aida_messages WHERE group_id=$1 AND external_id='sent-1'",
+      [groupId],
+    );
+    expect(rows).toHaveLength(1);
   });
 });
