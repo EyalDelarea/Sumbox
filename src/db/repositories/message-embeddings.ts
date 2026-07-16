@@ -20,13 +20,20 @@ import { toVectorLiteral } from "../vector.js";
  * and this owns the retrieval path; a drift between them would embed different
  * text than the reader sees.
  */
-const CONTENT_EXPR = `concat_ws(' — ',
+/**
+ * Exported for the recency window (ask/recent-window.ts), which MUST extract
+ * content identically to the embed/search path — otherwise a media caption or a
+ * transcript would be visible to search but invisible in the window (or vice
+ * versa), and the two views of the same message would silently disagree.
+ */
+export const CONTENT_EXPR = `concat_ws(' — ',
   NULLIF(trim(m.text_content), ''),
   NULLIF(trim(a.description), ''),
   NULLIF(trim(t.transcript), '')
 )`;
 
-const CONTENT_JOINS = `
+/** @see CONTENT_EXPR — the joins it depends on. */
+export const CONTENT_JOINS = `
   LEFT JOIN participants p ON p.id = m.participant_id
   LEFT JOIN transcripts t ON t.message_id = m.id AND t.status = 'completed'
   LEFT JOIN media_analyses a ON a.message_id = m.id AND a.status = 'completed'
