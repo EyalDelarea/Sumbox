@@ -20,6 +20,12 @@ export type RunEDeps = {
   model: LanguageModel;
   /** Emit OTel spans to the local Langfuse. */
   telemetry?: boolean;
+  /**
+   * Pinned to 0 by default: an eval that cannot reproduce its own number cannot
+   * detect a regression. Note this deliberately measures a MORE deterministic
+   * @Aida than prod runs, so the floor here is a lower bound on real variance.
+   */
+  temperature?: number;
   /** Injectable for tests; defaults to the real agentic loop. */
   answer?: typeof answerAgentic;
   onItem?: (id: string, out: TaskOutput) => void;
@@ -70,6 +76,7 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
       embedder: deps.embedder,
       model: deps.model,
       telemetry: deps.telemetry === true,
+      temperature: deps.temperature ?? 0,
       trace: {
         sessionId: `eval:group:${item.groupId}`,
         userId: item.id,

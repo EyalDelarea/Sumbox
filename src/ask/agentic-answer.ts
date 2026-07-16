@@ -1,9 +1,17 @@
 import { type LanguageModel, generateText as sdkGenerateText, stepCountIs } from "ai";
 import type pg from "pg";
+import { resolveSenderName } from "../summarization/sender-name.js";
 import { makeSearchChatTool } from "./agentic-tools.js";
 import type { Embedder } from "./embedder.js";
-import { buildAgenticSystem, NOT_IN_CHAT, neutralizeFence, renderWindow } from "./prompt.js";
+import {
+  buildAgenticSystem,
+  fenceRetrieved,
+  NOT_IN_CHAT,
+  neutralizeFence,
+  renderWindow,
+} from "./prompt.js";
 import { selectRecentMessages } from "./recent-window.js";
+import { searchMessagesHybrid } from "./retrieval.js";
 
 type GenerateFn = (
   opts: Parameters<typeof sdkGenerateText>[0],
@@ -21,6 +29,8 @@ type PropagateFn = <T>(attrs: AgenticTrace, fn: () => Promise<T>) => Promise<T>;
 
 /** Matches answer.ts — one concept, one number. */
 const DEFAULT_WINDOW_N = 20;
+/** Matches answer.ts. */
+const DEFAULT_RETRIEVE_K = 40;
 
 export type AgenticDeps = {
   pool: pg.Pool | pg.PoolClient;
@@ -29,6 +39,18 @@ export type AgenticDeps = {
   maxSteps?: number;
   /** How many recent messages to always show. Default 20. */
   windowN?: number;
+  /** How many search hits to pre-seed. Default 40 — matches answerQuestion. */
+  retrieveK?: number;
+  /**
+   * Sampling temperature. Left UNSET in prod so @Aida keeps the model's default
+   * warmth; the eval harness pins it to 0.
+   *
+   * Why that matters: unpinned sampling made an identical run score 0.17 then
+   * 0.33 on the same code, a ±0.17 noise floor WIDER than most effects worth
+   * detecting — which is how a reverted prompt change got mis-blamed for a
+   * regression that was really sampling noise.
+   */
+  temperature?: number;
   /** When true, emit OpenTelemetry spans for the loop (steps, tool calls, args,
    *  results, tokens, latency). Routed to the local Langfuse by the exporter
    *  started at collector startup (see src/observability/langfuse.ts). Off by
@@ -94,10 +116,48 @@ export async function answerAgentic(
 
   deps.onWindow?.(window.map((m) => m.messageId));
 
+  /**
+   * Pre-seed the SAME hybrid search the single-shot path runs, instead of
+   * trusting the model to call search_chat.
+   *
+   * Measured: handed a recency window, gemma4 stopped calling search_chat
+   * ENTIRELY (tool_called 0.67 → 0.00) and false-denied a fact that search
+   * retrieves at hitRate 1.00 — it answered "לא מצאתי" about a message sitting
+   * in the index. A small model with a full context does not reliably choose to
+   * search, and no prompt rule moved it. Correctness must not depend on that
+   * choice; search_chat stays for refinement, but the first result set is handed
+   * over unconditionally, exactly as answerQuestion does.
+   */
+  const preEmbedding = await deps.embedder.embed(input.question);
+  const preHits = await searchMessagesHybrid(
+    deps.pool,
+    input.groupId,
+    { embedding: preEmbedding, text: input.question },
+    deps.retrieveK ?? DEFAULT_RETRIEVE_K,
+  );
+  const windowIds = new Set(window.map((m) => m.messageId));
+  const freshHits = preHits.filter((h) => !windowIds.has(h.messageId));
+  deps.onRetrieved?.(freshHits.map((h) => h.messageId));
+
+  const searchSection =
+    freshHits.length > 0
+      ? [
+          "Older messages from this group's history, found by searching for this question:",
+          fenceRetrieved(
+            freshHits.map(
+              (h) =>
+                `${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
+            ),
+          ),
+          "",
+        ]
+      : [];
+
   const opts = {
     model: deps.model,
+    ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
     system: buildAgenticSystem(),
-    prompt: [...renderWindow(window), neutralizeFence(input.question)].join("\n"),
+    prompt: [...renderWindow(window), ...searchSection, neutralizeFence(input.question)].join("\n"),
     stopWhen: stepCountIs(deps.maxSteps ?? 3),
     tools: { search_chat: searchChat },
     // AI SDK v7 auto-enables telemetry once a Langfuse integration is
