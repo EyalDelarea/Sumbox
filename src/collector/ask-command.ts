@@ -14,6 +14,7 @@
 
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
+import { recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { matchAskTrigger } from "./ask-trigger.js";
 import { mapWaMessage } from "./message-mapper.js";
 
@@ -140,7 +141,29 @@ export async function maybeHandleAskCommand(
     await react("⏳");
     // groupId is the VERIFIED inbound id — the privacy boundary for retrieval.
     const answer = await deps.answer({ groupId, question: match.question });
-    await deps.sendText(jid, answer, { quoted: msg });
+    const sent = await deps.sendText(jid, answer, { quoted: msg });
+    // Record HER OWN message id, here and now.
+    //
+    // This is the only moment the system knows a message is hers: WhatsApp echoes
+    // it back and the collector ingests it through the same generic path as
+    // everyone else's, with no way to tell it apart. Writing at send time (rather
+    // than marking the ingested row) is what makes the marker immune to whether —
+    // or when — that echo arrives.
+    //
+    // Best-effort: a failure here costs reply-threading on ONE message and must
+    // never turn a delivered answer into a ❌ + error reply.
+    const externalId = sent?.key?.id;
+    if (externalId) {
+      try {
+        await recordAidaMessage(deps.pool, {
+          groupId,
+          externalId,
+          question: match.question,
+        });
+      } catch (err) {
+        deps.log?.warn({ err, groupId, externalId }, "@Aida: failed to record own message id");
+      }
+    }
     await react("✅");
     deps.log?.info({ groupId }, "@Aida: replied");
     return true;
