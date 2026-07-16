@@ -67,8 +67,9 @@ export async function answerAgentic(
   const run = (): Promise<{ text: string }> => generate(opts);
   const { text } =
     deps.telemetry && deps.trace
-      ? await (deps.propagate ??
-          (await import("../observability/langfuse.js")).withTraceAttributes)(deps.trace, run)
+      ? await (
+          deps.propagate ?? (await import("../observability/langfuse.js")).withTraceAttributes
+        )(deps.trace, run)
       : await run();
   const trimmed = (text ?? "").trim();
   return trimmed.length > 0 ? trimmed : NOT_IN_CHAT;
