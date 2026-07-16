@@ -343,6 +343,8 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
                         model: cfg.summarization.model,
                       }),
                       telemetry: cfg.langfuse.enabled,
+                      // Group a chat's @Aida turns; tag as live vs sandbox runs.
+                      trace: { sessionId: `group:${i.groupId}`, tags: ["aida", "live"] },
                     },
                     i,
                   ),
