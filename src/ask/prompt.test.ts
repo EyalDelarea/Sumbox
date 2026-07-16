@@ -105,13 +105,25 @@ describe("fenceRetrieved", () => {
 });
 
 describe("buildAgenticSystem", () => {
-  it("reuses the guardrails and grounds in tool results", () => {
+  it("reuses the guardrails and grounds in the window OR the tools", () => {
     const s = buildAgenticSystem();
     const lower = s.toLowerCase();
     expect(s).toContain("תכף תכף"); // persona
     expect(lower).toContain("people-safety"); // safety guardrail
     expect(lower).toContain("search_chat"); // tool-use instruction
-    expect(lower).toContain("only from what the tools return"); // grounding shift
+    // Grounding now admits TWO sources: the recency window is handed to her
+    // unconditionally, so "only from what the tools return" would have been a
+    // false contract that forbids the very context we inject.
+    expect(lower).toContain("from the recent messages you are shown or from what the tools return");
+    expect(lower).toContain("do not answer from world knowledge");
     expect(s).toContain(NOT_IN_CHAT); // exact refusal kept
+  });
+
+  it("forbids refusing before searching", () => {
+    // Measured: handed a window she stopped calling search_chat entirely and
+    // false-denied facts that search retrieves. Binding the rule to the REFUSAL
+    // costs nothing when the answer is already in front of her.
+    const lower = buildAgenticSystem().toLowerCase();
+    expect(lower).toContain("until you have called search_chat at least once");
   });
 });
