@@ -83,6 +83,10 @@ services:
       - "3000:3000"
     environment:
       <<: *langfuse-worker-env
+      # web is multi-homed (lf_backend + lf_edge). Next.js standalone binds to
+      # $HOSTNAME, which resolves to the backend IP only — so the host port
+      # forward (which targets the edge IP) hits nothing. Bind all interfaces.
+      HOSTNAME: 0.0.0.0
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-sumbox-local-nextauth-secret}
       # Turnkey provisioning on first boot — matches the app's .env keys.
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-sumbox}
