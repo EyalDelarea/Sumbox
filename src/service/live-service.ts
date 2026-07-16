@@ -107,6 +107,15 @@ export type AttachCollectorDeps = {
     resolveEnabledJids: () => Promise<ReadonlySet<string>>;
     inFlight: Set<number>;
   };
+  /**
+   * Opt-in Langfuse observability for the agentic @Aida loop (LANGFUSE_ENABLED).
+   * Present ⇒ enabled: attachCollector starts a local OpenTelemetry exporter
+   * once (the heavy OTel deps are dynamic-imported, so they never load on the
+   * default path) and flushes it on stop(). The endpoint is pinned and refused
+   * if non-local. See src/observability/langfuse.ts and
+   * ops/runbooks/langfuse-observability.md.
+   */
+  telemetry?: { baseUrl: string; publicKey: string; secretKey: string };
 };
 
 export type LiveServiceHandle = {
@@ -333,6 +342,9 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
                         host: cfg.summarization.ollamaHost,
                         model: cfg.summarization.model,
                       }),
+                      telemetry: cfg.langfuse.enabled,
+                      // Group a chat's @Aida turns; tag as live vs sandbox runs.
+                      trace: { sessionId: `group:${i.groupId}`, tags: ["aida", "live"] },
                     },
                     i,
                   ),
@@ -363,10 +375,37 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
   // EventEmitter uses `message` as a plain string event; WAMessage is the arg.
   session.on("message", onMessage as (...args: unknown[]) => void);
 
+  // ── Langfuse telemetry (opt-in) ──────────────────────────────────────────
+  // Start the local OTel exporter ONCE for this collector process. Dynamic
+  // import keeps the heavy OTel deps off the default path. Best-effort: a
+  // failure here must never break ingest, and stop() flushes on the way out.
+  let telemetry: { shutdown: () => Promise<void> } | null = null;
+  const telemetryEndpoint = deps.telemetry;
+  if (telemetryEndpoint) {
+    void (async () => {
+      const { createLangfuseTelemetry, defaultLangfuseDeps } = await import(
+        "../observability/langfuse.js"
+      );
+      // defaultLangfuseDeps throws on a non-local baseUrl (privacy guard).
+      const t = createLangfuseTelemetry({
+        ...defaultLangfuseDeps(telemetryEndpoint),
+        log: log ? (m) => log.info(m) : undefined,
+      });
+      // If stop() already ran while we were importing, don't start an exporter
+      // nothing will flush; just skip.
+      if (stopped) return;
+      t.start();
+      telemetry = t;
+    })().catch((err: unknown) => onError(err));
+  }
+
   // ── Handle ─────────────────────────────────────────────────────────────────
 
   return {
     stop() {
+      // Flush any pending trace batch (best-effort; the process exits shortly
+      // after, matching the rest of this teardown's best-effort style).
+      void telemetry?.shutdown().catch(() => {});
       // Latch teardown first so the session's own 'disconnected' (emitted by
       // session.stop() below, on a later tick) is ignored instead of racing the
       // pool that the shutdown sequence is about to close.

@@ -1,0 +1,15 @@
+# ask-sandbox questions — one per line; blank lines and #-comments are ignored.
+# Copy this file, put YOUR group's real questions in it, then:
+#   npm run dev -- ask-sandbox --group <id> --questions ops/my-questions.txt
+# Answers stream to the terminal; each run is a Langfuse trace (environment=sandbox).
+# Read-only: nothing is ever sent to WhatsApp.
+
+# Everyday "member of the group" questions exercise the RETRIEVAL path (unlike the
+# red-team probes, which mostly refuse without searching). Ask things whose answer
+# you already know, so you can judge whether hers is right.
+
+מה החלטנו לגבי הטיול?
+מתי נפגשים השבוע?
+מי אמר שהוא לא יכול להגיע?
+על מה הייתה הבדיחה עם הפיצה?
+מה הכתובת ששלחו לאירוע?

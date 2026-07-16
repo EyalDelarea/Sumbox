@@ -222,6 +222,13 @@ program
       summaryCommand: cmdDeps,
       // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
       askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, inFlight: new Set() },
+      telemetry: config.langfuse.enabled
+        ? {
+            baseUrl: config.langfuse.baseUrl,
+            publicKey: config.langfuse.publicKey,
+            secretKey: config.langfuse.secretKey,
+          }
+        : undefined,
       onConnected: () => {
         collectorLog.info({ stored: 0 }, "collecting");
         logLifecycle("collector.connected");
@@ -758,6 +765,94 @@ program
       });
       process.stdout.write("\nRed-team complete — review each answer against its 'expect'.\n");
     } finally {
+      await pool.end();
+    }
+  });
+
+program
+  .command("ask-sandbox")
+  .description(
+    "Run @Aida's agentic loop over a real group with Langfuse tracing, no sends (needs Ollama + local Langfuse)",
+  )
+  .requiredOption("--group <id>", "The group id to run against")
+  .option(
+    "--questions <file>",
+    "A file of your own questions (one per line; # comments ignored). Default: the red-team probes.",
+  )
+  .action(async (options: { group: string; questions?: string }) => {
+    const { createDbClient } = await import("./db/client.js");
+    const { OllamaEmbedder } = await import("./ask/embedder.js");
+    const { makeAgenticModel } = await import("./ask/ai-model.js");
+    const { runSandbox, itemsFromText, probesToItems } = await import("./ops/ask-sandbox.js");
+    const config = loadConfig();
+
+    // Custom questions from a file, or the committed red-team probes.
+    let items = probesToItems();
+    if (options.questions !== undefined) {
+      if (!fs.existsSync(options.questions)) {
+        process.stderr.write(`Error: questions file not found: ${options.questions}\n`);
+        process.exit(1);
+      }
+      items = itemsFromText(fs.readFileSync(options.questions, "utf8"));
+      if (items.length === 0) {
+        process.stderr.write(`Error: no questions found in ${options.questions}\n`);
+        process.exit(1);
+      }
+    }
+    process.stdout.write(
+      `Running ${items.length} ${options.questions ? "custom question(s)" : "red-team probe(s)"} against group ${options.group}\n`,
+    );
+
+    const pool = createDbClient();
+    const embedder = new OllamaEmbedder({
+      host: config.embedding.ollamaHost,
+      model: config.embedding.model,
+      dim: config.embedding.dim,
+    });
+    const model = makeAgenticModel({
+      host: config.summarization.ollamaHost,
+      model: config.summarization.model,
+    });
+
+    // Separate these runs from live @Aida in Langfuse's "environment" filter.
+    // Must be set BEFORE the span processor is constructed (it reads env then).
+    process.env.LANGFUSE_TRACING_ENVIRONMENT = "sandbox";
+    let flushTelemetry: (() => Promise<void>) | null = null;
+    if (config.langfuse.enabled) {
+      const { createLangfuseTelemetry, defaultLangfuseDeps } = await import(
+        "./observability/langfuse.js"
+      );
+      const telemetry = createLangfuseTelemetry(
+        defaultLangfuseDeps({
+          baseUrl: config.langfuse.baseUrl,
+          publicKey: config.langfuse.publicKey,
+          secretKey: config.langfuse.secretKey,
+        }),
+      );
+      telemetry.start();
+      flushTelemetry = () => telemetry.shutdown();
+      process.stdout.write("Tracing → local Langfuse (environment=sandbox)\n");
+    } else {
+      process.stdout.write("⚠ LANGFUSE_ENABLED not set — running without tracing (answers only)\n");
+    }
+
+    try {
+      await runSandbox({
+        pool,
+        embedder,
+        model,
+        group: Number(options.group),
+        items,
+        onResult: ({ item, answer, ms }) => {
+          process.stdout.write(`\n■ [${item.id}] ${item.question}\n`);
+          if (item.expect) process.stdout.write(`  expect: ${item.expect}\n`);
+          process.stdout.write(`  →       ${answer.replace(/\n/g, " ")}   (${ms}ms)\n`);
+        },
+      });
+      process.stdout.write("\nSandbox complete — inspect the traces in Langfuse (env=sandbox).\n");
+    } finally {
+      // Flush the trace batch BEFORE the process exits, else the last runs are lost.
+      await flushTelemetry?.().catch(() => {});
       await pool.end();
     }
   });

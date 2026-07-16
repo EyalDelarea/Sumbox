@@ -50,6 +50,24 @@ describe("loadConfig whatsapp block (safety guardrail)", () => {
   });
 });
 
+describe("loadConfig langfuse block", () => {
+  it("defaults enabled to FALSE (observability opt-in)", () => {
+    expect(loadConfig({}).langfuse.enabled).toBe(false);
+  });
+
+  it("only enables when LANGFUSE_ENABLED is exactly 'true'", () => {
+    expect(loadConfig({ LANGFUSE_ENABLED: "true" }).langfuse.enabled).toBe(true);
+    expect(loadConfig({ LANGFUSE_ENABLED: "1" }).langfuse.enabled).toBe(false);
+  });
+
+  it("pins baseUrl to a local default (never the SDK's cloud fallback)", () => {
+    expect(loadConfig({}).langfuse.baseUrl).toBe("http://localhost:3000");
+    expect(loadConfig({ LANGFUSE_BASEURL: "http://localhost:4000" }).langfuse.baseUrl).toBe(
+      "http://localhost:4000",
+    );
+  });
+});
+
 describe("loadConfig opsSweep block", () => {
   it("provides sensible defaults when env is empty", () => {
     const cfg = loadConfig({});
