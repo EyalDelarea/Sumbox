@@ -58,7 +58,22 @@ export async function embedPendingBatch(
   return { embedded, failed, remaining };
 }
 
-export type EmbeddingSweepHandle = { stop: () => void };
+export type EmbeddingSweepHandle = {
+  stop: () => void;
+  /**
+   * When the last tick FINISHED, or null if none has yet.
+   *
+   * DEAD_STREAK_ALERT only fires when a batch runs and fails — a sweep that
+   * never ticks at all is completely silent. That is not hypothetical: on
+   * 2026-07-16 it stopped at 12:44 and did not resume for ~50 minutes, spanning a
+   * whole conversation, while @Aida silently degraded to lexical-only retrieval
+   * and confidently answered "לא מצאתי". Nothing logged. Nothing alerted.
+   *
+   * Exposed so the doctor can say "the sweep is not running", which is a
+   * different question from "the sweep is failing".
+   */
+  lastTickAt: () => Date | null;
+};
 
 /**
  * Run {@link embedPendingBatch} on an interval until stopped. Overlap-safe: a
@@ -75,6 +90,7 @@ export function startEmbeddingSweep(
   // down, wrong model/dim, DB error) rather than a lone pathological message —
   // escalate ONCE to error so it's visible, not buried in per-message warns.
   let deadStreak = 0;
+  let lastTick: Date | null = null;
   const DEAD_STREAK_ALERT = 3;
   const tick = async () => {
     if (running) return;
@@ -102,11 +118,14 @@ export function startEmbeddingSweep(
         deps.log?.warn({ err }, "embedding sweep: batch threw");
       }
     } finally {
+      // Stamped on EVERY outcome, including a throw: this answers "did the sweep
+      // run", not "did it succeed" — deadStreak already covers the latter.
+      lastTick = new Date();
       running = false;
     }
   };
   const timer = setInterval(() => void tick(), opts.intervalMs);
   timer.unref?.();
   void tick(); // kick off immediately rather than waiting a full interval
-  return { stop: () => clearInterval(timer) };
+  return { stop: () => clearInterval(timer), lastTickAt: () => lastTick };
 }

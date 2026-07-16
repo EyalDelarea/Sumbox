@@ -5,7 +5,7 @@ import { insertMessages } from "../db/repositories/messages.js";
 import type { NormalizedMessage } from "../importer/types.js";
 import { createTestDatabase } from "../test/db.js";
 import type { Embedder } from "./embedder.js";
-import { embedPendingBatch } from "./embedding-sweep.js";
+import { embedPendingBatch, startEmbeddingSweep } from "./embedding-sweep.js";
 
 function vec(seed: number): number[] {
   const v = new Array(1024).fill(0);
@@ -135,5 +135,34 @@ describe("embedPendingBatch", () => {
     }
     handle.stop();
     expect(error).toHaveBeenCalled(); // escalated, not just warned
+  });
+});
+
+describe("lastTickAt — the sweep's heartbeat", () => {
+  it("is null before the first tick completes", () => {
+    // A sweep that never ran must be distinguishable from one that ran and found
+    // nothing — DEAD_STREAK_ALERT cannot tell those apart.
+    const h = startEmbeddingSweep(
+      { pool: {} as never, embedder: { embed: async () => [] }, model: "bge-m3" },
+      { intervalMs: 60_000, batchSize: 1 },
+    );
+    expect(h.lastTickAt()).toBeNull();
+    h.stop();
+  });
+
+  it("stamps after a tick, even when the batch THREW", async () => {
+    // "Did it run" is a different question from "did it succeed"; a throwing
+    // sweep is alive, a stopped one is not, and only lastTickAt separates them.
+    const pool = {
+      query: async () => {
+        throw new Error("db down");
+      },
+    } as never;
+    const h = startEmbeddingSweep(
+      { pool, embedder: { embed: async () => [] }, model: "bge-m3" },
+      { intervalMs: 60_000, batchSize: 1 },
+    );
+    await vi.waitFor(() => expect(h.lastTickAt()).toBeInstanceOf(Date));
+    h.stop();
   });
 });
