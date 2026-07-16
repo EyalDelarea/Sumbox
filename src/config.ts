@@ -161,8 +161,10 @@ export type AppConfig = {
   /** @Aida agentic tool-loop (Vercel AI SDK). Off by default; ASK_AGENTIC=true opts in. */
   ask: { agentic: boolean };
   /** Local Langfuse trace UI for the agentic loop. Off by default;
-   *  LANGFUSE_ENABLED=true starts the OTel exporter (see src/observability/langfuse.ts). */
-  langfuse: { enabled: boolean };
+   *  LANGFUSE_ENABLED=true starts the OTel exporter (see src/observability/langfuse.ts).
+   *  baseUrl is pinned (NOT left to the SDK's cloud default) and enforced local
+   *  by the exporter — message content must never leave the device. */
+  langfuse: { enabled: boolean; baseUrl: string; publicKey: string; secretKey: string };
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -249,6 +251,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       intervalMs: Number(env.MEDIA_PURGE_INTERVAL_MS ?? 21_600_000),
     },
     ask: { agentic: env.ASK_AGENTIC === "true" },
-    langfuse: { enabled: env.LANGFUSE_ENABLED === "true" },
+    langfuse: {
+      enabled: env.LANGFUSE_ENABLED === "true",
+      // Pinned local default — NOT the SDK's cloud fallback. A non-local value
+      // is refused at exporter start so chat content can't leave the device.
+      baseUrl: env.LANGFUSE_BASEURL ?? "http://localhost:3000",
+      publicKey: env.LANGFUSE_PUBLIC_KEY ?? "pk-lf-sumbox-local",
+      secretKey: env.LANGFUSE_SECRET_KEY ?? "sk-lf-sumbox-local",
+    },
   };
 }

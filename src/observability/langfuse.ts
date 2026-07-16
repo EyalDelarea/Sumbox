@@ -35,11 +35,52 @@ export type LangfuseTelemetry = {
   shutdown: () => Promise<void>;
 };
 
-/** Real wiring: OTel NodeSDK + Langfuse span processor + AI SDK integration. */
-export function defaultLangfuseDeps(): LangfuseTelemetryDeps {
+/** Local Langfuse endpoints. Anything else is refused — the SDK's own default
+ *  is the PUBLIC cloud, and spans carry chat content, so a non-local baseUrl
+ *  would leak message content off-device (the project's one absolute rule). */
+export function isLocalLangfuseUrl(url: string): boolean {
+  let host: string;
+  try {
+    // URL keeps IPv6 literals bracketed ("[::1]") — strip them to compare.
+    host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  } catch {
+    return false;
+  }
+  return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1";
+}
+
+export type LangfuseEndpoint = { baseUrl: string; publicKey: string; secretKey: string };
+
+// registerTelemetry() appends to a global list with no removal API; guard so a
+// restart within one process can't register a second integration (double spans).
+let integrationRegistered = false;
+
+/** Real wiring: OTel NodeSDK + Langfuse span processor + AI SDK integration.
+ *  Throws if `baseUrl` is not local — never fall back to the SDK's cloud URL. */
+export function defaultLangfuseDeps(endpoint: LangfuseEndpoint): LangfuseTelemetryDeps {
+  if (!isLocalLangfuseUrl(endpoint.baseUrl)) {
+    throw new Error(
+      `Langfuse baseUrl must be local (got ${endpoint.baseUrl}); refusing to start so chat content stays on-device.`,
+    );
+  }
   return {
-    makeSdk: () => new NodeSDK({ spanProcessors: [new LangfuseSpanProcessor()] }),
-    register: () => registerTelemetry(new LangfuseVercelAiSdkIntegration()),
+    // baseUrl/keys are pinned explicitly — with no params the exporter would
+    // resolve to https://cloud.langfuse.com.
+    makeSdk: () =>
+      new NodeSDK({
+        spanProcessors: [
+          new LangfuseSpanProcessor({
+            baseUrl: endpoint.baseUrl,
+            publicKey: endpoint.publicKey,
+            secretKey: endpoint.secretKey,
+          }),
+        ],
+      }),
+    register: () => {
+      if (integrationRegistered) return;
+      registerTelemetry(new LangfuseVercelAiSdkIntegration());
+      integrationRegistered = true;
+    },
   };
 }
 
@@ -48,9 +89,10 @@ export function defaultLangfuseDeps(): LangfuseTelemetryDeps {
  *
  * - `start()` is idempotent: a second call is a no-op, so wiring it into more
  *   than one entrypoint can't double-register the integration.
- * - `shutdown()` flushes the pending span batch. Call it on process exit —
- *   otherwise the last trace(s) never reach Langfuse. Safe before start and
- *   safe to call twice.
+ * - `shutdown()` flushes the pending span batch and should be awaited on
+ *   process exit to give the last trace(s) their best chance to reach Langfuse
+ *   (the collector's stop() is best-effort per this codebase's teardown style).
+ *   Safe before start and safe to call twice.
  */
 export function createLangfuseTelemetry(deps: LangfuseTelemetryDeps): LangfuseTelemetry {
   let sdk: OtelSdk | null = null;

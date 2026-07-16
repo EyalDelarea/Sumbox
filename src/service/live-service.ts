@@ -109,12 +109,13 @@ export type AttachCollectorDeps = {
   };
   /**
    * Opt-in Langfuse observability for the agentic @Aida loop (LANGFUSE_ENABLED).
-   * When true, attachCollector starts a local OpenTelemetry exporter once (the
-   * heavy OTel deps are dynamic-imported, so they never load on the default
-   * path) and flushes it on stop(). See src/observability/langfuse.ts and
+   * Present ⇒ enabled: attachCollector starts a local OpenTelemetry exporter
+   * once (the heavy OTel deps are dynamic-imported, so they never load on the
+   * default path) and flushes it on stop(). The endpoint is pinned and refused
+   * if non-local. See src/observability/langfuse.ts and
    * ops/runbooks/langfuse-observability.md.
    */
-  telemetry?: boolean;
+  telemetry?: { baseUrl: string; publicKey: string; secretKey: string };
 };
 
 export type LiveServiceHandle = {
@@ -377,15 +378,20 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
   // import keeps the heavy OTel deps off the default path. Best-effort: a
   // failure here must never break ingest, and stop() flushes on the way out.
   let telemetry: { shutdown: () => Promise<void> } | null = null;
-  if (deps.telemetry) {
+  const telemetryEndpoint = deps.telemetry;
+  if (telemetryEndpoint) {
     void (async () => {
       const { createLangfuseTelemetry, defaultLangfuseDeps } = await import(
         "../observability/langfuse.js"
       );
+      // defaultLangfuseDeps throws on a non-local baseUrl (privacy guard).
       const t = createLangfuseTelemetry({
-        ...defaultLangfuseDeps(),
+        ...defaultLangfuseDeps(telemetryEndpoint),
         log: log ? (m) => log.info(m) : undefined,
       });
+      // If stop() already ran while we were importing, don't start an exporter
+      // nothing will flush; just skip.
+      if (stopped) return;
       t.start();
       telemetry = t;
     })().catch((err: unknown) => onError(err));

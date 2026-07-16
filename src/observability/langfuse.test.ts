@@ -1,5 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLangfuseTelemetry } from "./langfuse.js";
+import { createLangfuseTelemetry, defaultLangfuseDeps, isLocalLangfuseUrl } from "./langfuse.js";
+
+describe("isLocalLangfuseUrl (privacy guard)", () => {
+  it("accepts only on-device hosts", () => {
+    for (const u of [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "http://0.0.0.0:3000",
+      "http://[::1]:3000",
+    ]) {
+      expect(isLocalLangfuseUrl(u)).toBe(true);
+    }
+  });
+
+  it("rejects the cloud default and any off-device / malformed host", () => {
+    for (const u of [
+      "https://cloud.langfuse.com",
+      "https://us.cloud.langfuse.com",
+      "http://192.168.1.5:3000",
+      "http://langfuse.example.com",
+      "not-a-url",
+      "",
+    ]) {
+      expect(isLocalLangfuseUrl(u)).toBe(false);
+    }
+  });
+});
+
+describe("defaultLangfuseDeps", () => {
+  it("refuses to build an exporter for a non-local baseUrl (no off-device leak)", () => {
+    expect(() =>
+      defaultLangfuseDeps({
+        baseUrl: "https://cloud.langfuse.com",
+        publicKey: "pk",
+        secretKey: "sk",
+      }),
+    ).toThrow(/must be local/);
+  });
+});
 
 function makeDeps() {
   const sdk = { start: vi.fn(), shutdown: vi.fn(async () => {}) };
