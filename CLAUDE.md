@@ -106,3 +106,30 @@ code** — run `npm run check --write` before committing. CI runs on GitHub-host
   without the collector). Each in its own terminal. After `git pull`, Ctrl-C `dev-ui` and
   re-run it to refresh the UI while the worker keeps its jobs and the collector keeps its
   session. The processes share only Postgres + RabbitMQ, so they're already decoupled.
+
+## Observability — @Aida agentic loop (opt-in, FULLY LOCAL)
+
+A self-hosted Langfuse gives the agentic @Aida loop a trace UI (steps, `search_chat`
+args/results, tokens, latency). **Off by default.** Full detail:
+`ops/runbooks/langfuse-observability.md`.
+
+- **Run it:** `make langfuse-up` (also `langfuse-down` / `langfuse-logs` / `langfuse-verify`);
+  UI at `localhost:3000`. In `.env`: `ASK_AGENTIC=true` + `LANGFUSE_ENABLED=true` (base URL +
+  keys default to the stack's turnkey local values). Only the agentic path is traced. The
+  exporter starts once per collector process in `attachCollector` and flushes on `stop()`.
+- **Code:** `docker-compose.langfuse.yml` (separate `sumbox-langfuse` project); wiring in
+  `src/observability/langfuse.ts`, `experimental_telemetry` in `src/ask/agentic-answer.ts`.
+  AI SDK v7: `registerTelemetry` auto-emits; sessionId/userId/tags go through
+  `propagateAttributes` (NOT `experimental_telemetry`, which has no metadata field);
+  `environment` via the `LANGFUSE_TRACING_ENVIRONMENT` env var.
+- **Sandbox eval (read-only, no WhatsApp sends):**
+  `npm run dev -- ask-sandbox --group <id> [--questions <file>]` runs @Aida's real agentic
+  loop over a real group and traces each run under `environment=sandbox`. Default question
+  set is the red-team probes (guardrails); `--questions` takes your own file (retrieval).
+  Sibling of `ask-redteam` — `src/ops/ask-sandbox.ts`.
+- **Invariants — do NOT break (privacy is absolute):** the stack stays fully local —
+  `TELEMETRY_ENABLED=false`, worker + datastores on the `internal: true` network, and the
+  exporter **refuses a non-local `baseUrl`** (`isLocalLangfuseUrl`) so chat content can't
+  leave the device. The OTel deps are dynamic-imported, so they must never load unless
+  `LANGFUSE_ENABLED=true`. Traces contain chat content but live only in the on-device
+  Langfuse (wipe with `make langfuse-down ARGS=-v`).
