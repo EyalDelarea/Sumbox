@@ -1,7 +1,7 @@
-# Langfuse observability for @Aida (fully local)
+# Langfuse observability for `@Aida` (fully local)
 
 A self-hosted [Langfuse](https://langfuse.com) stack that gives the agentic
-@Aida loop a visual trace UI — every step, tool call, `search_chat` argument and
+`@Aida` loop a visual trace UI — every step, tool call, `search_chat` argument and
 result, token count, and latency — so you can *watch* the agent reason instead of
 reading logs. It is **opt-in** and **runs entirely on this machine**: message
 content never leaves the device, which is the project's hard privacy constraint.
@@ -31,7 +31,7 @@ LANGFUSE_PUBLIC_KEY=pk-lf-sumbox-local
 LANGFUSE_SECRET_KEY=sk-lf-sumbox-local
 ```
 
-Restart the collector (`make dev-collect`), tag @Aida with a question in an
+Restart the collector (`make dev-collect`), tag `@Aida` with a question in an
 allowlisted group, and the trace shows up under the **aida** project.
 
 Teardown: `make langfuse-down` (add `ARGS=-v` to also wipe the trace volumes).
@@ -89,9 +89,9 @@ assurance you can watch their traffic with a sidecar sharing their netns, e.g.
 tcpdump -n 'tcp and not (dst net 127.0.0.0/8 or dst net 172.16.0.0/12)'` while
 using the UI (expect no external destinations).
 
-## Sandbox: bulk-sample @Aida over real data (no sends)
+## Sandbox: bulk-sample `@Aida` over real data (no sends)
 
-`ask-sandbox` runs @Aida's **real agentic loop** against a real group's history
+`ask-sandbox` runs `@Aida`'s **real agentic loop** against a real group's history
 with tracing on, **sending nothing to WhatsApp** — so you can generate many
 inspectable traces on demand. Read-only (`search_chat` only SELECTs; this path
 never calls send/react). Needs a live Ollama + the Langfuse stack up +
@@ -122,4 +122,4 @@ npm run dev -- ask-sandbox --group 70 --questions ops/my-questions.txt   # your 
   ARGS=-v`.
 - The stack pulls Postgres, ClickHouse, Redis, MinIO, and two Langfuse images —
   a few hundred MB and real RAM. It's meant to be brought up while you're
-  actively watching @Aida, then taken down.
+  actively watching `@Aida`, then taken down.

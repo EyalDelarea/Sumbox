@@ -107,9 +107,9 @@ code** — run `npm run check --write` before committing. CI runs on GitHub-host
   re-run it to refresh the UI while the worker keeps its jobs and the collector keeps its
   session. The processes share only Postgres + RabbitMQ, so they're already decoupled.
 
-## Observability — @Aida agentic loop (opt-in, FULLY LOCAL)
+## Observability — `@Aida` agentic loop (opt-in, FULLY LOCAL)
 
-A self-hosted Langfuse gives the agentic @Aida loop a trace UI (steps, `search_chat`
+A self-hosted Langfuse gives the agentic `@Aida` loop a trace UI (steps, `search_chat`
 args/results, tokens, latency). **Off by default.** Full detail:
 `ops/runbooks/langfuse-observability.md`.
 
@@ -123,7 +123,7 @@ args/results, tokens, latency). **Off by default.** Full detail:
   `propagateAttributes` (NOT `experimental_telemetry`, which has no metadata field);
   `environment` via the `LANGFUSE_TRACING_ENVIRONMENT` env var.
 - **Sandbox eval (read-only, no WhatsApp sends):**
-  `npm run dev -- ask-sandbox --group <id> [--questions <file>]` runs @Aida's real agentic
+  `npm run dev -- ask-sandbox --group <id> [--questions <file>]` runs `@Aida`'s real agentic
   loop over a real group and traces each run under `environment=sandbox`. Default question
   set is the red-team probes (guardrails); `--questions` takes your own file (retrieval).
   Sibling of `ask-redteam` — `src/ops/ask-sandbox.ts`.
