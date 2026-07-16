@@ -30,6 +30,13 @@ export type AgenticDeps = {
   telemetry?: boolean;
   /** Trace-level attributes stamped on this run's spans (only when telemetry). */
   trace?: AgenticTrace;
+  /**
+   * Probe: message ids surfaced by each search_chat call, in rank order.
+   * Fired once per tool call, so a multi-step loop reports each step separately.
+   * Used by the eval harness to attribute a refusal to retrieval vs generation;
+   * prod passes nothing.
+   */
+  onRetrieved?: (messageIds: number[]) => void;
   /** Injectable for tests; defaults to the AI SDK. */
   generate?: GenerateFn;
   /** Injectable for tests; defaults to observability/langfuse.ts withTraceAttributes. */
@@ -48,6 +55,7 @@ export async function answerAgentic(
     embedder: deps.embedder,
     groupId: input.groupId,
     question: input.question,
+    ...(deps.onRetrieved ? { onRetrieved: deps.onRetrieved } : {}),
   });
   const opts = {
     model: deps.model,

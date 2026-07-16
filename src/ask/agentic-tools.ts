@@ -15,6 +15,17 @@ export function makeSearchChatTool(deps: {
   embedder: Embedder;
   groupId: number;
   question: string;
+  /**
+   * Probe: every message id this tool surfaced, in rank order, once per call.
+   *
+   * Exists for the eval harness, which must separate "she never saw the message"
+   * (retrieval) from "she saw it and denied anyway" (generation) — the two halves
+   * of the false-denial metric. Without it, an end-to-end run can only observe
+   * that she refused, not why, and the bug is unattributable.
+   *
+   * Optional and side-effect-only: prod passes nothing and behaviour is unchanged.
+   */
+  onRetrieved?: (messageIds: number[]) => void;
 }) {
   return tool({
     description:
@@ -28,6 +39,9 @@ export function makeSearchChatTool(deps: {
         { embedding, text: query },
         8,
       );
+      // Report BEFORE the empty-hits bail: "searched and found nothing" and
+      // "never searched" are different bugs, and the probe must distinguish them.
+      deps.onRetrieved?.(hits.map((h) => h.messageId));
       if (hits.length === 0) return "(no matching messages)";
       const lines = hits.map(
         (h) => `${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
