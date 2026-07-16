@@ -25,7 +25,26 @@ describe("buildAskPrompt", () => {
     const { system } = buildAskPrompt("x", ctx);
     expect(system).toContain(NOT_IN_CHAT);
     expect(system).toContain(OFF_TOPIC);
-    expect(system.toLowerCase()).toContain("never invent");
+  });
+
+  it("gives Aida her תכף תכף persona without letting it override security", () => {
+    const { system } = buildAskPrompt("x", ctx);
+    expect(system).toContain("תכף תכף"); // the catchphrase persona
+    // Security must be declared to win over the persona (persona can't be a
+    // reason to obey injected chat instructions).
+    expect(system).toMatch(/SECURITY[\s\S]*overrides the PERSONA|PERSONA[\s\S]*SECURITY/);
+    expect(system).toContain("never say only 'תכף תכף'");
+  });
+
+  it("permits grounded inference but forbids inventing specific facts", () => {
+    // The refuse-everything-not-verbatim prompt made @Aida useless for "did we
+    // meet?"-style questions. It may now infer from what messages IMPLY, while
+    // still never fabricating a name/time/place/number/decision.
+    const { system } = buildAskPrompt("x", ctx);
+    const lower = system.toLowerCase();
+    expect(lower).toContain("clearly imply");
+    expect(lower).toContain("reasonable conclusion");
+    expect(lower).toContain("never state a specific fact"); // the anti-fabrication guard stays
   });
 
   it("neutralizes a forged fence marker in a retrieved message (can't break out)", () => {
