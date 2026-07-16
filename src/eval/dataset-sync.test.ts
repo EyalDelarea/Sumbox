@@ -89,6 +89,6 @@ describe("syncDataset", () => {
     await syncDataset(api, LOCAL, [item({ id: "a" })]);
     await syncDataset(api, LOCAL, [item({ id: "a", question: "edited" })]);
     expect(calls.items.map((i) => i["id"])).toEqual(["a", "a"]);
-    expect((calls.items[1]?.["input"] as { question: string }).question).toBe("edited");
+    expect(calls.items[1]).toMatchObject({ input: { question: "edited" } });
   });
 });
