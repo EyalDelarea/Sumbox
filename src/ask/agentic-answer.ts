@@ -2,7 +2,7 @@ import { type LanguageModel, generateText as sdkGenerateText, stepCountIs } from
 import type pg from "pg";
 import { makeSearchChatTool } from "./agentic-tools.js";
 import type { Embedder } from "./embedder.js";
-import { buildAgenticSystem, NOT_IN_CHAT } from "./prompt.js";
+import { buildAgenticSystem, NOT_IN_CHAT, neutralizeFence } from "./prompt.js";
 
 type GenerateFn = (
   opts: Parameters<typeof sdkGenerateText>[0],
@@ -33,7 +33,7 @@ export async function answerAgentic(
   const { text } = await generate({
     model: deps.model,
     system: buildAgenticSystem(),
-    prompt: input.question,
+    prompt: neutralizeFence(input.question),
     stopWhen: stepCountIs(deps.maxSteps ?? 3),
     tools: { search_chat: searchChat },
   } as Parameters<typeof sdkGenerateText>[0]);

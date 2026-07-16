@@ -1,7 +1,9 @@
 import { tool } from "ai";
 import type pg from "pg";
 import { z } from "zod";
+import { resolveSenderName } from "../summarization/sender-name.js";
 import type { Embedder } from "./embedder.js";
+import { fenceRetrieved, neutralizeFence } from "./prompt.js";
 import { searchMessagesHybrid } from "./retrieval.js";
 
 /** The one Slice-1 tool: search THIS group's history. groupId + the original
@@ -27,7 +29,10 @@ export function makeSearchChatTool(deps: {
         8,
       );
       if (hits.length === 0) return "(no matching messages)";
-      return hits.map((h) => `${h.sender}: ${h.content}`).join("\n");
+      const lines = hits.map(
+        (h) => `${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
+      );
+      return fenceRetrieved(lines);
     },
   });
 }

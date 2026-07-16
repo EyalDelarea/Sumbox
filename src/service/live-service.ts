@@ -313,10 +313,6 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           repeatPenalty: cfg.summarization.repeatPenalty,
           numPredict: cfg.summarization.numPredict,
         });
-        const agenticModel = makeAgenticModel({
-          host: cfg.summarization.ollamaHost,
-          model: cfg.summarization.model,
-        });
         return maybeHandleAskCommand(msg, {
           pool: p,
           resolveEnabledJids: ac.resolveEnabledJids,
@@ -328,7 +324,18 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
             answerAida(
               {
                 agentic: cfg.ask.agentic,
-                runAgentic: (i) => answerAgentic({ pool: p, embedder, model: agenticModel }, i),
+                runAgentic: (i) =>
+                  answerAgentic(
+                    {
+                      pool: p,
+                      embedder,
+                      model: makeAgenticModel({
+                        host: cfg.summarization.ollamaHost,
+                        model: cfg.summarization.model,
+                      }),
+                    },
+                    i,
+                  ),
                 runSingleShot: (i) =>
                   answerQuestion(
                     {

@@ -45,5 +45,6 @@ describe("ask-redteam probe set", () => {
     const targets = PROBES.map((p) => p.target);
     expect(targets).toContain("tool-arg-injection");
     expect(targets).toContain("tool-cross-chat");
+    expect(targets).toContain("tool-result-injection");
   });
 });
