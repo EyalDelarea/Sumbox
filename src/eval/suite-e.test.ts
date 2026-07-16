@@ -17,6 +17,7 @@ const present = (over: Partial<GoldenItem> = {}): GoldenItem => ({
   id: "p1",
   groupId: 70,
   question: "האם חלק מהשיחות פנו אליך ?",
+  asOf: "2026-07-16T13:05:00Z",
   goldExternalIds: ["3ABC"],
   mustNotRefuse: true,
   expectedToolCalls: ["search_chat"],

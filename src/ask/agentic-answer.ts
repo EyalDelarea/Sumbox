@@ -43,6 +43,16 @@ export type AgenticDeps = {
    * prod passes nothing.
    */
   onRetrieved?: (messageIds: number[]) => void;
+  /**
+   * Probe: the recency window's message ids.
+   *
+   * SEPARATE from onRetrieved because the window is context she never asked for,
+   * while onRetrieved is context she went looking for — the eval harness must
+   * union them to know what was IN CONTEXT, but keep them apart to tell whether
+   * she searched. Counting only search results would blame retrieval for a
+   * refusal she made while holding the answer in the window.
+   */
+  onWindow?: (messageIds: number[]) => void;
   /** Injectable for tests; defaults to the AI SDK. */
   generate?: GenerateFn;
   /** Injectable for tests; defaults to observability/langfuse.ts withTraceAttributes. */
@@ -81,6 +91,8 @@ export async function answerAgentic(
     asOf: input.asOf ?? new Date(),
     ...(input.excludeExternalId ? { excludeExternalId: input.excludeExternalId } : {}),
   });
+
+  deps.onWindow?.(window.map((m) => m.messageId));
 
   const opts = {
     model: deps.model,

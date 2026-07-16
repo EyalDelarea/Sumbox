@@ -60,6 +60,7 @@ async function resolveGold(pool: pg.Pool | pg.PoolClient, item: GoldenItem): Pro
  */
 export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOutput> {
   const retrieved: number[][] = [];
+  let windowIds: number[] = [];
   const goldIds = await resolveGold(deps.pool, item);
   const answerFn = deps.answer ?? answerAgentic;
 
@@ -75,13 +76,19 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
         tags: ["aida", "eval", ...item.slice],
       },
       onRetrieved: (ids) => retrieved.push(ids),
+      onWindow: (ids) => {
+        windowIds = ids;
+      },
     },
-    { groupId: item.groupId, question: item.question },
+    { groupId: item.groupId, question: item.question, asOf: new Date(item.asOf) },
   );
 
   return {
     answer,
-    retrievedIds: [...new Set(retrieved.flat())],
+    // What was IN CONTEXT = what she searched for ∪ what she was handed.
+    // Omitting the window would misattribute a refusal-with-the-answer-present
+    // to retrieval, hiding the generation bug this harness exists to find.
+    retrievedIds: [...new Set([...retrieved.flat(), ...windowIds])],
     goldIds,
     toolCalls: retrieved.length,
   };

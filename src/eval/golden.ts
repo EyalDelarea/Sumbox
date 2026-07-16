@@ -39,6 +39,15 @@ export type GoldenItem = {
   /** Exactly what a user would send, MINUS the @אידה tag (matchAskTrigger strips it). */
   question: string;
   /**
+   * The moment the question was asked — the conversational "now" for this item.
+   *
+   * Without it the recency window anchors on wall-clock, so an item replays
+   * against whatever happens to be recent TODAY rather than what was on screen
+   * when the question was asked. That both breaks the replay and makes runs
+   * incomparable as the live corpus grows: this is the corpus pin.
+   */
+  asOf: string;
+  /**
    * WhatsApp external_ids that answer the question. Empty means D_absent — the
    * answer genuinely is NOT in the chat and a refusal is CORRECT.
    */
@@ -96,6 +105,9 @@ function validate(v: unknown, line: number): GoldenItem {
   if (typeof o["id"] !== "string" || !o["id"]) fail("`id` must be a non-empty string");
   if (typeof o["groupId"] !== "number") fail("`groupId` must be a number");
   if (typeof o["question"] !== "string" || !o["question"]) fail("`question` must be non-empty");
+  if (typeof o["asOf"] !== "string" || Number.isNaN(Date.parse(o["asOf"] as string))) {
+    fail("`asOf` must be an ISO timestamp — it pins the corpus so runs stay comparable");
+  }
   if (!Array.isArray(o["goldExternalIds"])) fail("`goldExternalIds` must be an array");
   if (typeof o["mustNotRefuse"] !== "boolean") fail("`mustNotRefuse` must be a boolean");
   if (!Array.isArray(o["slice"]) || o["slice"].length === 0) fail("`slice` must be non-empty");

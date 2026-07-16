@@ -8,6 +8,7 @@ const item = (over: Partial<GoldenItem> = {}): GoldenItem => ({
   id: "p1",
   groupId: 70,
   question: "מה נאמר?",
+  asOf: "2026-07-16T13:05:00Z",
   goldExternalIds: ["3ABC"],
   mustNotRefuse: true,
   expectedToolCalls: ["search_chat"],

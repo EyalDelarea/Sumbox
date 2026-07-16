@@ -52,6 +52,7 @@ const item = (over: Partial<GoldenItem> = {}): GoldenItem => ({
   id: "i1",
   groupId: 0,
   question: "מה נאמר על הפגישה",
+  asOf: "2026-07-16T13:05:00Z",
   goldExternalIds: [],
   mustNotRefuse: false,
   slice: ["test"],

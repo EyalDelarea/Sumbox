@@ -53,7 +53,11 @@ describe("selectRecentMessages", () => {
     await seed(pool, g, "שני", "rw1-b", "2026-07-16T13:01:00Z");
     await seed(pool, g, "שלישי", "rw1-c", "2026-07-16T13:02:00Z");
 
-    const w = await selectRecentMessages(pool, { groupId: g, n: 2, asOf: T("2026-07-16T13:05:00Z") });
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 2,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
     // The LAST two, in chronological order.
     expect(w.map((m) => m.content)).toEqual(["שני", "שלישי"]);
   });
@@ -65,7 +69,11 @@ describe("selectRecentMessages", () => {
     await seed(pool, g, "לפני", "rw2-a", "2026-07-16T13:00:00Z");
     await seed(pool, g, "אחרי", "rw2-b", "2026-07-16T13:10:00Z");
 
-    const w = await selectRecentMessages(pool, { groupId: g, n: 10, asOf: T("2026-07-16T13:05:00Z") });
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
     expect(w.map((m) => m.content)).toEqual(["לפני"]);
   });
 
@@ -75,7 +83,11 @@ describe("selectRecentMessages", () => {
     await seed(pool, a, "של קבוצה א", "rw3-a", "2026-07-16T13:00:00Z");
     await seed(pool, b, "הסוד של קבוצה ב", "rw3-b", "2026-07-16T13:00:00Z");
 
-    const w = await selectRecentMessages(pool, { groupId: a, n: 10, asOf: T("2026-07-16T13:05:00Z") });
+    const w = await selectRecentMessages(pool, {
+      groupId: a,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
     expect(w.map((m) => m.content)).toEqual(["של קבוצה א"]);
   });
 
@@ -86,7 +98,11 @@ describe("selectRecentMessages", () => {
     await seed(pool, g, "תכף תכף... לא מצאתי.", "rw4-b", "2026-07-16T13:01:00Z");
     await recordAidaMessage(pool, { groupId: g, externalId: "rw4-b" });
 
-    const w = await selectRecentMessages(pool, { groupId: g, n: 10, asOf: T("2026-07-16T13:05:00Z") });
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
     expect(w.map((m) => m.isAida)).toEqual([false, true]);
   });
 
@@ -110,7 +126,11 @@ describe("selectRecentMessages", () => {
     const g = await upsertGroup(pool, { name: "RW-6", source: "live" });
     await seed(pool, g, "הודעה בלי embedding", "rw6-a", "2026-07-16T13:00:00Z");
 
-    const w = await selectRecentMessages(pool, { groupId: g, n: 10, asOf: T("2026-07-16T13:05:00Z") });
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
     expect(w).toHaveLength(1);
   });
 
@@ -119,7 +139,11 @@ describe("selectRecentMessages", () => {
     await seed(pool, g, "אמיתי", "rw7-a", "2026-07-16T13:00:00Z");
     await seed(pool, g, "", "rw7-b", "2026-07-16T13:01:00Z");
 
-    const w = await selectRecentMessages(pool, { groupId: g, n: 10, asOf: T("2026-07-16T13:05:00Z") });
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
     expect(w.map((m) => m.content)).toEqual(["אמיתי"]);
   });
 });

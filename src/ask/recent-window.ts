@@ -20,8 +20,8 @@
  */
 
 import type pg from "pg";
-import { CONTENT_EXPR, CONTENT_JOINS } from "../db/repositories/message-embeddings.js";
 import type { RetrievedMessage } from "../db/repositories/message-embeddings.js";
+import { CONTENT_EXPR, CONTENT_JOINS } from "../db/repositories/message-embeddings.js";
 
 /** A window message, plus who wrote it. */
 export type WindowMessage = RetrievedMessage & {
