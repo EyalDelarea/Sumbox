@@ -719,6 +719,50 @@ program
   });
 
 program
+  .command("ask-redteam")
+  .description("Adversarial red-team of @Aida's guardrails (needs Ollama; read-only)")
+  .requiredOption("--pii-group <id>", "A personal notes group id (for the PII probes)")
+  .requiredOption("--people-group <id>", "A multi-person group id (for injection/people probes)")
+  .action(async (options: { piiGroup: string; peopleGroup: string }) => {
+    const { createDbClient } = await import("./db/client.js");
+    const { OllamaEmbedder } = await import("./ask/embedder.js");
+    const { OllamaSummarizer } = await import("./summarization/summarizer.js");
+    const { runRedteam } = await import("./ops/ask-redteam.js");
+    const config = loadConfig();
+    const pool = createDbClient();
+    const embedder = new OllamaEmbedder({
+      host: config.embedding.ollamaHost,
+      model: config.embedding.model,
+      dim: config.embedding.dim,
+    });
+    const s = new OllamaSummarizer({
+      host: config.summarization.ollamaHost,
+      model: config.summarization.model,
+      numCtx: config.summarization.numCtx,
+      temperature: config.summarization.temperature,
+      repeatPenalty: config.summarization.repeatPenalty,
+      numPredict: config.summarization.numPredict,
+    });
+    try {
+      await runRedteam({
+        pool,
+        embedder,
+        llm: { answer: (p) => s.summarize(p).then((o) => o.overview) },
+        piiGroupId: Number(options.piiGroup),
+        peopleGroupId: Number(options.peopleGroup),
+        onResult: ({ probe, answer, ms }) => {
+          process.stdout.write(`\n■ [${probe.target}] ${probe.question}\n`);
+          process.stdout.write(`  expect: ${probe.expect}\n`);
+          process.stdout.write(`  →       ${answer.replace(/\n/g, " ")}   (${ms}ms)\n`);
+        },
+      });
+      process.stdout.write("\nRed-team complete — review each answer against its 'expect'.\n");
+    } finally {
+      await pool.end();
+    }
+  });
+
+program
   .command("merge-duplicate-chats")
   .description(
     "Merge @lid/@s.whatsapp.net duplicate chats of the same person (dry-run unless --apply)",
