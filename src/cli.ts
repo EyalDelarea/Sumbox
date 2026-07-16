@@ -770,6 +770,71 @@ program
   });
 
 program
+  .command("ask-sandbox")
+  .description(
+    "Run @Aida's agentic loop over a real group with Langfuse tracing, no sends (needs Ollama + local Langfuse)",
+  )
+  .requiredOption("--group <id>", "The group id to run the probes against")
+  .action(async (options: { group: string }) => {
+    const { createDbClient } = await import("./db/client.js");
+    const { OllamaEmbedder } = await import("./ask/embedder.js");
+    const { makeAgenticModel } = await import("./ask/ai-model.js");
+    const { runSandbox } = await import("./ops/ask-sandbox.js");
+    const config = loadConfig();
+    const pool = createDbClient();
+    const embedder = new OllamaEmbedder({
+      host: config.embedding.ollamaHost,
+      model: config.embedding.model,
+      dim: config.embedding.dim,
+    });
+    const model = makeAgenticModel({
+      host: config.summarization.ollamaHost,
+      model: config.summarization.model,
+    });
+
+    // Separate these runs from live @Aida in Langfuse's "environment" filter.
+    // Must be set BEFORE the span processor is constructed (it reads env then).
+    process.env.LANGFUSE_TRACING_ENVIRONMENT = "sandbox";
+    let flushTelemetry: (() => Promise<void>) | null = null;
+    if (config.langfuse.enabled) {
+      const { createLangfuseTelemetry, defaultLangfuseDeps } = await import(
+        "./observability/langfuse.js"
+      );
+      const telemetry = createLangfuseTelemetry(
+        defaultLangfuseDeps({
+          baseUrl: config.langfuse.baseUrl,
+          publicKey: config.langfuse.publicKey,
+          secretKey: config.langfuse.secretKey,
+        }),
+      );
+      telemetry.start();
+      flushTelemetry = () => telemetry.shutdown();
+      process.stdout.write("Tracing → local Langfuse (environment=sandbox)\n");
+    } else {
+      process.stdout.write("⚠ LANGFUSE_ENABLED not set — running without tracing (answers only)\n");
+    }
+
+    try {
+      await runSandbox({
+        pool,
+        embedder,
+        model,
+        group: Number(options.group),
+        onResult: ({ probe, answer, ms }) => {
+          process.stdout.write(`\n■ [${probe.target}] ${probe.question}\n`);
+          process.stdout.write(`  expect: ${probe.expect}\n`);
+          process.stdout.write(`  →       ${answer.replace(/\n/g, " ")}   (${ms}ms)\n`);
+        },
+      });
+      process.stdout.write("\nSandbox complete — inspect the traces in Langfuse (env=sandbox).\n");
+    } finally {
+      // Flush the trace batch BEFORE the process exits, else the last runs are lost.
+      await flushTelemetry?.().catch(() => {});
+      await pool.end();
+    }
+  });
+
+program
   .command("merge-duplicate-chats")
   .description(
     "Merge @lid/@s.whatsapp.net duplicate chats of the same person (dry-run unless --apply)",
