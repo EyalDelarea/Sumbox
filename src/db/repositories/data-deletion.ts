@@ -129,6 +129,10 @@ export async function deleteAllData(client: pg.Pool | pg.PoolClient): Promise<De
  */
 export const UNSELECTED_PURGE_GROUP_TABLES = [
   "messages",
+  // @Aida's own replies in this chat — chat content like any other, and the
+  // group row SURVIVES the unselected purge, so its ON DELETE CASCADE would
+  // never fire and these would outlive the conversation they belong to.
+  "aida_messages",
   "summaries",
   "read_watermarks",
   "summary_user_marks",

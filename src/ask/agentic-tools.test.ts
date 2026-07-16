@@ -115,3 +115,56 @@ describe("makeSearchChatTool", () => {
     expect(out).toContain("משתתף לא ידוע"); // resolved unknown-sender label
   });
 });
+
+describe("onRetrieved probe", () => {
+  let pool: pg.Pool;
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  it("reports the retrieved message ids", async () => {
+    const g = await upsertGroup(pool, { name: "AT-probe", source: "import" });
+    const id = await seed(pool, g, "רועי שאל משהו", "at-probe-1", 3);
+    const seen: number[][] = [];
+    const t = makeSearchChatTool({
+      pool,
+      embedder: { embed: async () => vec(3) },
+      groupId: g,
+      question: "q",
+      onRetrieved: (ids) => seen.push(ids),
+    });
+    await t.execute?.({ query: "רועי" }, {} as never);
+    expect(seen).toEqual([[id]]);
+  });
+
+  it("reports an EMPTY array when the search found nothing", async () => {
+    // "searched and found nothing" and "never searched" are different bugs, so
+    // the probe must fire either way or the harness cannot tell them apart.
+    const g = await upsertGroup(pool, { name: "AT-probe-empty", source: "import" });
+    const seen: number[][] = [];
+    const t = makeSearchChatTool({
+      pool,
+      embedder: { embed: async () => vec(4) },
+      groupId: g,
+      question: "q",
+      onRetrieved: (ids) => seen.push(ids),
+    });
+    await t.execute?.({ query: "כלום" }, {} as never);
+    expect(seen).toEqual([[]]);
+  });
+
+  it("is optional — the prod path omits it and is unaffected", async () => {
+    const g = await upsertGroup(pool, { name: "AT-probe-none", source: "import" });
+    await seed(pool, g, "טקסט כלשהו", "at-probe-2", 5);
+    const t = makeSearchChatTool({
+      pool,
+      embedder: { embed: async () => vec(5) },
+      groupId: g,
+      question: "q",
+    });
+    await expect(t.execute?.({ query: "טקסט" }, {} as never)).resolves.toBeDefined();
+  });
+});

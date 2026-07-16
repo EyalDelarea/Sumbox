@@ -4,10 +4,12 @@ import type { Embedder } from "./embedder.js";
 import {
   type AskContextMessage,
   type AskPrompt,
+  type AskWindowMessage,
   buildAskPrompt,
   NOT_IN_CHAT,
   NOT_INDEXED,
 } from "./prompt.js";
+import { selectRecentMessages } from "./recent-window.js";
 import { searchMessagesHybrid } from "./retrieval.js";
 
 /** Generates the answer text from a built prompt (wraps the Ollama LLM). */
@@ -23,10 +25,14 @@ export type AnswerDeps = {
   retrieveK?: number;
   /** Max estimated prompt tokens; oldest retrieved messages are dropped to fit. */
   tokenBudget?: number;
+  /** How many recent messages to always show. Default 20. */
+  windowN?: number;
 };
 
 const DEFAULT_K = 40;
 const DEFAULT_TOKEN_BUDGET = 8000;
+/** Enough to cover a live exchange without crowding out search hits. */
+const DEFAULT_WINDOW_N = 20;
 
 /**
  * Answer one question for a VERIFIED group id, grounded only in that group's
@@ -41,27 +47,43 @@ const DEFAULT_TOKEN_BUDGET = 8000;
  */
 export async function answerQuestion(
   deps: AnswerDeps,
-  input: { groupId: number; question: string },
+  input: { groupId: number; question: string; asOf?: Date; excludeExternalId?: string },
 ): Promise<string> {
   const k = deps.retrieveK ?? DEFAULT_K;
   const budget = deps.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
+  const windowN = deps.windowN ?? DEFAULT_WINDOW_N;
 
   const queryEmbedding = await deps.embedder.embed(input.question);
-  const retrieved = await searchMessagesHybrid(
-    deps.pool,
-    input.groupId,
-    { embedding: queryEmbedding, text: input.question },
-    k,
-  );
-  if (retrieved.length === 0) {
-    // Empty means this group has NO embedded content messages — i.e. it isn't
-    // indexed yet, an operational state — NOT that the answer wasn't discussed.
-    // Say so honestly instead of falsely claiming "not in the chat".
-    return NOT_INDEXED;
-  }
+  const [retrieved, window] = await Promise.all([
+    searchMessagesHybrid(
+      deps.pool,
+      input.groupId,
+      { embedding: queryEmbedding, text: input.question },
+      k,
+    ),
+    selectRecentMessages(deps.pool, {
+      groupId: input.groupId,
+      n: windowN,
+      // The trigger's sent_at is the conversational "now"; default to wall-clock
+      // only when a caller has none to give.
+      asOf: input.asOf ?? new Date(),
+      ...(input.excludeExternalId ? { excludeExternalId: input.excludeExternalId } : {}),
+    }),
+  ]);
 
-  const context = fitToBudget(input.question, retrieved, budget);
-  const answer = await deps.llm.answer(buildAskPrompt(input.question, context));
+  // NOT_INDEXED means the group has no embedded content — an operational state,
+  // not "it wasn't discussed". But the window reads raw messages, so if it has
+  // anything we can still answer honestly from what is right there; claiming "no
+  // access" while holding the last 20 messages would be its own false statement.
+  if (retrieved.length === 0 && window.length === 0) return NOT_INDEXED;
+
+  // Search hits already in the window would be rendered twice — wasted budget,
+  // and duplicate evidence reads as corroboration to the model.
+  const windowIds = new Set(window.map((m) => m.messageId));
+  const deduped = retrieved.filter((m) => !windowIds.has(m.messageId));
+
+  const context = fitToBudget(input.question, deduped, budget, window);
+  const answer = await deps.llm.answer(buildAskPrompt(input.question, context, window));
   const trimmed = answer.trim();
   return trimmed.length > 0 ? trimmed : NOT_IN_CHAT;
 }
@@ -71,17 +93,23 @@ export async function answerQuestion(
  * returns messages chronologically; the most recent are usually the most
  * relevant to a "did we…?" question, so recency is the tiebreak when trimming.
  * Always keeps at least one message.
+ *
+ * The window is PINNED: it is passed through for measurement but never trimmed.
+ * Trimming it would evict the only thing that can answer "what just happened" —
+ * the exact bug the window exists to fix — and would do so silently, on precisely
+ * the long conversations where recency matters most.
  */
 function fitToBudget(
   question: string,
   messages: AskContextMessage[],
   budget: number,
+  window: AskWindowMessage[] = [],
 ): AskContextMessage[] {
   let ctx = messages;
   while (ctx.length > 1) {
-    const p = buildAskPrompt(question, ctx);
+    const p = buildAskPrompt(question, ctx, window);
     if (estimateTokens(p.system + p.user) <= budget) break;
-    ctx = ctx.slice(1); // drop the oldest
+    ctx = ctx.slice(1); // drop the oldest SEARCH hit; never the window
   }
   return ctx;
 }

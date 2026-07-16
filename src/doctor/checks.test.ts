@@ -87,6 +87,8 @@ describe("checkEntries", () => {
       "Ollama reachable + model pulled",
       "Python + faster-whisper importable",
       "ffmpeg on PATH",
+      // App health last — every infra check above is a prerequisite for it.
+      "@Aida embeddings current",
     ]);
     for (const e of entries) expect(e.fix.length).toBeGreaterThan(0);
   });
@@ -105,8 +107,21 @@ describe("checkEntries", () => {
   });
 
   it("uses the default (fail) probe-error policy for every other check", () => {
-    const others = checkEntries(fakeConfig()).filter((e) => !e.name.startsWith("DB indexes"));
+    // Both exceptions defer a DB outage to the Postgres check rather than
+    // reporting it a second time.
+    const others = checkEntries(fakeConfig()).filter(
+      (e) => !e.name.startsWith("DB indexes") && !e.name.startsWith("@Aida"),
+    );
     for (const e of others) expect(e.onProbeError).toBeUndefined();
+  });
+
+  it("marks the @Aida embedding check advisory, not a hard failure", () => {
+    // A stale sweep degrades @Aida without breaking Sumbox — and in split-dev it
+    // is simply what "the worker isn't running" looks like. Failing hard there
+    // would make the doctor cry wolf every time only dev-ui is up.
+    const aida = checkEntries(fakeConfig()).find((e) => e.name.startsWith("@Aida"));
+    expect(aida?.level).toBe("warn");
+    expect(aida?.onProbeError).toBe("pass");
   });
 });
 
@@ -150,6 +165,6 @@ describe("runChecks", () => {
 
   it("defaultChecks wires the full table into runnable thunks", async () => {
     const checks = defaultChecks(fakeConfig());
-    expect(checks).toHaveLength(8);
+    expect(checks).toHaveLength(9);
   });
 });

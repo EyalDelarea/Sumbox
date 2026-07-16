@@ -14,6 +14,7 @@
 
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
+import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { matchAskTrigger } from "./ask-trigger.js";
 import { mapWaMessage } from "./message-mapper.js";
 
@@ -46,6 +47,26 @@ export type AskCommandDeps = {
   log?: MinimalLog;
 };
 
+/**
+ * The id of the message this one quotes, if any.
+ *
+ * Baileys hangs contextInfo off whichever message variant carries it; a text
+ * reply is extendedTextMessage, but a reply with an image/video/etc. carries its
+ * own. Checking only the text variant would silently drop reply-threads on any
+ * media reply.
+ */
+function quotedStanzaId(msg: WAMessage): string | null {
+  const m = msg.message;
+  const ctx =
+    m?.extendedTextMessage?.contextInfo ??
+    m?.imageMessage?.contextInfo ??
+    m?.videoMessage?.contextInfo ??
+    m?.audioMessage?.contextInfo ??
+    m?.documentMessage?.contextInfo ??
+    m?.stickerMessage?.contextInfo;
+  return ctx?.stanzaId ?? null;
+}
+
 /** Ignore replayed/history messages (reconnect batches) — act on live only. */
 const LIVENESS_WINDOW_MS = 120_000;
 /** Sent when the LLM/retrieval fails, so a failed @Aida isn't a silent no-op. */
@@ -66,11 +87,16 @@ export async function maybeHandleAskCommand(
   if (!mapped) return false;
 
   const text = (mapped.textContent ?? "").trim();
-  // Cheap pre-gate: no "@" → ordinary chatter never touches the DB or the regex.
-  if (!text.includes("@")) return false;
-
+  const quotedId = quotedStanzaId(msg);
   const match = matchAskTrigger(text);
-  if (!match || match.question.length === 0) return false; // bare "@Aida" → nothing to answer
+
+  // Cheap pre-gate: fire only for an @Aida tag OR a quoted reply. Ordinary
+  // chatter still never touches the DB. A reply costs one extra lookup, but only
+  // after the group is verified as allowlisted (below) — never for a random chat.
+  if (!match && !quotedId) return false;
+  // Nothing to answer: a bare "@Aida", or an empty reply body.
+  if (text.length === 0) return false;
+  if (match && match.question.length === 0 && !quotedId) return false;
 
   let allowlist: ReadonlySet<string>;
   try {
@@ -130,6 +156,33 @@ export async function maybeHandleAskCommand(
     }
     groupId = Number(group.id);
 
+    /**
+     * Resolve WHAT she was asked, and whether this message is for her at all.
+     *
+     * Two ways in:
+     *  - an @Aida tag → the question is the text minus the tag;
+     *  - a reply quoting a message SHE sent → the whole text is the question,
+     *    no tag needed. Swipe-replying to her is an unambiguous act of
+     *    addressing her, and requiring "@אידה" on every turn makes a
+     *    back-and-forth unusable.
+     *
+     * The quoted message may be ANY age: thread age and the liveness window are
+     * different concerns — liveness exists to ignore replayed history batches on
+     * reconnect, not to expire a conversation.
+     *
+     * Only her OWN messages count. from_me is true for the owner's messages too,
+     * so without the marker a reply to Eyal's own message would wake her.
+     */
+    let question = match?.question ?? "";
+    if (!match || question.length === 0) {
+      if (!quotedId || !(await isAidaMessage(deps.pool, { groupId, externalId: quotedId }))) {
+        return false; // a reply to someone else, or a bare tag — not for her
+      }
+      question = text;
+      deps.log?.info({ groupId }, "@Aida: reply-thread continued");
+    }
+    if (question.length === 0) return false;
+
     if (deps.inFlight.has(groupId)) {
       deps.log?.info({ groupId }, "@Aida: already answering, skipping");
       return false;
@@ -139,8 +192,30 @@ export async function maybeHandleAskCommand(
 
     await react("⏳");
     // groupId is the VERIFIED inbound id — the privacy boundary for retrieval.
-    const answer = await deps.answer({ groupId, question: match.question });
-    await deps.sendText(jid, answer, { quoted: msg });
+    const answer = await deps.answer({ groupId, question });
+    const sent = await deps.sendText(jid, answer, { quoted: msg });
+    // Record HER OWN message id, here and now.
+    //
+    // This is the only moment the system knows a message is hers: WhatsApp echoes
+    // it back and the collector ingests it through the same generic path as
+    // everyone else's, with no way to tell it apart. Writing at send time (rather
+    // than marking the ingested row) is what makes the marker immune to whether —
+    // or when — that echo arrives.
+    //
+    // Best-effort: a failure here costs reply-threading on ONE message and must
+    // never turn a delivered answer into a ❌ + error reply.
+    const externalId = sent?.key?.id;
+    if (externalId) {
+      try {
+        await recordAidaMessage(deps.pool, {
+          groupId,
+          externalId,
+          question,
+        });
+      } catch (err) {
+        deps.log?.warn({ err, groupId, externalId }, "@Aida: failed to record own message id");
+      }
+    }
     await react("✅");
     deps.log?.info({ groupId }, "@Aida: replied");
     return true;

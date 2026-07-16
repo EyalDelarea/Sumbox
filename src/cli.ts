@@ -858,6 +858,122 @@ program
   });
 
 program
+  .command("aida-eval")
+  .description(
+    "Run @Aida's eval suites over the golden set (read-only, no sends; needs Ollama + local Langfuse)",
+  )
+  .option("--golden <file>", "Golden set JSONL", "eval/golden/aida.jsonl")
+  .option("--suite <name>", "retrieval | e2e | all", "all")
+  .option("--run-name <name>", "Dataset run name — this is what runs are compared BY")
+  .option("--sync", "Sync the golden set to the local Langfuse dataset first")
+  .action(async (options: { golden: string; suite: string; runName?: string; sync?: boolean }) => {
+    const { createDbClient } = await import("./db/client.js");
+    const { OllamaEmbedder } = await import("./ask/embedder.js");
+    const { makeAgenticModel } = await import("./ask/ai-model.js");
+    const { loadGolden } = await import("./eval/golden.js");
+    const config = loadConfig();
+
+    if (!fs.existsSync(options.golden)) {
+      process.stderr.write(
+        `Error: golden set not found: ${options.golden}\n` +
+          "It is gitignored by design (it quotes real group messages), so a fresh\n" +
+          "clone has none — create it or point --golden elsewhere.\n",
+      );
+      process.exit(1);
+    }
+    const items = loadGolden(options.golden);
+    const pool = createDbClient();
+    const embedder = new OllamaEmbedder({
+      host: config.embedding.ollamaHost,
+      model: config.embedding.model,
+      dim: config.embedding.dim,
+    });
+
+    try {
+      if (options.sync) {
+        const { LangfuseClient } = await import("@langfuse/client");
+        const { syncDataset, langfuseDatasetApi } = await import("./eval/dataset-sync.js");
+        // Throws on a non-local baseUrl: golden items quote real group messages.
+        const r = await syncDataset(
+          langfuseDatasetApi(new LangfuseClient() as never),
+          { baseUrl: config.langfuse.baseUrl, datasetName: "aida-golden" },
+          items,
+        );
+        process.stdout.write(`Synced ${r.synced} item(s) → dataset "${r.dataset}"\n`);
+      }
+
+      if (options.suite === "retrieval" || options.suite === "all") {
+        const { runSuiteR } = await import("./eval/suite-r.js");
+        const s = await runSuiteR({ pool, embedder }, items);
+        process.stdout.write(`\n── Suite R (retrieval, no LLM) — ${s.n} item(s) ──\n`);
+        for (const [arm, m] of Object.entries(s.byArm)) {
+          process.stdout.write(
+            `  ${arm.padEnd(9)} hitRate=${m.hitRate.toFixed(2)}  recall=${m.meanRecall.toFixed(2)}  mrr=${m.mrr.toFixed(3)}\n`,
+          );
+        }
+        // Gate on the recency slice, not the aggregate: an aggregate hides a
+        // collapse in <5m behind healthy items.
+        for (const [slice, m] of Object.entries(s.bySlice)) {
+          process.stdout.write(
+            `  slice ${slice.padEnd(26)} n=${m.n} hitRate=${m.hitRate.toFixed(2)}\n`,
+          );
+        }
+      }
+
+      if (options.suite === "e2e" || options.suite === "all") {
+        process.env.LANGFUSE_TRACING_ENVIRONMENT = "eval";
+        let flush: (() => Promise<void>) | null = null;
+        if (config.langfuse.enabled) {
+          const { createLangfuseTelemetry, defaultLangfuseDeps } = await import(
+            "./observability/langfuse.js"
+          );
+          const t = createLangfuseTelemetry(
+            defaultLangfuseDeps({
+              baseUrl: config.langfuse.baseUrl,
+              publicKey: config.langfuse.publicKey,
+              secretKey: config.langfuse.secretKey,
+            }),
+          );
+          t.start();
+          flush = () => t.shutdown();
+        }
+        const { runSuiteE } = await import("./eval/run-e.js");
+        const model = makeAgenticModel({
+          host: config.summarization.ollamaHost,
+          model: config.summarization.model,
+        });
+        try {
+          const s = await runSuiteE(
+            {
+              pool,
+              embedder,
+              model,
+              telemetry: config.langfuse.enabled,
+              onItem: (id, out) =>
+                process.stdout.write(
+                  `  ■ ${id.padEnd(22)} tools=${out.toolCalls} retrieved=${out.retrievedIds.length}  → ${out.answer.replace(/\n/g, " ").slice(0, 60)}\n`,
+                ),
+            },
+            items,
+          );
+          process.stdout.write(`\n── Suite E (end-to-end) — ${s.n} item(s) ──\n`);
+          for (const [k, v] of Object.entries(s.metrics)) {
+            const bug = k.startsWith("false_");
+            process.stdout.write(
+              `  ${k.padEnd(26)} ${v.toFixed(2)} ${bug ? "(bug — lower is better)" : ""}\n`,
+            );
+          }
+        } finally {
+          // Flush BEFORE exit or the last traces are silently lost.
+          await flush?.().catch(() => {});
+        }
+      }
+    } finally {
+      await pool.end();
+    }
+  });
+
+program
   .command("merge-duplicate-chats")
   .description(
     "Merge @lid/@s.whatsapp.net duplicate chats of the same person (dry-run unless --apply)",

@@ -51,3 +51,6 @@ assets/_*
 .specify/
 specs/
 docs/
+
+# @Aida golden set — quotes real group messages; must never leave the device.
+eval/golden/
