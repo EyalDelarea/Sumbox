@@ -44,6 +44,7 @@ async function seedEmbedded(
     messageId: Number(ids[0]!),
     embedding: vec(axis),
     model: "bge-m3",
+    contentHash: (await pool.query<{ h: string }>("select md5($1) h", [text])).rows[0].h,
   });
   return Number(ids[0]!);
 }
