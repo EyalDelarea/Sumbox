@@ -160,6 +160,9 @@ export type AppConfig = {
   retainMedia: boolean;
   /** @Aida agentic tool-loop (Vercel AI SDK). Off by default; ASK_AGENTIC=true opts in. */
   ask: { agentic: boolean };
+  /** Local Langfuse trace UI for the agentic loop. Off by default;
+   *  LANGFUSE_ENABLED=true starts the OTel exporter (see src/observability/langfuse.ts). */
+  langfuse: { enabled: boolean };
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -246,5 +249,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       intervalMs: Number(env.MEDIA_PURGE_INTERVAL_MS ?? 21_600_000),
     },
     ask: { agentic: env.ASK_AGENTIC === "true" },
+    langfuse: { enabled: env.LANGFUSE_ENABLED === "true" },
   };
 }
