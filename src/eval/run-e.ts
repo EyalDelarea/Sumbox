@@ -66,7 +66,9 @@ async function resolveGold(pool: pg.Pool | pg.PoolClient, item: GoldenItem): Pro
  */
 export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOutput> {
   const retrieved: number[][] = [];
+  let preSeeded = false;
   let windowIds: number[] = [];
+  let preSeededIds: number[] = [];
   const goldIds = await resolveGold(deps.pool, item);
   const answerFn = deps.answer ?? answerAgentic;
 
@@ -82,7 +84,18 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
         userId: item.id,
         tags: ["aida", "eval", ...item.slice],
       },
-      onRetrieved: (ids) => retrieved.push(ids),
+      onRetrieved: (ids) => {
+        // The FIRST onRetrieved is the unconditional pre-seed, not a decision she
+        // made. Counting it as a tool call made tool_called read 1.00 by
+        // construction — the metric measured our own code and reported a fix
+        // that had not happened.
+        if (!preSeeded) {
+          preSeeded = true;
+          preSeededIds = ids;
+          return;
+        }
+        retrieved.push(ids);
+      },
       onWindow: (ids) => {
         windowIds = ids;
       },
@@ -95,7 +108,7 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
     // What was IN CONTEXT = what she searched for ∪ what she was handed.
     // Omitting the window would misattribute a refusal-with-the-answer-present
     // to retrieval, hiding the generation bug this harness exists to find.
-    retrievedIds: [...new Set([...retrieved.flat(), ...windowIds])],
+    retrievedIds: [...new Set([...preSeededIds, ...retrieved.flat(), ...windowIds])],
     goldIds,
     toolCalls: retrieved.length,
   };

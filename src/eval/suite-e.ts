@@ -107,17 +107,28 @@ export function retrievalHit({ item, output }: EvalInput): Evaluation {
 }
 
 /**
- * A denial with ZERO tool calls is a 100%-precision bug detection with no text
- * analysis at all — she refused without even looking.
+ * Did she CHOOSE to search, beyond the unconditional pre-seed?
+ *
+ * Renamed from `tool_called`, which was a lie: it counted the pre-seed we inject
+ * ourselves, so it read 1.00 by construction and reported a fix that never
+ * happened. Live traces show toolSpans=0 — she has never once called search_chat
+ * since the window landed.
+ *
+ * This is now DIAGNOSTIC, not a gate. Since the pre-seed hands her the results
+ * anyway, not searching costs no correctness — it only tells us the agentic loop
+ * is not earning its autonomy, which is worth knowing before paying 3 steps for it.
  */
-export function toolWasCalled({ item, output }: EvalInput): Evaluation {
+export function searchedOnOwnInitiative({ item, output }: EvalInput): Evaluation {
   const expected = item.expectedToolCalls ?? [];
-  if (expected.length === 0) return { name: "tool_called", value: 1, comment: "n/a" };
+  if (expected.length === 0)
+    return { name: "searched_on_own_initiative", value: 1, comment: "n/a" };
   const ok = output.toolCalls > 0;
   return {
-    name: "tool_called",
+    name: "searched_on_own_initiative",
     value: ok ? 1 : 0,
-    comment: ok ? `search_chat ran ${output.toolCalls}×` : "REFUSED WITHOUT SEARCHING",
+    comment: ok
+      ? `called search_chat ${output.toolCalls}× beyond the pre-seed`
+      : "never called search_chat (the pre-seed carried it)",
   };
 }
 
@@ -126,7 +137,7 @@ export const EVALUATORS = [
   falseDenialRetrieval,
   falseAffirmation,
   retrievalHit,
-  toolWasCalled,
+  searchedOnOwnInitiative,
 ] as const;
 
 /** Run every evaluator over one item's output. */

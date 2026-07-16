@@ -6,9 +6,9 @@ import {
   falseDenialGeneration,
   falseDenialRetrieval,
   retrievalHit,
+  searchedOnOwnInitiative,
   summarize,
   type TaskOutput,
-  toolWasCalled,
 } from "./suite-e.js";
 
 // Pure evaluators: no DB, no model. Real @Aida phrasings as fixtures.
@@ -95,16 +95,19 @@ describe("retrieval_hit", () => {
   });
 });
 
-describe("tool_called", () => {
-  it("flags a refusal with ZERO tool calls", () => {
-    // 100%-precision bug detection with no text analysis: she refused without looking.
-    const r = toolWasCalled({ item: present(), output: out({ answer: DENIAL, toolCalls: 0 }) });
+describe("searched_on_own_initiative", () => {
+  it("is 0 when she never called search_chat beyond the pre-seed", () => {
+    // Diagnostic, not a gate: the pre-seed hands her the results either way, so
+    // this only says the agentic loop is not earning its autonomy.
+    const r = searchedOnOwnInitiative({ item: present(), output: out({ toolCalls: 0 }) });
     expect(r.value).toBe(0);
-    expect(r.comment).toMatch(/WITHOUT SEARCHING/);
+    expect(r.comment).toMatch(/never called search_chat/);
   });
 
-  it("passes when search_chat ran", () => {
-    expect(toolWasCalled({ item: present(), output: out({ toolCalls: 2 }) }).value).toBe(1);
+  it("is 1 when she chose to search on top of the pre-seed", () => {
+    expect(searchedOnOwnInitiative({ item: present(), output: out({ toolCalls: 2 }) }).value).toBe(
+      1,
+    );
   });
 });
 
@@ -115,7 +118,7 @@ describe("evaluateAll / summarize", () => {
       "false_denial_retrieval",
       "false_affirmation",
       "retrieval_hit",
-      "tool_called",
+      "searched_on_own_initiative",
     ]);
   });
 
