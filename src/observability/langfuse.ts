@@ -14,10 +14,25 @@
  * collector dynamic-imports it), so the OTel dependency tree never loads on the
  * default path.
  */
+import { propagateAttributes } from "@langfuse/core";
 import { LangfuseSpanProcessor } from "@langfuse/otel";
 import { LangfuseVercelAiSdkIntegration } from "@langfuse/vercel-ai-sdk";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { registerTelemetry } from "ai";
+
+/** Trace-level attributes for grouping/filtering in Langfuse. */
+export type TraceAttributes = { sessionId?: string; userId?: string; tags?: string[] };
+
+/**
+ * Run `fn` with Langfuse trace attributes propagated onto every span it creates
+ * (the AI SDK's generateText spans). This is the AI SDK v7 mechanism for
+ * sessionId/userId/tags — they are NOT fields on experimental_telemetry.
+ * Only reachable when telemetry is enabled (this module is dynamic-imported),
+ * so @langfuse/core never loads on the default path.
+ */
+export function withTraceAttributes<T>(attrs: TraceAttributes, fn: () => Promise<T>): Promise<T> {
+  return propagateAttributes(attrs, fn);
+}
 
 /** The slice of the OTel NodeSDK we use — narrowed so tests can inject a fake. */
 export type OtelSdk = { start: () => void; shutdown: () => Promise<void> };

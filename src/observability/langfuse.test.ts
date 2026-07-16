@@ -1,5 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLangfuseTelemetry, defaultLangfuseDeps, isLocalLangfuseUrl } from "./langfuse.js";
+import {
+  createLangfuseTelemetry,
+  defaultLangfuseDeps,
+  isLocalLangfuseUrl,
+  withTraceAttributes,
+} from "./langfuse.js";
+
+describe("withTraceAttributes", () => {
+  it("runs the callback and returns its result (attrs propagate to spans within)", async () => {
+    const fn = vi.fn(async () => "answer");
+    const out = await withTraceAttributes({ sessionId: "group:7", tags: ["aida", "live"] }, fn);
+    expect(out).toBe("answer");
+    expect(fn).toHaveBeenCalledOnce();
+  });
+});
 
 describe("isLocalLangfuseUrl (privacy guard)", () => {
   it("accepts only on-device hosts", () => {
