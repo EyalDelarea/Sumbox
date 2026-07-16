@@ -13,6 +13,11 @@ export type AgenticDeps = {
   embedder: Embedder;
   model: LanguageModel;
   maxSteps?: number;
+  /** When true, emit OpenTelemetry spans for the loop (steps, tool calls, args,
+   *  results, tokens, latency). Routed to the local Langfuse by the exporter
+   *  started at collector startup (see src/observability/langfuse.ts). Off by
+   *  default so the working path is unchanged when observability is disabled. */
+  telemetry?: boolean;
   /** Injectable for tests; defaults to the AI SDK. */
   generate?: GenerateFn;
 };
@@ -30,13 +35,20 @@ export async function answerAgentic(
     groupId: input.groupId,
     question: input.question,
   });
-  const { text } = await generate({
+  const opts = {
     model: deps.model,
     system: buildAgenticSystem(),
     prompt: neutralizeFence(input.question),
     stopWhen: stepCountIs(deps.maxSteps ?? 3),
     tools: { search_chat: searchChat },
-  } as Parameters<typeof sdkGenerateText>[0]);
+    // AI SDK v7 auto-enables telemetry once a Langfuse integration is
+    // registered; isEnabled:false hard-opts-out when observability is off.
+    experimental_telemetry: {
+      isEnabled: deps.telemetry === true,
+      functionId: "aida-agentic-answer",
+    },
+  } as Parameters<typeof sdkGenerateText>[0];
+  const { text } = await generate(opts);
   const trimmed = (text ?? "").trim();
   return trimmed.length > 0 ? trimmed : NOT_IN_CHAT;
 }
