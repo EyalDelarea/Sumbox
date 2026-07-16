@@ -475,6 +475,7 @@ export async function startServe(options: { port?: string; collect?: boolean }):
         summaryCommand: cmdDeps,
         // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
         askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, inFlight: new Set() },
+        telemetry: config.langfuse.enabled,
       });
 
       // ── Deferred media backfill loop ─────────────────────────────────────

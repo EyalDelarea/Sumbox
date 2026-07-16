@@ -222,6 +222,7 @@ program
       summaryCommand: cmdDeps,
       // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
       askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, inFlight: new Set() },
+      telemetry: config.langfuse.enabled,
       onConnected: () => {
         collectorLog.info({ stored: 0 }, "collecting");
         logLifecycle("collector.connected");

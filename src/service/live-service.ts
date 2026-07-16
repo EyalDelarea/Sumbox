@@ -107,6 +107,14 @@ export type AttachCollectorDeps = {
     resolveEnabledJids: () => Promise<ReadonlySet<string>>;
     inFlight: Set<number>;
   };
+  /**
+   * Opt-in Langfuse observability for the agentic @Aida loop (LANGFUSE_ENABLED).
+   * When true, attachCollector starts a local OpenTelemetry exporter once (the
+   * heavy OTel deps are dynamic-imported, so they never load on the default
+   * path) and flushes it on stop(). See src/observability/langfuse.ts and
+   * ops/runbooks/langfuse-observability.md.
+   */
+  telemetry?: boolean;
 };
 
 export type LiveServiceHandle = {
@@ -333,6 +341,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
                         host: cfg.summarization.ollamaHost,
                         model: cfg.summarization.model,
                       }),
+                      telemetry: cfg.langfuse.enabled,
                     },
                     i,
                   ),
@@ -363,10 +372,32 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
   // EventEmitter uses `message` as a plain string event; WAMessage is the arg.
   session.on("message", onMessage as (...args: unknown[]) => void);
 
+  // ── Langfuse telemetry (opt-in) ──────────────────────────────────────────
+  // Start the local OTel exporter ONCE for this collector process. Dynamic
+  // import keeps the heavy OTel deps off the default path. Best-effort: a
+  // failure here must never break ingest, and stop() flushes on the way out.
+  let telemetry: { shutdown: () => Promise<void> } | null = null;
+  if (deps.telemetry) {
+    void (async () => {
+      const { createLangfuseTelemetry, defaultLangfuseDeps } = await import(
+        "../observability/langfuse.js"
+      );
+      const t = createLangfuseTelemetry({
+        ...defaultLangfuseDeps(),
+        log: log ? (m) => log.info(m) : undefined,
+      });
+      t.start();
+      telemetry = t;
+    })().catch((err: unknown) => onError(err));
+  }
+
   // ── Handle ─────────────────────────────────────────────────────────────────
 
   return {
     stop() {
+      // Flush any pending trace batch (best-effort; the process exits shortly
+      // after, matching the rest of this teardown's best-effort style).
+      void telemetry?.shutdown().catch(() => {});
       // Latch teardown first so the session's own 'disconnected' (emitted by
       // session.stop() below, on a later tick) is ignored instead of racing the
       // pool that the shutdown sequence is about to close.
