@@ -151,3 +151,12 @@ describe("loadConfig summarization budget clamp", () => {
     expect(cfg.summarization.tokenBudget).toBeLessThan(32768 - 2048);
   });
 });
+
+describe("loadConfig ask block", () => {
+  it("defaults ask.agentic to false and honors ASK_AGENTIC=true", () => {
+    expect(loadConfig({} as NodeJS.ProcessEnv).ask.agentic).toBe(false);
+    expect(loadConfig({ ASK_AGENTIC: "true" } as unknown as NodeJS.ProcessEnv).ask.agentic).toBe(
+      true,
+    );
+  });
+});

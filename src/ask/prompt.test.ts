@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildAskPrompt, NOT_IN_CHAT, OFF_TOPIC } from "./prompt.js";
+import {
+  buildAgenticSystem,
+  buildAskPrompt,
+  FENCE_CLOSE,
+  FENCE_OPEN,
+  fenceRetrieved,
+  NOT_IN_CHAT,
+  OFF_TOPIC,
+} from "./prompt.js";
 
 const ctx = [
   { sentAt: new Date("2026-07-10T18:00:00Z"), sender: "Royi", content: "נפגשים ב-21:00 אצל אלכס" },
@@ -86,5 +94,24 @@ describe("buildAskPrompt", () => {
     ];
     const { user } = buildAskPrompt("שאלה", jidCtx);
     expect(user).not.toContain("12345@g.us");
+  });
+});
+
+describe("fenceRetrieved", () => {
+  it("wraps the joined lines in the genuine FENCE_OPEN/FENCE_CLOSE markers", () => {
+    const out = fenceRetrieved(["a", "b"]);
+    expect(out).toBe(`${FENCE_OPEN}\na\nb\n${FENCE_CLOSE}`);
+  });
+});
+
+describe("buildAgenticSystem", () => {
+  it("reuses the guardrails and grounds in tool results", () => {
+    const s = buildAgenticSystem();
+    const lower = s.toLowerCase();
+    expect(s).toContain("תכף תכף"); // persona
+    expect(lower).toContain("people-safety"); // safety guardrail
+    expect(lower).toContain("search_chat"); // tool-use instruction
+    expect(lower).toContain("only from what the tools return"); // grounding shift
+    expect(s).toContain(NOT_IN_CHAT); // exact refusal kept
   });
 });

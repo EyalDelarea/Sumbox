@@ -158,6 +158,8 @@ export type AppConfig = {
    * Set RETAIN_MEDIA=true to opt in to keeping files.
    */
   retainMedia: boolean;
+  /** @Aida agentic tool-loop (Vercel AI SDK). Off by default; ASK_AGENTIC=true opts in. */
+  ask: { agentic: boolean };
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -243,5 +245,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       // 6 h between sweeps.
       intervalMs: Number(env.MEDIA_PURGE_INTERVAL_MS ?? 21_600_000),
     },
+    ask: { agentic: env.ASK_AGENTIC === "true" },
   };
 }
