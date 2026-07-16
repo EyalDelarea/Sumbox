@@ -49,9 +49,12 @@ fi
 
 # 2. Every configured endpoint host must be local / in-stack.
 echo "[2/4] endpoint hosts"
+# Capture the full authority (incl. any user:pass@host:port), then strip the
+# scheme, the userinfo (…@), and the :port/path — so we check the REAL host,
+# not a username that happens to match an allow-listed name.
 hosts="$(printf '%s\n' "$resolved" \
-  | grep -oE '[a-zA-Z][a-zA-Z0-9+.-]*://[a-zA-Z0-9._-]+' \
-  | sed -E 's#^[a-z0-9+.-]+://##' \
+  | grep -oE '[a-zA-Z][a-zA-Z0-9+.-]*://[a-zA-Z0-9._@:-]+' \
+  | sed -E 's#^[a-zA-Z0-9+.-]+://##; s#^[^@/]*@##; s#[:/].*$##' \
   | sort -u)"
 if [ -z "$hosts" ]; then
   note "no scheme://host endpoints found."
