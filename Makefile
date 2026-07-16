@@ -1,4 +1,5 @@
-.PHONY: up down dev dev-worker dev-collect dev-ui setup bench bench-fixtures bench-all
+.PHONY: up down dev dev-worker dev-collect dev-ui setup bench bench-fixtures bench-all \
+	langfuse-up langfuse-down langfuse-logs langfuse-verify
 
 # One command for local dev: infra (postgres/rabbitmq) + migrations + worker +
 # web/collector together with combined logs. Refuses to start a second collector.
@@ -42,6 +43,28 @@ up:
 # Stop and remove all infra containers (add make down ARGS=-v to wipe volumes).
 down:
 	docker compose down $(ARGS)
+
+# --- Langfuse (opt-in, fully local — see ops/runbooks/langfuse-observability.md) -----------------------
+# Self-hosted trace UI for the agentic @Aida loop. A SEPARATE compose project
+# (`sumbox-langfuse`); `make up` never touches it. First boot pulls large images
+# and runs migrations (~1-2 min). UI at http://localhost:3000. Wire the app with
+# LANGFUSE_ENABLED=true (see .env.example).
+langfuse-up:
+	docker compose -f docker-compose.langfuse.yml up -d
+	@echo "Langfuse starting → http://localhost:3000  (login admin@sumbox.local / sumbox-local)"
+
+# Stop Langfuse (add ARGS=-v to also wipe its trace volumes).
+langfuse-down:
+	docker compose -f docker-compose.langfuse.yml down $(ARGS)
+
+langfuse-logs:
+	docker compose -f docker-compose.langfuse.yml logs -f $(ARGS)
+
+# Static, config-level proof that the stack is local: telemetry off, no env value
+# points off-machine, and the worker + datastores are on an internal (no-egress)
+# network. This is hygiene, NOT a live-traffic capture — see ops/runbooks/langfuse-observability.md.
+langfuse-verify:
+	bash scripts/langfuse-verify.sh
 
 # --- Inference benchmark (see bench/README.md) -----------------------------------
 # Generate neutral, license-free fixtures (idempotent; needs ffmpeg).
