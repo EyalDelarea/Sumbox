@@ -1,33 +1,29 @@
 import type pg from "pg";
 
 /**
- * Upsert a participant by display_name, optionally recording their JID.
+ * Upsert a participant by display_name.
  * Returns the participant id as a number.
  *
- * `whatsappId` is the person's own JID, and it is OPTIONAL because the two
- * ingest paths know different things: the live collector has it on every message
- * key, while a WhatsApp export is names-only and never will. Identity therefore
- * stays keyed on display_name — the JID is extra knowledge about a person we
- * already have, not a second way to find them.
- *
- * COALESCE, never overwrite-with-null: an importer run must not erase a JID the
- * collector learned. Once known, it stays known.
+ * Deliberately does NOT record a JID, though the table has a (dormant)
+ * whatsapp_id column. This row is keyed on display_name, which comes from
+ * pushName — self-chosen and not unique across chats — so two different people
+ * sharing a name collapse into one row here. A jid hung off that row would
+ * belong to whoever spoke most recently under the name. Author identity lives on
+ * `messages.sender_jid` instead, where it is per-message and inside the group
+ * scope. See migration 1784288081956.
  */
 export async function upsertParticipant(
   client: pg.Pool | pg.PoolClient,
   displayName: string,
-  whatsappId?: string | null,
 ): Promise<number> {
   const result = await client.query<{ id: string }>(
     `
-    INSERT INTO participants (display_name, whatsapp_id)
-    VALUES ($1, $2)
-    ON CONFLICT (tenant_id, display_name) DO UPDATE
-      SET display_name = EXCLUDED.display_name,
-          whatsapp_id  = COALESCE(EXCLUDED.whatsapp_id, participants.whatsapp_id)
+    INSERT INTO participants (display_name)
+    VALUES ($1)
+    ON CONFLICT (tenant_id, display_name) DO UPDATE SET display_name = EXCLUDED.display_name
     RETURNING id
     `,
-    [displayName, whatsappId ?? null],
+    [displayName],
   );
 
   const row = result.rows[0];

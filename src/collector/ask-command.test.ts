@@ -65,18 +65,28 @@ describe("maybeHandleAskCommand", () => {
     fromMe?: boolean;
   }): Promise<number> {
     const { rows } = await pool.query<{ id: string }>(
-      `INSERT INTO participants (display_name, whatsapp_id) VALUES ($1, $2)
-         ON CONFLICT (tenant_id, display_name) DO UPDATE SET whatsapp_id = EXCLUDED.whatsapp_id
+      `INSERT INTO participants (display_name) VALUES ($1)
+         ON CONFLICT (tenant_id, display_name) DO UPDATE SET display_name = EXCLUDED.display_name
        RETURNING id`,
-      [`author-${over.externalId}`, over.authorJid ?? null],
+      [`author-${over.externalId}`],
     );
     const pid = Number(rows[0]!.id);
+    // The jid lives on the MESSAGE, not the participant — a display_name is
+    // shared by anyone with the same pushName.
     const { rows: m } = await pool.query<{ id: string }>(
       `INSERT INTO messages
          (group_id, participant_id, source, external_id, message_type, text_content,
-          sent_at, dedupe_key, from_me)
-       VALUES ($1,$2,'live',$3,'text',$4, now(), $5, $6) RETURNING id`,
-      [groupId, pid, over.externalId, over.text, `dk-${over.externalId}`, over.fromMe ?? false],
+          sent_at, dedupe_key, from_me, sender_jid)
+       VALUES ($1,$2,'live',$3,'text',$4, now(), $5, $6, $7) RETURNING id`,
+      [
+        groupId,
+        pid,
+        over.externalId,
+        over.text,
+        `dk-${over.externalId}`,
+        over.fromMe ?? false,
+        over.authorJid ?? null,
+      ],
     );
     return Number(m[0]!.id);
   }
@@ -162,6 +172,44 @@ describe("maybeHandleAskCommand", () => {
     expect(makeQuoted).toHaveBeenCalledWith(JID, "MINE1", "תכף תכף... אמרתי 21:00", {
       jid: null,
       fromMe: true,
+    });
+  });
+
+  it("attributes the quote to THIS message's author, not to a name-sharing stranger", async () => {
+    // Regression: the jid used to hang off the participant row, which is keyed on
+    // display_name (from pushName — self-chosen, not unique across chats). Two
+    // people called "אמא" in two groups share one row, so the stored jid was
+    // whoever spoke last, and a quote here could carry another group's jid.
+    // sender_jid is per-message, so the collision cannot reach attribution.
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO participants (display_name) VALUES ('אמא')
+         ON CONFLICT (tenant_id, display_name) DO UPDATE SET display_name = EXCLUDED.display_name
+       RETURNING id`,
+    );
+    const shared = Number(rows[0]!.id);
+    const mk = async (ext: string, jid: string) => {
+      const { rows: m } = await pool.query<{ id: string }>(
+        `INSERT INTO messages
+           (group_id, participant_id, source, external_id, message_type, text_content,
+            sent_at, dedupe_key, from_me, sender_jid)
+         VALUES ($1,$2,'live',$3,'text','שלום', now(), $4, false, $5) RETURNING id`,
+        [groupId, shared, ext, `dk-${ext}`, jid],
+      );
+      return Number(m[0]!.id);
+    };
+    // Both rows share ONE participant, but each keeps its own author.
+    const first = await mk("AMA1", "972500000011@s.whatsapp.net");
+    await mk("AMA2", "972500000022@s.whatsapp.net"); // the later speaker
+
+    const makeQuoted = vi.fn(() => ({ key: { id: "AMA1" } }) as WAMessage);
+    const d = deps({
+      answer: vi.fn(async () => ({ text: "היא אמרה שלום.", citedIds: [first] })),
+      makeQuoted,
+    });
+    await maybeHandleAskCommand(askMsg("@אידה מה אמא אמרה?"), d);
+    expect(makeQuoted).toHaveBeenCalledWith(JID, "AMA1", "שלום", {
+      jid: "972500000011@s.whatsapp.net", // the FIRST author, not the last writer
+      fromMe: false,
     });
   });
 

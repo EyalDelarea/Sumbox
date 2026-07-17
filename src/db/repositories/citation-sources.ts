@@ -19,10 +19,14 @@ export type CitationSource = {
   /**
    * The author's JID, or null when we never learned it.
    *
-   * Null for every message ingested before the collector started recording it,
-   * and for all imported history — a WhatsApp export is names-only. A quote
-   * cannot be attributed without it, so the caller must skip the pin rather than
-   * guess.
+   * Read from `messages.sender_jid` — the message's OWN author, never routed
+   * through the participant row, whose display_name key is shared by anyone with
+   * the same pushName (see migration 1784288081956). That indirection would let
+   * one group's jid attribute another group's quote.
+   *
+   * Null for imported history (names-only) and for anything ingested before the
+   * column existed. A quote cannot be attributed without it, so the caller skips
+   * the pin rather than guessing.
    */
   authorJid: string | null;
   /** True when the device owner (or @Aida herself) sent it. */
@@ -55,10 +59,9 @@ export async function resolveCitationSource(
     `SELECT m.id,
             m.external_id,
             coalesce(NULLIF(trim(m.text_content), ''), '') AS text,
-            p.whatsapp_id AS author_jid,
+            m.sender_jid AS author_jid,
             m.from_me
        FROM messages m
-       LEFT JOIN participants p ON p.id = m.participant_id
       WHERE m.id = $1
         AND m.group_id = $2
         AND m.external_id IS NOT NULL

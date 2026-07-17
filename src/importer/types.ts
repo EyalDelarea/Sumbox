@@ -8,6 +8,8 @@ export type ImportedMessage = {
   mediaFilename: string | null;
   /** Whether the message was sent by the device owner; null/undefined for import rows. */
   fromMe?: boolean | null;
+  /** The author's WhatsApp JID; null/undefined for import rows (names-only). */
+  senderJid?: string | null;
 };
 
 /**
@@ -42,6 +44,14 @@ export type NormalizedMessage = {
   externalId: string | null;
   /** Whether the message was sent by the device owner; null for legacy/import rows. */
   fromMe?: boolean | null;
+  /**
+   * The author's WhatsApp JID (live only; a names-only export never has one).
+   *
+   * Needed to quote-reply this message with correct attribution. Kept per-message
+   * rather than on the participant row, whose display_name key is not unique
+   * across chats — see migration 1784288081956.
+   */
+  senderJid?: string | null;
 };
 
 export type ImportResult = {

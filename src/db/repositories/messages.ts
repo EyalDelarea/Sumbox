@@ -405,9 +405,9 @@ export async function insertMessages(
         INSERT INTO messages
           (group_id, participant_id, import_id, source, external_id, message_type,
            text_content, media_filename, media_path, media_status, sent_at, dedupe_key,
-           from_me)
+           from_me, sender_jid)
         VALUES
-          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT (group_id, dedupe_key) DO NOTHING
         RETURNING id
         `,
@@ -425,6 +425,7 @@ export async function insertMessages(
           row.sentAt,
           row.dedupeKey,
           row.fromMe ?? null,
+          row.senderJid ?? null,
         ],
       );
       const count = result.rowCount ?? 0;
