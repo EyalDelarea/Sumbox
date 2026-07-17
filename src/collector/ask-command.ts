@@ -16,6 +16,7 @@ import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
 import type { CitedAnswer } from "../ask/citations.js";
 import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
+import { resolveCitationSource } from "../db/repositories/citation-sources.js";
 import { matchAskTrigger } from "./ask-trigger.js";
 import { mapWaMessage } from "./message-mapper.js";
 
@@ -36,6 +37,17 @@ export type AskCommandDeps = {
   ) => Promise<WAMessage | undefined>;
   /** Optional ⏳/✅/❌ reactions on the asking message. Best-effort. */
   react?: (jid: string, key: WAMessage["key"], emoji: string) => Promise<void>;
+  /**
+   * Reconstruct a quotable message from a stored id + text + author
+   * (CollectorSession.quotedFrom). Absent → she always quotes the asker, which
+   * is exactly the pre-citation behaviour.
+   */
+  makeQuoted?: (
+    jid: string,
+    waMessageId: string,
+    text: string,
+    author?: { jid?: string | null; fromMe?: boolean },
+  ) => WAMessage;
   /** Per-group in-flight lock so two @Aida questions don't run Ollama concurrently. */
   inFlight: Set<number>;
   /** Canonicalize a 1:1 @lid to its phone JID (groups @g.us pass through). */
@@ -70,6 +82,58 @@ function quotedStanzaId(msg: WAMessage): string | null {
     m?.documentMessage?.contextInfo ??
     m?.stickerMessage?.contextInfo;
   return ctx?.stanzaId ?? null;
+}
+
+/**
+ * The message to quote-reply, or null to quote the asker as usual.
+ *
+ * ONE citation → the answer rests on one message, so pin to it: "איפה אמרנו X?"
+ * lands on the real thing, and an over-claimed source becomes visible instead of
+ * hiding behind a confident sentence.
+ *
+ * ZERO or MANY → quote the asker. Many means she synthesised across messages
+ * ("על מה דיברנו השבוע?") and no single one is THE source; pinning an arbitrary
+ * pick would assert a precision she didn't have.
+ *
+ * This replaces an intent classifier that was built and measured first. Both a
+ * verb regex (precision 0.67 / recall 0.25) and gemma4 (1.00/0.38 narrow;
+ * 0.63/0.63 broad, flipping on 4 of 25 identical runs) failed on real questions,
+ * because "locate question" is not a real category — almost every question she
+ * answers has a source message. The citation count reads the grounding she
+ * actually produced instead of predicting what she'll want, and costs nothing.
+ *
+ * Best-effort throughout: any failure returns null and she quotes the asker. A
+ * citation must never cost the answer.
+ */
+async function resolveQuotedSource(
+  deps: AskCommandDeps,
+  input: { groupId: number; jid: string; citedIds: number[] },
+): Promise<WAMessage | null> {
+  const [only] = input.citedIds;
+  if (only === undefined || input.citedIds.length !== 1 || !deps.makeQuoted) return null;
+
+  try {
+    const src = await resolveCitationSource(deps.pool, { groupId: input.groupId, messageId: only });
+    if (!src || src.text.length === 0) return null;
+    // Attribution is not optional: without the author's jid Baileys would credit
+    // the quote to us, putting someone else's words in the owner's mouth. Only
+    // live messages ingested since the collector began recording jids have one;
+    // for the rest we drop the pin rather than misattribute.
+    if (!src.fromMe && !src.authorJid) {
+      deps.log?.info(
+        { groupId: input.groupId, messageId: only },
+        "@Aida: source has no author jid; not quoting",
+      );
+      return null;
+    }
+    return deps.makeQuoted(input.jid, src.externalId, src.text, {
+      jid: src.authorJid,
+      fromMe: src.fromMe,
+    });
+  } catch (err) {
+    deps.log?.warn({ err, groupId: input.groupId }, "@Aida: failed to resolve cited source");
+    return null;
+  }
 }
 
 /** Ignore replayed/history messages (reconnect batches) — act on live only. */
@@ -197,8 +261,9 @@ export async function maybeHandleAskCommand(
 
     await react("⏳");
     // groupId is the VERIFIED inbound id — the privacy boundary for retrieval.
-    const { text: answer } = await deps.answer({ groupId, question });
-    const sent = await deps.sendText(jid, answer, { quoted: msg });
+    const { text: answer, citedIds } = await deps.answer({ groupId, question });
+    const source = await resolveQuotedSource(deps, { groupId, jid, citedIds });
+    const sent = await deps.sendText(jid, answer, { quoted: source ?? msg });
     // Record HER OWN message id, here and now.
     //
     // This is the only moment the system knows a message is hers: WhatsApp echoes

@@ -329,6 +329,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           react: (jid, key, emoji) => session.react(jid, key, emoji),
           inFlight: ac.inFlight,
           resolvePn: (lid) => session.pnForLid(lid),
+          makeQuoted: (jid, waId, text, author) => session.quotedFrom(jid, waId, text, author),
           answer: ({ groupId, question }) =>
             answerAida(
               {
