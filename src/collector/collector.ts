@@ -468,7 +468,9 @@ export async function handleIncomingMessage(
   }
 
   // --- Upsert participant ---
-  const participantId = await upsertParticipant(client, mapped.senderName);
+  // The JID rides along so a message can later be quote-replied with the right
+  // author. Live messages carry it; imports don't, hence the optional arg.
+  const participantId = await upsertParticipant(client, mapped.senderName, mapped.senderJid);
 
   // Select the download spec for this message's media kind (audio/image/video).
   // Sticker/document/text have no spec → never downloaded or enqueued. When a

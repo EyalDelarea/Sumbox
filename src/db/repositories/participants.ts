@@ -1,21 +1,33 @@
 import type pg from "pg";
 
 /**
- * Upsert a participant by display_name.
+ * Upsert a participant by display_name, optionally recording their JID.
  * Returns the participant id as a number.
+ *
+ * `whatsappId` is the person's own JID, and it is OPTIONAL because the two
+ * ingest paths know different things: the live collector has it on every message
+ * key, while a WhatsApp export is names-only and never will. Identity therefore
+ * stays keyed on display_name — the JID is extra knowledge about a person we
+ * already have, not a second way to find them.
+ *
+ * COALESCE, never overwrite-with-null: an importer run must not erase a JID the
+ * collector learned. Once known, it stays known.
  */
 export async function upsertParticipant(
   client: pg.Pool | pg.PoolClient,
   displayName: string,
+  whatsappId?: string | null,
 ): Promise<number> {
   const result = await client.query<{ id: string }>(
     `
-    INSERT INTO participants (display_name)
-    VALUES ($1)
-    ON CONFLICT (tenant_id, display_name) DO UPDATE SET display_name = EXCLUDED.display_name
+    INSERT INTO participants (display_name, whatsapp_id)
+    VALUES ($1, $2)
+    ON CONFLICT (tenant_id, display_name) DO UPDATE
+      SET display_name = EXCLUDED.display_name,
+          whatsapp_id  = COALESCE(EXCLUDED.whatsapp_id, participants.whatsapp_id)
     RETURNING id
     `,
-    [displayName],
+    [displayName, whatsappId ?? null],
   );
 
   const row = result.rows[0];
