@@ -70,7 +70,7 @@ describe("answerQuestion", () => {
       },
     );
 
-    expect(out).toBe("לפי השיחה, נפגשים ב-21:00 אצל אלכס.");
+    expect(out.text).toBe("לפי השיחה, נפגשים ב-21:00 אצל אלכס.");
     const prompt = vi.mocked(llm.answer).mock.calls[0]![0];
     expect(prompt.user).toContain("נפגשים ב-21:00 אצל אלכס"); // the group's message reached the LLM
   });
@@ -85,7 +85,7 @@ describe("answerQuestion", () => {
       { pool, embedder: fixedEmbedder, llm },
       { groupId: g, question: "מה קורה?" },
     );
-    expect(out).toBe(NOT_INDEXED);
+    expect(out.text).toBe(NOT_INDEXED);
     expect(llm.answer).not.toHaveBeenCalled(); // never asks the LLM with no context
   });
 
@@ -120,6 +120,6 @@ describe("answerQuestion", () => {
         question: "?",
       },
     );
-    expect(out).toBe(NOT_IN_CHAT);
+    expect(out.text).toBe(NOT_IN_CHAT);
   });
 });

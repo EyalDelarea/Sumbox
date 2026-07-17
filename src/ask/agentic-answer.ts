@@ -2,6 +2,7 @@ import { type LanguageModel, generateText as sdkGenerateText, stepCountIs } from
 import type pg from "pg";
 import { resolveSenderName } from "../summarization/sender-name.js";
 import { makeSearchChatTool } from "./agentic-tools.js";
+import { type CitedAnswer, extractCitations } from "./citations.js";
 import type { Embedder } from "./embedder.js";
 import {
   buildAgenticSystem,
@@ -87,14 +88,29 @@ export type AgenticDeps = {
 export async function answerAgentic(
   deps: AgenticDeps,
   input: { groupId: number; question: string; asOf?: Date; excludeExternalId?: string },
-): Promise<string> {
+): Promise<CitedAnswer> {
   const generate = deps.generate ?? (sdkGenerateText as unknown as GenerateFn);
+
+  /**
+   * Every id the fence has shown her, accumulated as the loop runs.
+   *
+   * search_chat results are citable too, and they only exist once the model has
+   * called the tool — so this cannot be computed up front the way the
+   * single-shot path does it. Collecting here (rather than reusing the
+   * onRetrieved probe) keeps the probe side-effect-only for the eval harness.
+   */
+  const shown = new Set<number>();
+  const collect = (ids: number[]) => {
+    for (const id of ids) shown.add(id);
+    deps.onRetrieved?.(ids);
+  };
+
   const searchChat = makeSearchChatTool({
     pool: deps.pool,
     embedder: deps.embedder,
     groupId: input.groupId,
     question: input.question,
-    ...(deps.onRetrieved ? { onRetrieved: deps.onRetrieved } : {}),
+    onRetrieved: collect,
   });
 
   /**
@@ -116,6 +132,7 @@ export async function answerAgentic(
   });
 
   deps.onWindow?.(window.map((m) => m.messageId));
+  for (const m of window) shown.add(m.messageId);
 
   /**
    * Pre-seed the SAME hybrid search the single-shot path runs, instead of
@@ -138,7 +155,7 @@ export async function answerAgentic(
   );
   const windowIds = new Set(window.map((m) => m.messageId));
   const freshHits = preHits.filter((h) => !windowIds.has(h.messageId));
-  deps.onRetrieved?.(freshHits.map((h) => h.messageId));
+  collect(freshHits.map((h) => h.messageId));
 
   const searchSection =
     freshHits.length > 0
@@ -178,5 +195,6 @@ export async function answerAgentic(
         )(deps.trace, run)
       : await run();
   const trimmed = (text ?? "").trim();
-  return trimmed.length > 0 ? trimmed : NOT_IN_CHAT;
+  if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
+  return extractCitations(trimmed, shown);
 }

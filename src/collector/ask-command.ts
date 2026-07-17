@@ -14,6 +14,7 @@
 
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
+import type { CitedAnswer } from "../ask/citations.js";
 import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { matchAskTrigger } from "./ask-trigger.js";
 import { mapWaMessage } from "./message-mapper.js";
@@ -42,8 +43,12 @@ export type AskCommandDeps = {
   /**
    * Answer the question for the ALREADY-verified group id, grounded in that
    * group's messages. Wired to answerQuestion in prod; tests inject a fake.
+   *
+   * Returns the send-ready text plus the message ids the answer rests on — the
+   * citations are already stripped from `text`, so this layer never has to know
+   * the tag format.
    */
-  answer: (input: { groupId: number; question: string }) => Promise<string>;
+  answer: (input: { groupId: number; question: string }) => Promise<CitedAnswer>;
   log?: MinimalLog;
 };
 
@@ -192,7 +197,7 @@ export async function maybeHandleAskCommand(
 
     await react("⏳");
     // groupId is the VERIFIED inbound id — the privacy boundary for retrieval.
-    const answer = await deps.answer({ groupId, question });
+    const { text: answer } = await deps.answer({ groupId, question });
     const sent = await deps.sendText(jid, answer, { quoted: msg });
     // Record HER OWN message id, here and now.
     //

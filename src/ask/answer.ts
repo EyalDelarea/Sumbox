@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { estimateTokens } from "../summarization/prompt.js";
+import { type CitedAnswer, extractCitations } from "./citations.js";
 import type { Embedder } from "./embedder.js";
 import {
   type AskContextMessage,
@@ -48,7 +49,7 @@ const DEFAULT_WINDOW_N = 20;
 export async function answerQuestion(
   deps: AnswerDeps,
   input: { groupId: number; question: string; asOf?: Date; excludeExternalId?: string },
-): Promise<string> {
+): Promise<CitedAnswer> {
   const k = deps.retrieveK ?? DEFAULT_K;
   const budget = deps.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
   const windowN = deps.windowN ?? DEFAULT_WINDOW_N;
@@ -75,7 +76,7 @@ export async function answerQuestion(
   // not "it wasn't discussed". But the window reads raw messages, so if it has
   // anything we can still answer honestly from what is right there; claiming "no
   // access" while holding the last 20 messages would be its own false statement.
-  if (retrieved.length === 0 && window.length === 0) return NOT_INDEXED;
+  if (retrieved.length === 0 && window.length === 0) return { text: NOT_INDEXED, citedIds: [] };
 
   // Search hits already in the window would be rendered twice — wasted budget,
   // and duplicate evidence reads as corroboration to the model.
@@ -85,7 +86,16 @@ export async function answerQuestion(
   const context = fitToBudget(input.question, deduped, budget, window);
   const answer = await deps.llm.answer(buildAskPrompt(input.question, context, window));
   const trimmed = answer.trim();
-  return trimmed.length > 0 ? trimmed : NOT_IN_CHAT;
+  if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
+
+  // Exactly what the fence rendered — the window plus the budget-TRIMMED context,
+  // not the full retrieved set. An id trimmed out was never shown to her, so
+  // accepting it would defeat the point of validating at all.
+  const shown = new Set<number>([
+    ...window.map((m) => m.messageId),
+    ...context.map((m) => m.messageId),
+  ]);
+  return extractCitations(trimmed, shown);
 }
 
 /**

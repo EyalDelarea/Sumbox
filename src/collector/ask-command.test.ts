@@ -44,7 +44,7 @@ describe("maybeHandleAskCommand", () => {
       resolveEnabledJids: async () => new Set([JID]),
       sendText: vi.fn(async () => ({ key: { id: "s1" } }) as WAMessage),
       inFlight: new Set<number>(),
-      answer: vi.fn(async () => "לפי השיחה, נפגשים ב-21:00."),
+      answer: vi.fn(async () => ({ text: "לפי השיחה, נפגשים ב-21:00.", citedIds: [] })),
       ...over,
     };
   }
@@ -155,7 +155,7 @@ describe("reply-threading", () => {
     resolveEnabledJids: async () => new Set([RJID]),
     sendText: vi.fn(async () => ({ key: { id: "sent-1" } }) as WAMessage),
     inFlight: new Set<number>(),
-    answer: vi.fn(async () => "תכף תכף... אתמול דיברנו על זה."),
+    answer: vi.fn(async () => ({ text: "תכף תכף... אתמול דיברנו על זה.", citedIds: [] })),
     ...over,
   });
 

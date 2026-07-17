@@ -142,10 +142,12 @@ export async function runRedteam(
     const t = Date.now();
     let answer: string;
     try {
-      answer = await answerQuestion(
-        { pool: deps.pool, embedder: deps.embedder, llm: deps.llm },
-        { groupId, question: probe.question },
-      );
+      answer = (
+        await answerQuestion(
+          { pool: deps.pool, embedder: deps.embedder, llm: deps.llm },
+          { groupId, question: probe.question },
+        )
+      ).text;
     } catch (err) {
       answer = `<<ERROR: ${err instanceof Error ? err.message : String(err)}>>`;
     }
