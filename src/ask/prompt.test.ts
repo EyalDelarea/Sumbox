@@ -134,6 +134,12 @@ describe("buildAskPrompt", () => {
     expect(user).toContain("[msg:202] [2026-07-10 18:11] אידה: תכף תכף... אני פה");
   });
 
+  it("asks for citations and forbids inventing an id", () => {
+    const { system } = buildAskPrompt("x", ctx);
+    expect(system).toContain("[msg:12345]");
+    expect(system).toContain("Never invent an id");
+  });
+
   it("resolves the sender label rather than leaking a raw JID", () => {
     const jidCtx = [
       {
@@ -168,6 +174,13 @@ describe("buildAgenticSystem", () => {
     expect(lower).toContain("from the recent messages you are shown or from what the tools return");
     expect(lower).toContain("do not answer from world knowledge");
     expect(s).toContain(NOT_IN_CHAT); // exact refusal kept
+  });
+
+  it("asks for citations on the agentic path too", () => {
+    // Both paths must cite, or flipping ASK_AGENTIC would silently drop the
+    // source pin — the same trap the recency window hit before it was carried
+    // on both paths.
+    expect(buildAgenticSystem()).toContain("[msg:12345]");
   });
 
   it("forbids refusing before searching", () => {
