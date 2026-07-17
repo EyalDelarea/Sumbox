@@ -31,7 +31,7 @@ describe("runSandbox", () => {
     const seen: { deps: any; input: any }[] = [];
     const answer = vi.fn(async (deps: any, input: any) => {
       seen.push({ deps, input });
-      return `ans:${input.question}`;
+      return { text: `ans:${input.question}`, citedIds: [] };
     });
     let t = 1000;
     const results = await runSandbox({
@@ -64,7 +64,7 @@ describe("runSandbox", () => {
   it("captures an item error instead of aborting the batch", async () => {
     const answer = vi.fn(async (_d: any, input: any) => {
       if (input.question === "q1") throw new Error("boom");
-      return "ok";
+      return { text: "ok", citedIds: [] };
     });
     const results = await runSandbox({
       pool: {} as never,
