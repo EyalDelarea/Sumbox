@@ -5,6 +5,7 @@ import { makeSearchChatTool } from "./agentic-tools.js";
 import type { Embedder } from "./embedder.js";
 import {
   buildAgenticSystem,
+  citeTag,
   fenceRetrieved,
   NOT_IN_CHAT,
   neutralizeFence,
@@ -146,7 +147,7 @@ export async function answerAgentic(
           fenceRetrieved(
             freshHits.map(
               (h) =>
-                `${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
+                `${citeTag(h.messageId)} ${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
             ),
           ),
           "",
