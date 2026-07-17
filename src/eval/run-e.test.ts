@@ -25,7 +25,7 @@ const deps = (over: Record<string, unknown> = {}) => ({
   pool: fakePool([{ id: "11", external_id: "3ABC" }]),
   embedder: { embed: async () => [0.1] },
   model: {} as never,
-  answer: (async () => "תכף תכף... רועי אמר משהו.") as never,
+  answer: (async () => ({ text: "תכף תכף... רועי אמר משהו.", citedIds: [11] })) as never,
   ...over,
 });
 
@@ -85,7 +85,8 @@ describe("runSuiteE", () => {
   it("evaluates every item and aggregates", async () => {
     const answer = (async (d: { onRetrieved?: (ids: number[]) => void }) => {
       d.onRetrieved?.([11]); // pre-seed surfaced the gold
-      return "תכף תכף... לא מצאתי את זה בשיחה.";
+      // A refusal cites nothing — extractCitations discards citations on one.
+      return { text: "תכף תכף... לא מצאתי את זה בשיחה.", citedIds: [] };
     }) as never;
     const s = await runSuiteE(deps({ answer }) as never, [item({ id: "a" }), item({ id: "b" })]);
     expect(s.n).toBe(2);

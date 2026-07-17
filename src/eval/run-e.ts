@@ -111,6 +111,7 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
     // Omitting the window would misattribute a refusal-with-the-answer-present
     // to retrieval, hiding the generation bug this harness exists to find.
     retrievedIds: [...new Set([...preSeededIds, ...retrieved.flat(), ...windowIds])],
+    citedIds: answer.citedIds,
     goldIds,
     toolCalls: retrieved.length,
   };
