@@ -25,9 +25,26 @@ export type CitedAnswer = {
   citedIds: number[];
 };
 
-/** Matches the tag citeTag() renders. Kept next to nothing else — prompt.ts owns
- *  the format, and citeTag() is the single writer. */
-const CITE_RE = /\[msg:(\d+)\]/g;
+/**
+ * Tags we can PARSE ids out of.
+ *
+ * Deliberately wider than what citeTag() renders, because the prompt asks for
+ * "the message id(s)" and shows one example — so a model with a two-source claim
+ * reasonably writes `[msg:101, 102]` or `[msg:101, msg:102]`. Matching only the
+ * canonical form would both miss the citation AND ship the tag to the group.
+ */
+const CITE_RE = /\[\s*msg:\s*\d+(?:\s*,\s*(?:msg:\s*)?\d+)*\s*\]/gi;
+
+/**
+ * Anything tag-SHAPED, whether or not we understood it.
+ *
+ * The safety net: parsing and stripping are separate concerns, and only one of
+ * them is allowed to fail. An unparsed variant (a range, a stray space, a format
+ * we never imagined) must still never reach the group — leaking internal ids is
+ * worse than losing a citation. So we credit only what CITE_RE parses, then
+ * strip everything this matches.
+ */
+const TAG_SHAPED_RE = /\[\s*msg\b[^\]]*\]/gi;
 
 /**
  * The exact strings the prompt tells her to use when she has no answer.
@@ -64,14 +81,18 @@ export function extractCitations(raw: string, validIds: ReadonlySet<number>): Ci
   const cited: number[] = [];
   const seen = new Set<number>();
 
-  for (const m of raw.matchAll(CITE_RE)) {
-    const id = Number(m[1]);
-    if (!validIds.has(id) || seen.has(id)) continue;
-    seen.add(id);
-    cited.push(id);
+  for (const tag of raw.matchAll(CITE_RE)) {
+    // One tag may carry several ids ("[msg:101, 102]"); each is a separate cite.
+    for (const digits of tag[0].matchAll(/\d+/g)) {
+      const id = Number(digits[0]);
+      if (!validIds.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      cited.push(id);
+    }
   }
 
-  const text = tidy(raw.replace(CITE_RE, " "));
+  // Strip tag-SHAPED text, not just what parsed — see TAG_SHAPED_RE.
+  const text = tidy(raw.replace(TAG_SHAPED_RE, " "));
   // Strip first, judge second: a refusal must still lose its tags before send.
   const refused = REFUSALS.some((r) => text.includes(r));
 

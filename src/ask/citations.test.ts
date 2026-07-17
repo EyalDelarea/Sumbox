@@ -42,6 +42,49 @@ describe("extractCitations", () => {
     expect(text).toBe("תכף תכף... כן");
   });
 
+  describe("plural and malformed tags — the prompt asks for 'id(s)'", () => {
+    // CITE_RULE says "cite the message id(s)… in the form [msg:12345]": plural
+    // instruction, singular example. A two-source claim reasonably comes back as
+    // [msg:101, 102]. Matching only the canonical form would both lose the
+    // citation AND ship internal ids to the group.
+    it.each([
+      ["שניהם [msg:101, 102]", [101, 102]],
+      ["שניהם [msg:101, msg:102]", [101, 102]],
+      ["רווח [msg: 101]", [101]],
+      ["צמוד [msg:101][msg:102]", [101, 102]],
+    ])("%s", (raw, expected) => {
+      const { text, citedIds } = extractCitations(raw, valid);
+      expect(citedIds).toEqual(expected);
+      expect(text).not.toMatch(/\[\s*msg/i);
+    });
+
+    it.each([
+      "טווח [msg:101-102]",
+      "מוזר [msg:abc]",
+      "ריק [msg:]",
+      "מלל [msg: הודעה ראשונה]",
+    ])("strips a tag it cannot parse rather than leaking it: %s", (raw) => {
+      // Losing a citation is cheap; showing the group our internal ids is not.
+      const { text } = extractCitations(raw, valid);
+      expect(text).not.toMatch(/\[\s*msg/i);
+    });
+  });
+
+  it("never lets a tag-shaped string reach the group", () => {
+    // The fence against future format drift: whatever she emits, nothing that
+    // looks like a tag survives into what she says.
+    const raws = [
+      "א [msg:101]",
+      "ב [msg:999]",
+      "ג [msg:101, 102]",
+      "ד [MSG:101]",
+      "ה [msg:101-103]",
+    ];
+    for (const raw of raws) {
+      expect(extractCitations(raw, valid).text).not.toMatch(/\[\s*msg/i);
+    }
+  });
+
   it("reports no citation when she emits none (~8% of replies)", () => {
     const { text, citedIds } = extractCitations("תכף תכף... אין לי מושג", valid);
     expect(citedIds).toEqual([]);
