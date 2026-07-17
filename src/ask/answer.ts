@@ -1,6 +1,8 @@
+import type { LanguageModel } from "ai";
 import type pg from "pg";
 import { estimateTokens } from "../summarization/prompt.js";
-import { type CitedAnswer, extractCitations } from "./citations.js";
+import { attributeSources } from "./attribution.js";
+import type { CitedAnswer } from "./citations.js";
 import type { Embedder } from "./embedder.js";
 import {
   type AskContextMessage,
@@ -22,6 +24,17 @@ export type AnswerDeps = {
   pool: pg.Pool | pg.PoolClient;
   embedder: Embedder;
   llm: AskLlm;
+  /**
+   * Model for the post-hoc attribution pass (see attribution.ts). Optional, and
+   * separate from `llm`: this path answers through the summarizer, which has no
+   * LanguageModel to hand.
+   *
+   * Absent → the answer still sends, it just carries no source to pin to. That
+   * is the right default here — this is the FALLBACK path (answer-dispatch only
+   * reaches it when the agentic path is off or has thrown), and a rare reply
+   * that quotes the asker beats wiring a second model into an error path.
+   */
+  attributionModel?: LanguageModel;
   /** How many messages to retrieve before budget-trimming. Default 40. */
   retrieveK?: number;
   /** Max estimated prompt tokens; oldest retrieved messages are dropped to fit. */
@@ -88,14 +101,16 @@ export async function answerQuestion(
   const trimmed = answer.trim();
   if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
 
-  // Exactly what the fence rendered — the window plus the budget-TRIMMED context,
-  // not the full retrieved set. An id trimmed out was never shown to her, so
-  // accepting it would defeat the point of validating at all.
-  const shown = new Set<number>([
-    ...window.map((m) => m.messageId),
-    ...context.map((m) => m.messageId),
-  ]);
-  return extractCitations(trimmed, shown);
+  // Post-hoc, and only over what she was actually shown: the window plus the
+  // budget-TRIMMED context, never the full retrieved set. A message trimmed out
+  // of the prompt cannot be the source of what she wrote.
+  const citedIds = deps.attributionModel
+    ? await attributeSources(
+        { model: deps.attributionModel },
+        { question: input.question, answer: trimmed, candidates: [...window, ...context] },
+      )
+    : [];
+  return { text: trimmed, citedIds };
 }
 
 /**

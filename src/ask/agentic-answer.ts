@@ -2,7 +2,8 @@ import { type LanguageModel, generateText as sdkGenerateText, stepCountIs } from
 import type pg from "pg";
 import { resolveSenderName } from "../summarization/sender-name.js";
 import { makeSearchChatTool } from "./agentic-tools.js";
-import { type CitedAnswer, extractCitations } from "./citations.js";
+import { attributeSources } from "./attribution.js";
+import type { CitedAnswer } from "./citations.js";
 import type { Embedder } from "./embedder.js";
 import {
   buildAgenticSystem,
@@ -91,26 +92,12 @@ export async function answerAgentic(
 ): Promise<CitedAnswer> {
   const generate = deps.generate ?? (sdkGenerateText as unknown as GenerateFn);
 
-  /**
-   * Every id the fence has shown her, accumulated as the loop runs.
-   *
-   * search_chat results are citable too, and they only exist once the model has
-   * called the tool — so this cannot be computed up front the way the
-   * single-shot path does it. Collecting here (rather than reusing the
-   * onRetrieved probe) keeps the probe side-effect-only for the eval harness.
-   */
-  const shown = new Set<number>();
-  const collect = (ids: number[]) => {
-    for (const id of ids) shown.add(id);
-    deps.onRetrieved?.(ids);
-  };
-
   const searchChat = makeSearchChatTool({
     pool: deps.pool,
     embedder: deps.embedder,
     groupId: input.groupId,
     question: input.question,
-    onRetrieved: collect,
+    ...(deps.onRetrieved ? { onRetrieved: deps.onRetrieved } : {}),
   });
 
   /**
@@ -132,7 +119,6 @@ export async function answerAgentic(
   });
 
   deps.onWindow?.(window.map((m) => m.messageId));
-  for (const m of window) shown.add(m.messageId);
 
   /**
    * Pre-seed the SAME hybrid search the single-shot path runs, instead of
@@ -155,7 +141,7 @@ export async function answerAgentic(
   );
   const windowIds = new Set(window.map((m) => m.messageId));
   const freshHits = preHits.filter((h) => !windowIds.has(h.messageId));
-  collect(freshHits.map((h) => h.messageId));
+  deps.onRetrieved?.(freshHits.map((h) => h.messageId));
 
   const searchSection =
     freshHits.length > 0
@@ -164,7 +150,7 @@ export async function answerAgentic(
           fenceRetrieved(
             freshHits.map(
               (h) =>
-                `${citeTag(h.messageId)} ${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
+                `${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
             ),
           ),
           "",
@@ -196,5 +182,12 @@ export async function answerAgentic(
       : await run();
   const trimmed = (text ?? "").trim();
   if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
-  return extractCitations(trimmed, shown);
+
+  // Post-hoc: the answer above is already final and was produced from a prompt
+  // with no ids in it. This pass only labels it — it cannot change a word.
+  const citedIds = await attributeSources(
+    { model: deps.model, ...(deps.generate ? { generate: deps.generate } : {}) },
+    { question: input.question, answer: trimmed, candidates: [...window, ...freshHits] },
+  );
+  return { text: trimmed, citedIds };
 }

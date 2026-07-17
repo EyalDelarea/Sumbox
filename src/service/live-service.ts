@@ -357,6 +357,12 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
                       llm: {
                         answer: (prompt) => summarizer.summarize(prompt).then((o) => o.overview),
                       },
+                      // The fallback path answers through the summarizer, which
+                      // has no LanguageModel; attribution needs one of its own.
+                      attributionModel: makeAgenticModel({
+                        host: cfg.summarization.ollamaHost,
+                        model: cfg.summarization.model,
+                      }),
                     },
                     i,
                   ),

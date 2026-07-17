@@ -1,87 +1,50 @@
 /**
- * citations.ts — pull @Aida's [msg:N] citations out of her reply, and hand back
- * text that is safe to send.
+ * citations.ts — read `[msg:N]` ids out of model output.
  *
- * The fence shows her `[msg:N]` on every message (see prompt.ts citeTag); she
- * cites the ids a claim rests on. The tags are a routing signal for the caller,
- * never something the group should see — so extraction and stripping are one
- * operation, and the only text that leaves here is already clean.
+ * The single reader of the tag format `citeTag()` writes. Used by attribution.ts
+ * to parse the post-hoc matcher's reply.
  *
- * Trust model: an id is worth acting on ONLY if we showed it to her. Everything
- * else is dropped silently. A citation is best-effort throughout — losing one
- * costs the source pin, never the answer.
+ * NOTE this does NOT strip tags from anything @Aida says, and does not need to:
+ * the answering prompt carries no ids at all (attribution.ts explains why), so
+ * she has nothing to copy and no reason to emit one. Tags live only in the
+ * attribution pass, whose output is ids for the caller and is never shown to
+ * anyone.
  */
 
-import { NOT_IN_CHAT, NOT_INDEXED, OFF_TOPIC } from "./prompt.js";
-
-/** Her reply, split into what the group sees and what the caller routes on. */
+/** Her answer, plus the messages it rests on. */
 export type CitedAnswer = {
-  /** Send-ready: tags removed, spacing repaired. */
+  /** Exactly what the group sees. */
   text: string;
   /**
-   * The ids she cited that we actually showed her, first-seen order, deduped.
-   * Empty when she cited nothing, cited only unknown ids, or refused.
+   * Ids the post-hoc pass matched to `text`, validated against the candidates we
+   * offered. Empty when she refused, when nothing matched, or when attribution
+   * failed — all of which mean "no source to pin to", never "no answer".
    */
   citedIds: number[];
 };
 
 /**
- * Tags we can PARSE ids out of.
+ * Tags we can parse ids out of.
  *
- * Deliberately wider than what citeTag() renders, because the prompt asks for
- * "the message id(s)" and shows one example — so a model with a two-source claim
- * reasonably writes `[msg:101, 102]` or `[msg:101, msg:102]`. Matching only the
- * canonical form would both miss the citation AND ship the tag to the group.
+ * Deliberately wider than what `citeTag()` renders: asked for "the id(s)", a
+ * model reasonably replies `[msg:101, 102]` or `[msg:101, msg:102]`, and a
+ * parser that only understood the canonical form would silently report "no
+ * source" for a correct match.
  */
 const CITE_RE = /\[\s*msg:\s*\d+(?:\s*,\s*(?:msg:\s*)?\d+)*\s*\]/gi;
 
 /**
- * Anything tag-SHAPED, whether or not we understood it.
+ * The ids in `text` that appear in `validIds`, first-seen order, deduped.
  *
- * The safety net: parsing and stripping are separate concerns, and only one of
- * them is allowed to fail. An unparsed variant (a range, a stray space, a format
- * we never imagined) must still never reach the group — leaking internal ids is
- * worse than losing a citation. So we credit only what CITE_RE parses, then
- * strip everything this matches.
+ * `validIds` is the candidate set we offered. Anything outside it is invented or
+ * unresolvable and is dropped in silence. Order is load-bearing: the first id is
+ * the one that gets quoted.
  */
-const TAG_SHAPED_RE = /\[\s*msg\b[^\]]*\]/gi;
-
-/**
- * The exact strings the prompt tells her to use when she has no answer.
- *
- * A refusal that cites a message contradicts itself — it would quote the very
- * message it claims not to have found — so a tag riding along on one is noise.
- */
-const REFUSALS = [NOT_IN_CHAT, NOT_INDEXED, OFF_TOPIC];
-
-/**
- * Repair the spacing a removed tag leaves behind.
- *
- * `אמר [msg:101] שזה` → `אמר  שזה`, and a trailing tag before a full stop leaves
- * ` .`. Hebrew is RTL but the whitespace is ordinary, so this is plain text
- * cleanup — it just has to be done, or her reply arrives visibly damaged.
- */
-function tidy(text: string): string {
-  return text
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/[ \t]+([.,!?…:;])/g, "$1")
-    .replace(/[ \t]+$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-/**
- * Split `raw` into send-ready text plus the ids she cited.
- *
- * `validIds` is everything the fence showed her for this question — the window,
- * the pre-seeded hits, and anything search_chat returned. An id outside it is
- * either a hallucination or a message we can no longer resolve; both are dropped.
- */
-export function extractCitations(raw: string, validIds: ReadonlySet<number>): CitedAnswer {
+export function parseCitedIds(text: string, validIds: ReadonlySet<number>): number[] {
   const cited: number[] = [];
   const seen = new Set<number>();
 
-  for (const tag of raw.matchAll(CITE_RE)) {
+  for (const tag of text.matchAll(CITE_RE)) {
     // One tag may carry several ids ("[msg:101, 102]"); each is a separate cite.
     for (const digits of tag[0].matchAll(/\d+/g)) {
       const id = Number(digits[0]);
@@ -90,11 +53,5 @@ export function extractCitations(raw: string, validIds: ReadonlySet<number>): Ci
       cited.push(id);
     }
   }
-
-  // Strip tag-SHAPED text, not just what parsed — see TAG_SHAPED_RE.
-  const text = tidy(raw.replace(TAG_SHAPED_RE, " "));
-  // Strip first, judge second: a refusal must still lose its tags before send.
-  const refused = REFUSALS.some((r) => text.includes(r));
-
-  return { text, citedIds: refused ? [] : cited };
+  return cited;
 }
