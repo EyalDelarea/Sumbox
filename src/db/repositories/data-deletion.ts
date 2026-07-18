@@ -235,6 +235,11 @@ export async function purgeUnselectedChats(
   // group_id-NULL todos/meetings whose source_message lives here; SET NULL on
   // people.next_step_source_message_id.
   await client.query(`DELETE FROM messages WHERE group_id = ANY($1::bigint[])`, ids);
+  // Group-keyed (the surviving group's CASCADE never fires) and classified as
+  // purge in UNSELECTED_PURGE_GROUP_TABLES — but this DELETE was missing, so
+  // @Aida's marker rows (which carry the asker's question verbatim) outlived
+  // the purged conversation. The behavioral test now pins list to execution.
+  await client.query(`DELETE FROM aida_messages WHERE group_id = ANY($1::bigint[])`, ids);
   await client.query(`DELETE FROM summaries WHERE group_id = ANY($1::bigint[])`, ids);
   // `imports` is RESTRICT → groups (which we keep), so it never cascades — delete it
   // explicitly. messages.import_id is SET NULL and messages are already gone, so order is

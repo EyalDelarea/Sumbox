@@ -122,6 +122,30 @@ describe("purgeUnselectedChats", () => {
     expect(await count("groups", "id = ANY($1::bigint[])", [[included, unselected]])).toBe(2);
   });
 
+  it("purges @Aida's own replies with the chat they belong to", async () => {
+    // aida_messages was CLASSIFIED as purge (UNSELECTED_PURGE_GROUP_TABLES) but
+    // purgeUnselectedChats never actually deleted it — the list and the DELETE
+    // block drifted, and no behavioral test noticed. The rows carry the asker's
+    // question verbatim, so surviving a purge is chat content outliving the
+    // conversation it belongs to.
+    const unselected = await newGroup("aida-drop");
+    const included = await newGroup("aida-keep");
+    await admin.query(`INSERT INTO chat_scopes (group_id, included) VALUES ($1, true)`, [included]);
+    await admin.query(
+      `INSERT INTO aida_messages (group_id, external_id, question) VALUES ($1, 'AIDA-D1', 'מה קורה?')`,
+      [unselected],
+    );
+    await admin.query(
+      `INSERT INTO aida_messages (group_id, external_id, question) VALUES ($1, 'AIDA-K1', 'מתי נפגשים?')`,
+      [included],
+    );
+
+    await purgeUnselectedChats(admin);
+
+    expect(await count("aida_messages", "group_id = $1", [unselected])).toBe(0);
+    expect(await count("aida_messages", "group_id = $1", [included])).toBe(1);
+  });
+
   it("with olderThanDays, spares unselected chats that had recent activity", async () => {
     const dormant = await newGroup("dormant");
     const active = await newGroup("active");
