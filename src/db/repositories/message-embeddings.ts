@@ -98,6 +98,14 @@ export type RetrievedMessage = {
   sentAt: Date;
   sender: string;
   content: string;
+  /**
+   * True when @Aida herself sent it (per the aida_messages marker). Carried so
+   * attribution can refuse to cite her own replies: an echo of someone's words
+   * matches the new answer at least as well as the original, and pinning the
+   * echo would credit the words to the owner's account. Optional because some
+   * constructors of this shape (tests, older callers) don't know.
+   */
+  isAida?: boolean;
 };
 
 /**
@@ -119,14 +127,18 @@ export async function searchMessagesByEmbedding(
     sent_at: Date;
     sender: string;
     content: string;
+    is_aida: boolean;
   }>(
     `SELECT m.id,
             m.sent_at,
             COALESCE(p.display_name, 'Unknown') AS sender,
-            ${CONTENT_EXPR} AS content
+            ${CONTENT_EXPR} AS content,
+            (am.external_id IS NOT NULL) AS is_aida
        FROM message_embeddings e
        JOIN messages m ON m.id = e.message_id
        ${CONTENT_JOINS}
+       LEFT JOIN aida_messages am
+              ON am.group_id = m.group_id AND am.external_id = m.external_id
       WHERE m.group_id = $1
         AND m.message_type <> 'system'
         ${EXCLUDE_ASK_MENTION}
@@ -140,6 +152,7 @@ export async function searchMessagesByEmbedding(
     sentAt: r.sent_at,
     sender: r.sender,
     content: r.content,
+    isAida: r.is_aida,
   }));
 }
 
@@ -155,6 +168,45 @@ export async function searchMessagesByEmbedding(
  * Same `WHERE m.group_id = $1` privacy boundary. Returned in RANK order (best
  * first) so the caller can fuse it with the semantic ranking.
  */
+/**
+ * Hebrew clitic prefixes, in the only order they can stack: ו (and), then
+ * ש (that), then one of ב/כ/ל/מ (in/as/to/from), then ה (the) — "ושהליינאפ".
+ * Each class appears at most once, so a matching letter INSIDE the word can't
+ * trigger a second strip from the same class ("ליינאפ" must not lose its ל
+ * after the article was already peeled off "הליינאפ").
+ */
+const PREFIX_STACK = [/^ו/, /^ש/, /^[בכלמ]/, /^ה/];
+/** Never strip down past this — two-letter stumps match half the chat. */
+const MIN_STEM = 3;
+
+/**
+ * A query token plus its de-prefixed Hebrew variants, original first.
+ *
+ * The 'simple' FTS config knows nothing about Hebrew morphology, so "הליינאפ"
+ * and "ליינאפ" are unrelated tokens to it — and question phrasing adds the
+ * definite article almost by default ("מה רועי אמר על הליינאפ?" vs his
+ * "ליינאפ"). Measured live 2026-07-18: that exact mismatch made lexical search
+ * return nothing and @Aida deny a message that existed.
+ *
+ * Expanding the QUERY side is deliberate: it needs no migration and no reindex.
+ * The cost is over-stripping ("מחשבה" also searches "חשבה"), which is harmless
+ * here — these are OR terms in a RANKED list fused by RRF, so a bogus variant
+ * adds candidates, never removes them. The reverse direction (message has the
+ * prefix, query doesn't) would need index-side stripping and is NOT covered.
+ */
+export function lexicalTokenVariants(token: string): string[] {
+  const variants = [token];
+  let stem = token;
+  for (const prefix of PREFIX_STACK) {
+    if (!prefix.test(stem)) continue; // classes are optional; order is not
+    const stripped = stem.slice(1);
+    if (stripped.length < MIN_STEM) break;
+    variants.push(stripped);
+    stem = stripped;
+  }
+  return variants;
+}
+
 export async function searchMessagesLexical(
   client: pg.Pool | pg.PoolClient,
   groupId: number,
@@ -168,38 +220,88 @@ export async function searchMessagesLexical(
   // malformed syntax — the safety here comes from the tokenization below, NOT the
   // function: `[\p{L}\p{N}]+` keeps only alphanumeric runs (any script), stripping
   // every tsquery operator, so the terms can never form invalid syntax or inject.
+  // (Slicing a safe token in lexicalTokenVariants preserves that property.)
   // ts_rank still orders by how well each row matches, so more overlap ranks higher.
   const tokens = queryText.match(/[\p{L}\p{N}]+/gu) ?? [];
   if (tokens.length === 0) return []; // nothing lexical to search
-  const tsquery = [...new Set(tokens)].join(" | ");
+  const variants = [...new Set(tokens.flatMap(lexicalTokenVariants))];
+
+  /**
+   * Keep only DISTINCTIVE terms — ts_rank has no notion of rarity, and the
+   * common words a question is phrased with (מה/על/מי…) match so many messages
+   * that they fill the LIMIT and bury the one rare-word hit this search exists
+   * to find. Measured live (group 70, 9.1k messages): מה=553, על=364, רועי=176
+   * vs ליינאפ=3 — the lineup message never reached the top 40.
+   *
+   * A term is distinctive when it matches ≤1% of the group's text messages
+   * (floor 10, so tiny groups aren't filtered to death). If NOTHING is
+   * distinctive the filter falls back to every term — degraded is the old
+   * behavior, never an empty search.
+   */
+  const dfRes = await client.query<{ term: string; df: string; total: string }>(
+    `SELECT t.term,
+            (SELECT count(*) FROM messages m
+              WHERE m.group_id = $1
+                AND to_tsvector('simple', coalesce(m.text_content, '')) @@ to_tsquery('simple', t.term)
+            ) AS df,
+            (SELECT count(*) FROM messages m
+              WHERE m.group_id = $1 AND coalesce(m.text_content, '') <> ''
+            ) AS total
+       FROM unnest($2::text[]) AS t(term)`,
+    [groupId, variants],
+  );
+  const total = Number(dfRes.rows[0]?.total ?? 0);
+  const maxDf = Math.max(10, Math.ceil(total * 0.01));
+  const rareRows = dfRes.rows.filter((r) => Number(r.df) <= maxDf);
+  const kept = rareRows.length > 0 ? rareRows : dfRes.rows;
+  const tsquery = kept.map((r) => r.term).join(" | ");
+
+  /**
+   * IDF weights for the ORDER BY — the standard fix for "rank has no notion of
+   * rarity". ts_rank scores by term frequency only, so a match on אמר (df 37)
+   * ties a match on ליינאפ (df 3) and recency decides; with 40+ candidates the
+   * rare hit landed at rank 39, where RRF fusion weights it to nearly nothing.
+   * ln((total+1)/(df+1)) makes the rarest matched term dominate; sent_at stays
+   * as the tiebreak only.
+   */
+  const terms = kept.map((r) => r.term);
+  const weights = kept.map((r) => Math.log((total + 1) / (Number(r.df) + 1)));
 
   const res = await client.query<{
     id: string;
     sent_at: Date;
     sender: string;
     content: string;
+    is_aida: boolean;
   }>(
     `SELECT m.id,
             m.sent_at,
             COALESCE(p.display_name, 'Unknown') AS sender,
-            ${CONTENT_EXPR} AS content
+            ${CONTENT_EXPR} AS content,
+            (am.external_id IS NOT NULL) AS is_aida
        FROM messages m
        ${CONTENT_JOINS}
+       LEFT JOIN aida_messages am
+              ON am.group_id = m.group_id AND am.external_id = m.external_id
        , to_tsquery('simple', $2) q
       WHERE m.group_id = $1
         AND m.message_type <> 'system'
         ${EXCLUDE_ASK_MENTION}
         AND to_tsvector('simple', coalesce(m.text_content, '')) @@ q
         AND ${CONTENT_EXPR} <> ''
-      ORDER BY ts_rank(to_tsvector('simple', coalesce(m.text_content, '')), q) DESC,
+      ORDER BY (SELECT coalesce(sum(tw.w), 0)
+                  FROM unnest($4::text[], $5::float8[]) AS tw(term, w)
+                 WHERE to_tsvector('simple', coalesce(m.text_content, ''))
+                       @@ to_tsquery('simple', tw.term)) DESC,
                m.sent_at DESC
       LIMIT $3`,
-    [groupId, tsquery, limit],
+    [groupId, tsquery, limit, terms, weights],
   );
   return res.rows.map((r) => ({
     messageId: Number(r.id),
     sentAt: r.sent_at,
     sender: r.sender,
     content: r.content,
+    isAida: r.is_aida,
   }));
 }

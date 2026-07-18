@@ -3,7 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 import { resolveSenderName } from "../summarization/sender-name.js";
 import type { Embedder } from "./embedder.js";
-import { fenceRetrieved, neutralizeFence } from "./prompt.js";
+import { citeTag, fenceRetrieved, neutralizeFence } from "./prompt.js";
 import { searchMessagesHybrid } from "./retrieval.js";
 
 /** The one Slice-1 tool: search THIS group's history. groupId + the original
@@ -43,8 +43,12 @@ export function makeSearchChatTool(deps: {
       // "never searched" are different bugs, and the probe must distinguish them.
       deps.onRetrieved?.(hits.map((h) => h.messageId));
       if (hits.length === 0) return "(no matching messages)";
+      // Tool results carry [msg:N] too: a message she found by searching is as
+      // citable as one handed to her, and an id space that covered only the
+      // pre-seeded hits would make her cite ids the caller cannot resolve.
       const lines = hits.map(
-        (h) => `${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
+        (h) =>
+          `${citeTag(h.messageId)} ${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
       );
       return fenceRetrieved(lines);
     },

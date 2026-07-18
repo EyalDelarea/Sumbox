@@ -487,6 +487,8 @@ export async function handleIncomingMessage(
     textContent: mapped.textContent ?? "",
     mediaFilename,
     fromMe: mapped.fromMe,
+    // Carried so this message can later be quote-replied with its real author.
+    senderJid: mapped.senderJid,
   };
 
   const [normalized] = normalize([importedMsg], {

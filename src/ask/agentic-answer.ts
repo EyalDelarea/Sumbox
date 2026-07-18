@@ -2,9 +2,12 @@ import { type LanguageModel, generateText as sdkGenerateText, stepCountIs } from
 import type pg from "pg";
 import { resolveSenderName } from "../summarization/sender-name.js";
 import { makeSearchChatTool } from "./agentic-tools.js";
+import { attributeSources } from "./attribution.js";
+import type { CitedAnswer } from "./citations.js";
 import type { Embedder } from "./embedder.js";
 import {
   buildAgenticSystem,
+  citeTag,
   fenceRetrieved,
   NOT_IN_CHAT,
   neutralizeFence,
@@ -86,8 +89,9 @@ export type AgenticDeps = {
 export async function answerAgentic(
   deps: AgenticDeps,
   input: { groupId: number; question: string; asOf?: Date; excludeExternalId?: string },
-): Promise<string> {
+): Promise<CitedAnswer> {
   const generate = deps.generate ?? (sdkGenerateText as unknown as GenerateFn);
+
   const searchChat = makeSearchChatTool({
     pool: deps.pool,
     embedder: deps.embedder,
@@ -177,5 +181,13 @@ export async function answerAgentic(
         )(deps.trace, run)
       : await run();
   const trimmed = (text ?? "").trim();
-  return trimmed.length > 0 ? trimmed : NOT_IN_CHAT;
+  if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
+
+  // Post-hoc: the answer above is already final and was produced from a prompt
+  // with no ids in it. This pass only labels it — it cannot change a word.
+  const citedIds = await attributeSources(
+    { model: deps.model, ...(deps.generate ? { generate: deps.generate } : {}) },
+    { question: input.question, answer: trimmed, candidates: [...window, ...freshHits] },
+  );
+  return { text: trimmed, citedIds };
 }

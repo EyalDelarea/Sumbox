@@ -24,7 +24,7 @@ describe("answerAgentic", () => {
       { pool: noMessagesPool, embedder, model, generate: generate as never },
       { groupId: 7, question: "מה קורה?" },
     );
-    expect(out).toBe("תכף תכף... הכל טוב");
+    expect(out.text).toBe("תכף תכף... הכל טוב");
     expect(generate).toHaveBeenCalledOnce();
   });
 
@@ -35,7 +35,7 @@ describe("answerAgentic", () => {
       { pool: noMessagesPool, embedder, model, generate: generate as never },
       { groupId: 7, question: "x" },
     );
-    expect(out).toBe(NOT_IN_CHAT);
+    expect(out.text).toBe(NOT_IN_CHAT);
   });
 
   it("enables generateText telemetry only when deps.telemetry is set", async () => {

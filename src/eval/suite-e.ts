@@ -43,6 +43,19 @@ export type TaskOutput = {
   goldIds: number[];
   /** How many times search_chat ran. Zero is a distinct, deterministic bug. */
   toolCalls: number;
+  /**
+   * The message ids she cited, already validated against what the fence showed
+   * her.
+   *
+   * There is deliberately NO citation-validity metric: extractCitations drops an
+   * unknown id before it ever reaches here, so any such score would read 1.00 by
+   * construction and measure our own filter rather than her behaviour — the same
+   * trap `searched_on_own_initiative` fell into when it counted the pre-seed as
+   * a tool call. Validity is enforced structurally instead; what is worth
+   * measuring is whether she cites at all, and whether the answer rests on one
+   * source (which is what makes the reply pin to it).
+   */
+  citedIds: number[];
 };
 
 /** Langfuse's evaluator return shape. */
@@ -132,12 +145,53 @@ export function searchedOnOwnInitiative({ item, output }: EvalInput): Evaluation
   };
 }
 
+/**
+ * Did she cite a source at all? DIAGNOSTIC — the spike measured 92% emission,
+ * and a drop below that means the prompt has stopped landing.
+ *
+ * Scoped to items that expect an answer (D_absent = no gold): a correct refusal
+ * has no source to cite, and extractCitations discards citations on one anyway,
+ * so counting D_absent items here would penalise her for being right.
+ */
+export function citedASource({ item, output }: EvalInput): Evaluation {
+  if (item.goldExternalIds.length === 0)
+    return { name: "cited_a_source", value: 1, comment: "n/a (D_absent)" };
+  const cited = output.citedIds.length > 0;
+  return {
+    name: "cited_a_source",
+    value: cited ? 1 : 0,
+    comment: cited ? `cited ${output.citedIds.length}` : "no citation (reply pins to the asker)",
+  };
+}
+
+/**
+ * Did the answer rest on exactly ONE source? DIAGNOSTIC — this is the share of
+ * replies that actually quote-reply their source, so it measures the feature's
+ * real reach rather than whether the code ran.
+ *
+ * Not a gate, and NOT to be optimised upward: a summary genuinely spanning
+ * several messages SHOULD cite several and pin to none. Pushing this number up
+ * would mean teaching her to under-cite, which is the opposite of the point.
+ */
+export function citedExactlyOne({ item, output }: EvalInput): Evaluation {
+  if (item.goldExternalIds.length === 0)
+    return { name: "cited_exactly_one", value: 1, comment: "n/a (D_absent)" };
+  const one = output.citedIds.length === 1;
+  return {
+    name: "cited_exactly_one",
+    value: one ? 1 : 0,
+    comment: one ? "pins to its source" : `cited ${output.citedIds.length} — pins to the asker`,
+  };
+}
+
 export const EVALUATORS = [
   falseDenialGeneration,
   falseDenialRetrieval,
   falseAffirmation,
   retrievalHit,
   searchedOnOwnInitiative,
+  citedASource,
+  citedExactlyOne,
 ] as const;
 
 /** Run every evaluator over one item's output. */

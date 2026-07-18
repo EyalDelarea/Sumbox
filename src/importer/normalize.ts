@@ -56,6 +56,7 @@ export function normalize(messages: ImportedMessage[], ctx: NormalizeContext): N
       dedupeKey,
       externalId,
       fromMe: msg.fromMe ?? null,
+      senderJid: msg.senderJid ?? null,
     };
   });
 }

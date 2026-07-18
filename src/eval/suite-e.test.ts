@@ -34,6 +34,7 @@ const out = (over: Partial<TaskOutput> = {}): TaskOutput => ({
   retrievedIds: [1, 2],
   goldIds: [1],
   toolCalls: 1,
+  citedIds: [1],
   ...over,
 });
 
@@ -119,6 +120,8 @@ describe("evaluateAll / summarize", () => {
       "false_affirmation",
       "retrieval_hit",
       "searched_on_own_initiative",
+      "cited_a_source",
+      "cited_exactly_one",
     ]);
   });
 

@@ -86,7 +86,7 @@ export async function runSandbox(deps: SandboxDeps): Promise<SandboxResult[]> {
           },
         },
         { groupId: deps.group, question: item.question },
-      );
+      ).then((a) => a.text);
     } catch (err) {
       out = `<<ERROR: ${err instanceof Error ? err.message : String(err)}>>`;
     }

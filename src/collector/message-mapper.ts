@@ -21,6 +21,13 @@ export type MappedMessage = {
    */
   remoteJidAlt: string | null;
   senderName: string;
+  /**
+   * The author's JID (`key.participant` in a group, the chat jid in a 1:1), or
+   * null when WhatsApp ships neither. Stored so a message can be quote-replied
+   * with correct attribution — Baileys builds a quote's author from this, and a
+   * display_name cannot be reversed into it.
+   */
+  senderJid: string | null;
   sentAt: Date;
   messageType: ImportedMessageType;
   textContent: string | null;
@@ -87,6 +94,17 @@ export function mapWaMessage(waMessage: WAMessage): MappedMessage | null {
   const senderName: string =
     (waMessage.pushName as string | undefined) ?? key.participant ?? remoteJid;
 
+  /**
+   * The AUTHOR's own JID, kept as an identity rather than folded into a name.
+   *
+   * In a group the author is key.participant; in a 1:1 the chat jid IS the
+   * person. senderName above may collapse to the same string, but only by
+   * accident when pushName is missing — a display name cannot be turned back
+   * into a JID, so quoting someone's message needs this stored separately.
+   */
+  const senderJid: string | null =
+    key.participant ?? (remoteJid.endsWith("@g.us") ? null : remoteJid);
+
   // Resolve timestamp
   const sentAt = new Date(timestampToMs(waMessage.messageTimestamp));
 
@@ -106,6 +124,7 @@ export function mapWaMessage(waMessage: WAMessage): MappedMessage | null {
     remoteJid,
     remoteJidAlt,
     senderName,
+    senderJid,
     sentAt,
     messageType: mapped.messageType,
     textContent: mapped.textContent,

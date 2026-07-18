@@ -44,7 +44,7 @@ describe("maybeHandleAskCommand", () => {
       resolveEnabledJids: async () => new Set([JID]),
       sendText: vi.fn(async () => ({ key: { id: "s1" } }) as WAMessage),
       inFlight: new Set<number>(),
-      answer: vi.fn(async () => "לפי השיחה, נפגשים ב-21:00."),
+      answer: vi.fn(async () => ({ text: "לפי השיחה, נפגשים ב-21:00.", citedIds: [] })),
       ...over,
     };
   }
@@ -55,6 +55,173 @@ describe("maybeHandleAskCommand", () => {
     expect(ok).toBe(true);
     expect(d.answer).toHaveBeenCalledWith({ groupId, question: "מתי נפגשים?" });
     expect(d.sendText).toHaveBeenCalledWith(JID, "לפי השיחה, נפגשים ב-21:00.", expect.anything());
+  });
+
+  /** A real message she could cite. Returns its internal id. */
+  async function seedMessage(over: {
+    text: string;
+    externalId: string;
+    authorJid?: string | null;
+    fromMe?: boolean;
+  }): Promise<number> {
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO participants (display_name) VALUES ($1)
+         ON CONFLICT (tenant_id, display_name) DO UPDATE SET display_name = EXCLUDED.display_name
+       RETURNING id`,
+      [`author-${over.externalId}`],
+    );
+    const pid = Number(rows[0]!.id);
+    // The jid lives on the MESSAGE, not the participant — a display_name is
+    // shared by anyone with the same pushName.
+    const { rows: m } = await pool.query<{ id: string }>(
+      `INSERT INTO messages
+         (group_id, participant_id, source, external_id, message_type, text_content,
+          sent_at, dedupe_key, from_me, sender_jid)
+       VALUES ($1,$2,'live',$3,'text',$4, now(), $5, $6, $7) RETURNING id`,
+      [
+        groupId,
+        pid,
+        over.externalId,
+        over.text,
+        `dk-${over.externalId}`,
+        over.fromMe ?? false,
+        over.authorJid ?? null,
+      ],
+    );
+    return Number(m[0]!.id);
+  }
+
+  it("quote-replies the SOURCE message when she cites exactly one", async () => {
+    const srcId = await seedMessage({
+      text: "נפגשים ב-21:00 בכיכר",
+      externalId: "SRC1",
+      authorJid: "972500000001@s.whatsapp.net",
+    });
+    const makeQuoted = vi.fn(() => ({ key: { id: "SRC1" } }) as WAMessage);
+    const d = deps({
+      answer: vi.fn(async () => ({ text: "תכף תכף... ב-21:00 בכיכר.", citedIds: [srcId] })),
+      makeQuoted,
+    });
+
+    expect(await maybeHandleAskCommand(askMsg("@אידה איפה אמרנו שנפגשים?"), d)).toBe(true);
+    // Quoted with the AUTHOR's identity — crediting it to us would put their
+    // words in the owner's mouth.
+    expect(makeQuoted).toHaveBeenCalledWith(JID, "SRC1", "נפגשים ב-21:00 בכיכר", {
+      jid: "972500000001@s.whatsapp.net",
+      fromMe: false,
+    });
+    expect(d.sendText).toHaveBeenCalledWith(JID, "תכף תכף... ב-21:00 בכיכר.", {
+      quoted: { key: { id: "SRC1" } },
+    });
+  });
+
+  it("quotes the ASKER when she cites MANY — a summary has no single source", async () => {
+    const a = await seedMessage({ text: "א", externalId: "M1", authorJid: "1@s.whatsapp.net" });
+    const b = await seedMessage({ text: "ב", externalId: "M2", authorJid: "2@s.whatsapp.net" });
+    const makeQuoted = vi.fn();
+    const d = deps({
+      answer: vi.fn(async () => ({ text: "דיברנו על הכל.", citedIds: [a, b] })),
+      makeQuoted,
+    });
+
+    await maybeHandleAskCommand(askMsg("@אידה על מה דיברנו?"), d);
+    expect(makeQuoted).not.toHaveBeenCalled();
+    // quoted is the triggering message, i.e. the asker
+    expect(d.sendText).toHaveBeenCalledWith(JID, "דיברנו על הכל.", {
+      quoted: expect.objectContaining({ key: expect.objectContaining({ id: "m1" }) }),
+    });
+  });
+
+  it("quotes the ASKER when she cites nothing (~8% of replies)", async () => {
+    const makeQuoted = vi.fn();
+    const d = deps({ makeQuoted });
+    await maybeHandleAskCommand(askMsg("@אידה מה?"), d);
+    expect(makeQuoted).not.toHaveBeenCalled();
+  });
+
+  it("does NOT quote a source whose author we never recorded", async () => {
+    // Imported history and anything ingested before jids were stored. Quoting it
+    // would misattribute, so the pin is dropped — the answer still sends.
+    const srcId = await seedMessage({ text: "משהו ישן", externalId: "OLD1", authorJid: null });
+    const makeQuoted = vi.fn();
+    const d = deps({
+      answer: vi.fn(async () => ({ text: "תכף תכף... כן.", citedIds: [srcId] })),
+      makeQuoted,
+    });
+
+    expect(await maybeHandleAskCommand(askMsg("@אידה מה אמרו?"), d)).toBe(true);
+    expect(makeQuoted).not.toHaveBeenCalled();
+    expect(d.sendText).toHaveBeenCalledWith(JID, "תכף תכף... כן.", expect.anything());
+  });
+
+  it("quotes her OWN past message without needing an author jid", async () => {
+    // from_me carries the attribution by itself — it's us either way.
+    const srcId = await seedMessage({
+      text: "תכף תכף... אמרתי 21:00",
+      externalId: "MINE1",
+      authorJid: null,
+      fromMe: true,
+    });
+    const makeQuoted = vi.fn(() => ({ key: { id: "MINE1" } }) as WAMessage);
+    const d = deps({
+      answer: vi.fn(async () => ({ text: "כן, אמרתי.", citedIds: [srcId] })),
+      makeQuoted,
+    });
+
+    await maybeHandleAskCommand(askMsg("@אידה מה אמרת?"), d);
+    expect(makeQuoted).toHaveBeenCalledWith(JID, "MINE1", "תכף תכף... אמרתי 21:00", {
+      jid: null,
+      fromMe: true,
+    });
+  });
+
+  it("attributes the quote to THIS message's author, not to a name-sharing stranger", async () => {
+    // Regression: the jid used to hang off the participant row, which is keyed on
+    // display_name (from pushName — self-chosen, not unique across chats). Two
+    // people called "אמא" in two groups share one row, so the stored jid was
+    // whoever spoke last, and a quote here could carry another group's jid.
+    // sender_jid is per-message, so the collision cannot reach attribution.
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO participants (display_name) VALUES ('אמא')
+         ON CONFLICT (tenant_id, display_name) DO UPDATE SET display_name = EXCLUDED.display_name
+       RETURNING id`,
+    );
+    const shared = Number(rows[0]!.id);
+    const mk = async (ext: string, jid: string) => {
+      const { rows: m } = await pool.query<{ id: string }>(
+        `INSERT INTO messages
+           (group_id, participant_id, source, external_id, message_type, text_content,
+            sent_at, dedupe_key, from_me, sender_jid)
+         VALUES ($1,$2,'live',$3,'text','שלום', now(), $4, false, $5) RETURNING id`,
+        [groupId, shared, ext, `dk-${ext}`, jid],
+      );
+      return Number(m[0]!.id);
+    };
+    // Both rows share ONE participant, but each keeps its own author.
+    const first = await mk("AMA1", "972500000011@s.whatsapp.net");
+    await mk("AMA2", "972500000022@s.whatsapp.net"); // the later speaker
+
+    const makeQuoted = vi.fn(() => ({ key: { id: "AMA1" } }) as WAMessage);
+    const d = deps({
+      answer: vi.fn(async () => ({ text: "היא אמרה שלום.", citedIds: [first] })),
+      makeQuoted,
+    });
+    await maybeHandleAskCommand(askMsg("@אידה מה אמא אמרה?"), d);
+    expect(makeQuoted).toHaveBeenCalledWith(JID, "AMA1", "שלום", {
+      jid: "972500000011@s.whatsapp.net", // the FIRST author, not the last writer
+      fromMe: false,
+    });
+  });
+
+  it("still answers when the cited id is unknown or from another group", async () => {
+    const makeQuoted = vi.fn();
+    const d = deps({
+      answer: vi.fn(async () => ({ text: "תכף תכף... כן.", citedIds: [99999999] })),
+      makeQuoted,
+    });
+    expect(await maybeHandleAskCommand(askMsg("@אידה מה?"), d)).toBe(true);
+    expect(makeQuoted).not.toHaveBeenCalled();
+    expect(d.sendText).toHaveBeenCalledWith(JID, "תכף תכף... כן.", expect.anything());
   });
 
   it("ignores a message with no @Aida tag", async () => {
@@ -155,7 +322,7 @@ describe("reply-threading", () => {
     resolveEnabledJids: async () => new Set([RJID]),
     sendText: vi.fn(async () => ({ key: { id: "sent-1" } }) as WAMessage),
     inFlight: new Set<number>(),
-    answer: vi.fn(async () => "תכף תכף... אתמול דיברנו על זה."),
+    answer: vi.fn(async () => ({ text: "תכף תכף... אתמול דיברנו על זה.", citedIds: [] })),
     ...over,
   });
 

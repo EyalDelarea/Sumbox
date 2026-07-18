@@ -1,5 +1,8 @@
+import type { LanguageModel } from "ai";
 import type pg from "pg";
 import { estimateTokens } from "../summarization/prompt.js";
+import { attributeSources } from "./attribution.js";
+import type { CitedAnswer } from "./citations.js";
 import type { Embedder } from "./embedder.js";
 import {
   type AskContextMessage,
@@ -21,6 +24,17 @@ export type AnswerDeps = {
   pool: pg.Pool | pg.PoolClient;
   embedder: Embedder;
   llm: AskLlm;
+  /**
+   * Model for the post-hoc attribution pass (see attribution.ts). Optional, and
+   * separate from `llm`: this path answers through the summarizer, which has no
+   * LanguageModel to hand.
+   *
+   * Absent → the answer still sends, it just carries no source to pin to. That
+   * is the right default here — this is the FALLBACK path (answer-dispatch only
+   * reaches it when the agentic path is off or has thrown), and a rare reply
+   * that quotes the asker beats wiring a second model into an error path.
+   */
+  attributionModel?: LanguageModel;
   /** How many messages to retrieve before budget-trimming. Default 40. */
   retrieveK?: number;
   /** Max estimated prompt tokens; oldest retrieved messages are dropped to fit. */
@@ -48,7 +62,7 @@ const DEFAULT_WINDOW_N = 20;
 export async function answerQuestion(
   deps: AnswerDeps,
   input: { groupId: number; question: string; asOf?: Date; excludeExternalId?: string },
-): Promise<string> {
+): Promise<CitedAnswer> {
   const k = deps.retrieveK ?? DEFAULT_K;
   const budget = deps.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
   const windowN = deps.windowN ?? DEFAULT_WINDOW_N;
@@ -75,7 +89,7 @@ export async function answerQuestion(
   // not "it wasn't discussed". But the window reads raw messages, so if it has
   // anything we can still answer honestly from what is right there; claiming "no
   // access" while holding the last 20 messages would be its own false statement.
-  if (retrieved.length === 0 && window.length === 0) return NOT_INDEXED;
+  if (retrieved.length === 0 && window.length === 0) return { text: NOT_INDEXED, citedIds: [] };
 
   // Search hits already in the window would be rendered twice — wasted budget,
   // and duplicate evidence reads as corroboration to the model.
@@ -85,7 +99,18 @@ export async function answerQuestion(
   const context = fitToBudget(input.question, deduped, budget, window);
   const answer = await deps.llm.answer(buildAskPrompt(input.question, context, window));
   const trimmed = answer.trim();
-  return trimmed.length > 0 ? trimmed : NOT_IN_CHAT;
+  if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
+
+  // Post-hoc, and only over what she was actually shown: the window plus the
+  // budget-TRIMMED context, never the full retrieved set. A message trimmed out
+  // of the prompt cannot be the source of what she wrote.
+  const citedIds = deps.attributionModel
+    ? await attributeSources(
+        { model: deps.attributionModel },
+        { question: input.question, answer: trimmed, candidates: [...window, ...context] },
+      )
+    : [];
+  return { text: trimmed, citedIds };
 }
 
 /**

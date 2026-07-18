@@ -136,13 +136,31 @@ export class CollectorSession extends EventEmitter {
 
   /**
    * Reconstruct a minimal quoted message from a stored message id + text, so we
-   * can reply-quote a message we sent earlier but no longer hold in memory (e.g.
-   * a previous summary, after a collector restart). Baileys derives the quoted
-   * author from `fromMe`; we also set participant to our own JID when known.
+   * can reply-quote a message we no longer hold in memory (e.g. a previous
+   * summary after a collector restart, or the source @Aida cited).
+   *
+   * `author` exists because a quote asserts WHO said the thing. It defaults to
+   * us, which is right for our own past messages — the original use — but a
+   * cited source usually belongs to someone else, and claiming their words as
+   * ours would be a false attribution in the group. Pass the real author when
+   * quoting anyone else.
    */
-  quotedFrom(jid: string, waMessageId: string, text: string): WAMessage {
+  quotedFrom(
+    jid: string,
+    waMessageId: string,
+    text: string,
+    author?: { jid?: string | null; fromMe?: boolean },
+  ): WAMessage {
+    const fromMe = author?.fromMe ?? true;
     return {
-      key: { remoteJid: jid, fromMe: true, id: waMessageId, participant: this.socket?.user?.id },
+      key: {
+        remoteJid: jid,
+        fromMe,
+        id: waMessageId,
+        // Ours → our own JID, as before. Someone else's → theirs; Baileys reads
+        // this to name the quoted author.
+        participant: fromMe ? this.socket?.user?.id : (author?.jid ?? undefined),
+      },
       message: { conversation: text },
     } as WAMessage;
   }

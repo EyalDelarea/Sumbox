@@ -3,6 +3,14 @@ import type pg from "pg";
 /**
  * Upsert a participant by display_name.
  * Returns the participant id as a number.
+ *
+ * Deliberately does NOT record a JID, though the table has a (dormant)
+ * whatsapp_id column. This row is keyed on display_name, which comes from
+ * pushName — self-chosen and not unique across chats — so two different people
+ * sharing a name collapse into one row here. A jid hung off that row would
+ * belong to whoever spoke most recently under the name. Author identity lives on
+ * `messages.sender_jid` instead, where it is per-message and inside the group
+ * scope. See migration 1784288081956.
  */
 export async function upsertParticipant(
   client: pg.Pool | pg.PoolClient,

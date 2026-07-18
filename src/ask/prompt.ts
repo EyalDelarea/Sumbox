@@ -1,7 +1,21 @@
 import { resolveSenderName } from "../summarization/sender-name.js";
 
 /** One retrieved message for the answer context. */
-export type AskContextMessage = { sentAt: Date; sender: string; content: string };
+export type AskContextMessage = {
+  /**
+   * The internal `messages.id`, rendered into the fence as `[msg:N]` so she can
+   * cite the message a claim came from.
+   *
+   * Internal id, not the WhatsApp external_id: it is short enough for a small
+   * model to copy without transcription errors (the spike measured 92% emission,
+   * zero invented ids), and both answer paths already carry it as
+   * RetrievedMessage.messageId — so the two cite in the same id space.
+   */
+  messageId: number;
+  sentAt: Date;
+  sender: string;
+  content: string;
+};
 
 export type AskPrompt = { system: string; user: string };
 
@@ -62,6 +76,17 @@ export type AskWindowMessage = AskContextMessage & { isAida: boolean };
 
 /** How @Aida's own turns are attributed in the window. */
 const AIDA_SENDER = "אידה";
+
+/**
+ * The citation handle for a message, as it appears in the fence and in her reply.
+ *
+ * One function so the rendered tag and the extractor can never drift into
+ * different formats — a mismatch would read as "she cited nothing" rather than
+ * failing loudly.
+ */
+export function citeTag(messageId: number): string {
+  return `[msg:${messageId}]`;
+}
 
 /** Render one retrieved message as a transcript line (sender resolved, fences neutralized). */
 function renderLine(m: AskContextMessage): string {
