@@ -44,6 +44,7 @@
  */
 
 import { type LanguageModel, generateText as sdkGenerateText } from "ai";
+import { matchAskTrigger } from "../collector/ask-trigger.js";
 import type { RetrievedMessage } from "../db/repositories/message-embeddings.js";
 import { resolveSenderName } from "../summarization/sender-name.js";
 import { parseCitedIds } from "./citations.js";
@@ -67,6 +68,11 @@ const ATTRIBUTE_SYSTEM = [
   "You are given numbered messages and an answer someone wrote about them.",
   "Reply with ONLY the id(s) of the message(s) the answer is based on, like [msg:123].",
   "Cite the single best message when one message carries the answer.",
+  // Measured live: the answer restates the question's words, so the question
+  // "matches" textually and got cited alongside the real source — which turned
+  // a one-source answer into a no-pin multi-cite. Tagged questions are filtered
+  // out before the model ever sees them; this line covers untagged ones.
+  "The question itself is NEVER a source — cite the message that ANSWERS it, not a message that asks it.",
   "If the answer draws on several messages, give each. If none match, reply NONE.",
   "Output ids only. No words, no explanation.",
 ].join("\n");
@@ -99,8 +105,22 @@ export async function attributeSources(
   // whole round-trip on exactly the replies that need it least.
   if (REFUSALS.some((r) => answer.includes(r))) return [];
 
-  const valid = new Set(input.candidates.map((m) => m.messageId));
-  const lines = input.candidates.map(
+  // Two kinds of candidate can never be a source, filtered deterministically —
+  // not left to the prompt:
+  //  - a question addressed to her (every tagged trigger, including the very
+  //    question being answered — it sits in the recency window by the time she
+  //    replies). Untagged reply-thread questions are the prompt's job.
+  //  - her OWN past replies. An echo of someone's words matches the new answer
+  //    at least as well as the original (measured live: asked twice, the second
+  //    answer cited the first), and pinning an echo credits the words to the
+  //    owner's account. Primary sources only.
+  const candidates = input.candidates.filter(
+    (m) => m.isAida !== true && matchAskTrigger(m.content) === null,
+  );
+  if (candidates.length === 0) return [];
+
+  const valid = new Set(candidates.map((m) => m.messageId));
+  const lines = candidates.map(
     (m) =>
       `${citeTag(m.messageId)} ${neutralizeFence(resolveSenderName(m.sender))}: ${neutralizeFence(
         m.content,

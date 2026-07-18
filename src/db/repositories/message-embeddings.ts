@@ -98,6 +98,14 @@ export type RetrievedMessage = {
   sentAt: Date;
   sender: string;
   content: string;
+  /**
+   * True when @Aida herself sent it (per the aida_messages marker). Carried so
+   * attribution can refuse to cite her own replies: an echo of someone's words
+   * matches the new answer at least as well as the original, and pinning the
+   * echo would credit the words to the owner's account. Optional because some
+   * constructors of this shape (tests, older callers) don't know.
+   */
+  isAida?: boolean;
 };
 
 /**
@@ -119,14 +127,18 @@ export async function searchMessagesByEmbedding(
     sent_at: Date;
     sender: string;
     content: string;
+    is_aida: boolean;
   }>(
     `SELECT m.id,
             m.sent_at,
             COALESCE(p.display_name, 'Unknown') AS sender,
-            ${CONTENT_EXPR} AS content
+            ${CONTENT_EXPR} AS content,
+            (am.external_id IS NOT NULL) AS is_aida
        FROM message_embeddings e
        JOIN messages m ON m.id = e.message_id
        ${CONTENT_JOINS}
+       LEFT JOIN aida_messages am
+              ON am.group_id = m.group_id AND am.external_id = m.external_id
       WHERE m.group_id = $1
         AND m.message_type <> 'system'
         ${EXCLUDE_ASK_MENTION}
@@ -140,6 +152,7 @@ export async function searchMessagesByEmbedding(
     sentAt: r.sent_at,
     sender: r.sender,
     content: r.content,
+    isAida: r.is_aida,
   }));
 }
 
@@ -259,13 +272,17 @@ export async function searchMessagesLexical(
     sent_at: Date;
     sender: string;
     content: string;
+    is_aida: boolean;
   }>(
     `SELECT m.id,
             m.sent_at,
             COALESCE(p.display_name, 'Unknown') AS sender,
-            ${CONTENT_EXPR} AS content
+            ${CONTENT_EXPR} AS content,
+            (am.external_id IS NOT NULL) AS is_aida
        FROM messages m
        ${CONTENT_JOINS}
+       LEFT JOIN aida_messages am
+              ON am.group_id = m.group_id AND am.external_id = m.external_id
        , to_tsquery('simple', $2) q
       WHERE m.group_id = $1
         AND m.message_type <> 'system'
@@ -285,5 +302,6 @@ export async function searchMessagesLexical(
     sentAt: r.sent_at,
     sender: r.sender,
     content: r.content,
+    isAida: r.is_aida,
   }));
 }
