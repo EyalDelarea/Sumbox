@@ -100,7 +100,12 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
         windowIds = ids;
       },
     },
-    { groupId: item.groupId, question: item.question, asOf: new Date(item.asOf) },
+    {
+      groupId: item.groupId,
+      question: item.question,
+      asOf: new Date(item.asOf),
+      ...(item.askerName ? { askerName: item.askerName } : {}),
+    },
   );
 
   return {

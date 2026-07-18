@@ -138,6 +138,7 @@ export function buildAskPrompt(
   question: string,
   context: AskContextMessage[],
   window: AskWindowMessage[] = [],
+  opts: { askerName?: string } = {},
 ): AskPrompt {
   const transcript = context.map(renderLine).join("\n");
   const q = neutralizeFence(question.trim());
@@ -150,12 +151,30 @@ export function buildAskPrompt(
       transcript,
       FENCE_CLOSE,
       "",
+      ...askerLine(opts.askerName),
       "The question to answer:",
       Q_OPEN,
       q,
       Q_CLOSE,
     ].join("\n"),
   };
+}
+
+/**
+ * Who is asking — so a first-person question can be resolved.
+ *
+ * The transcript names every speaker, but nothing else says which of them is
+ * the "I" in "מה אמרתי על אלכס?" — measured live, she attributed the asker's
+ * own words to a third person and denied a fact sitting in her window. The name
+ * is untrusted chat metadata like everything else, so it is fence-neutralized;
+ * absent (older callers, evals without an asker) the prompt is byte-identical
+ * to before.
+ */
+export function askerLine(askerName?: string): string[] {
+  if (!askerName) return [];
+  return [
+    `The question below was asked by ${neutralizeFence(askerName)} — when it speaks in first person ("אמרתי", "שאלתי"), that is who it means.`,
+  ];
 }
 
 /** System prompt for the AGENTIC answer path: same guardrails as the single-shot

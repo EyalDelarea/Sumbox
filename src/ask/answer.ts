@@ -61,7 +61,13 @@ const DEFAULT_WINDOW_N = 20;
  */
 export async function answerQuestion(
   deps: AnswerDeps,
-  input: { groupId: number; question: string; asOf?: Date; excludeExternalId?: string },
+  input: {
+    groupId: number;
+    question: string;
+    asOf?: Date;
+    excludeExternalId?: string;
+    askerName?: string;
+  },
 ): Promise<CitedAnswer> {
   const k = deps.retrieveK ?? DEFAULT_K;
   const budget = deps.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
@@ -97,7 +103,9 @@ export async function answerQuestion(
   const deduped = retrieved.filter((m) => !windowIds.has(m.messageId));
 
   const context = fitToBudget(input.question, deduped, budget, window);
-  const answer = await deps.llm.answer(buildAskPrompt(input.question, context, window));
+  const answer = await deps.llm.answer(
+    buildAskPrompt(input.question, context, window, { askerName: input.askerName }),
+  );
   const trimmed = answer.trim();
   if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
 
