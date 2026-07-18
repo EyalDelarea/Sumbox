@@ -148,6 +148,91 @@ describe("searchMessagesLexical", () => {
     expect(await searchMessagesLexical(pool2, g, "!!! ??? ...", 10)).toEqual([]);
   });
 
+  it("finds a message when the question adds a Hebrew prefix the message lacks", async () => {
+    // Live false denial, 2026-07-18: Royi wrote "ליינאפ", the question asked
+    // about "הליינאפ", and the 'simple' tokenizer treats those as unrelated
+    // tokens — so lexical search returned nothing and she denied a message that
+    // existed. Hebrew glues ה/ו/ב/ל/מ/ש/כ onto the word, and question phrasing
+    // adds the definite article almost by default.
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const g = await upsertGroup(pool2, { name: "LEX-prefix", source: "import" });
+    const id = await seed(pool2, g, "נראה ליינאפ עם הרבה מחשבה מאחורי", "lex-prefix");
+    const hits = await searchMessagesLexical(pool2, g, "מה רועי אמר על הליינאפ?", 10);
+    expect(hits.map((h) => h.messageId)).toContain(id);
+  });
+
+  it("handles stacked prefixes (ושה־, מה־)", async () => {
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const g = await upsertGroup(pool2, { name: "LEX-prefix2", source: "import" });
+    const id = await seed(pool2, g, "קניתי מקרר חדש אתמול", "lex-prefix2");
+    const hits = await searchMessagesLexical(pool2, g, "מה קרה עם והמקרר", 10);
+    expect(hits.map((h) => h.messageId)).toContain(id);
+  });
+
+  it("does not strip a prefix into a too-short stump", async () => {
+    // "הבא" must not also search "בא" — two-letter stumps match half the chat
+    // and would flood the ranked list with noise.
+    const { lexicalTokenVariants } = await import("./message-embeddings.js");
+    expect(lexicalTokenVariants("הבא")).toEqual(["הבא"]);
+    expect(lexicalTokenVariants("מים")).toEqual(["מים"]);
+  });
+
+  it("expands only Hebrew-prefixed tokens, deep enough for stacked prefixes", async () => {
+    const { lexicalTokenVariants } = await import("./message-embeddings.js");
+    expect(lexicalTokenVariants("הליינאפ")).toEqual(["הליינאפ", "ליינאפ"]);
+    // ושה־ stacks three prefixes; the root must still be reachable.
+    expect(lexicalTokenVariants("ושהליינאפ")).toEqual([
+      "ושהליינאפ",
+      "שהליינאפ",
+      "הליינאפ",
+      "ליינאפ",
+    ]);
+    expect(lexicalTokenVariants("lineup")).toEqual(["lineup"]);
+    expect(lexicalTokenVariants("123")).toEqual(["123"]);
+  });
+
+  it("a rare keyword is not buried by common question-words", async () => {
+    // The live lineup failure's second half: after prefix expansion, "ליינאפ"
+    // DID match — but ts_rank has no notion of rarity, so the many messages
+    // matching מה/על/רועי outranked the single rare-word hit and filled the
+    // LIMIT. The rare exact token is this function's entire documented job.
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const g = await upsertGroup(pool2, { name: "LEX-rare", source: "import" });
+    const target = await seed(pool2, g, "ראיתי פינגווין כחול בגינה", "lex-rare-t");
+    // 30 NEWER messages sharing a common word with the question — enough to
+    // flood a small limit if common terms are allowed to rank.
+    for (let i = 0; i < 30; i++) {
+      await seed(pool2, g, `החתול ישן על הספה שוב ${i}`, `lex-rare-${i}`);
+    }
+    const hits = await searchMessagesLexical(pool2, g, "מה החתול אמר על הפינגווין?", 5);
+    expect(hits.map((h) => h.messageId)).toContain(target);
+  });
+
+  it("ranks a match on the rarest term first, not the newest match", async () => {
+    // Rank position matters downstream: RRF fusion weights by rank, so a
+    // rare-term hit at rank 39 contributes almost nothing. The rarest matched
+    // term must dominate the ordering — recency is only the tiebreak.
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const g = await upsertGroup(pool2, { name: "LEX-idf", source: "import" });
+    const target = await seed(pool2, g, "ראיתי פינגווין בגינה", "lex-idf-t");
+    for (let i = 0; i < 5; i++) {
+      // NEWER messages matching the more common term.
+      await seed(pool2, g, `דולפין שוחה בים ${i}`, `lex-idf-${i}`);
+    }
+    const hits = await searchMessagesLexical(pool2, g, "פינגווין או דולפין", 10);
+    expect(hits[0]?.messageId).toBe(target);
+  });
+
+  it("falls back to all terms when nothing in the query is rare", async () => {
+    const { searchMessagesLexical } = await import("./message-embeddings.js");
+    const g = await upsertGroup(pool2, { name: "LEX-common", source: "import" });
+    const id = await seed(pool2, g, "החתול אכל", "lex-common-1");
+    // Every query term is at/above the rarity floor in this tiny group — the
+    // filter must degrade to the old OR-everything behavior, not to nothing.
+    const hits = await searchMessagesLexical(pool2, g, "החתול", 5);
+    expect(hits.map((h) => h.messageId)).toContain(id);
+  });
+
   it("strips tsquery operator chars from a mixed query and still matches (to_tsquery never throws)", async () => {
     // to_tsquery is strict — it raises on raw `& | ! ( )`. The alphanumeric
     // tokenization must neutralize them so a query like this runs safely AND
