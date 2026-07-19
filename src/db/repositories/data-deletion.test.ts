@@ -146,6 +146,28 @@ describe("purgeUnselectedChats", () => {
     expect(await count("aida_messages", "group_id = $1", [included])).toBe(1);
   });
 
+  it("purges the group's /סיכום cursor with the chat it belongs to", async () => {
+    // Same shape as the aida_messages drift above, and the same trap: group_id is
+    // ON DELETE CASCADE from groups, but groups SURVIVE the unselected purge, so
+    // the cascade never fires and only the explicit DELETE removes these. Without
+    // a behavioral test, dropping that DELETE in a refactor breaks nothing visibly
+    // — the classification guard above only checks the list, not the deletion.
+    const unselected = await newGroup("mark-drop");
+    const included = await newGroup("mark-keep");
+    await admin.query(`INSERT INTO chat_scopes (group_id, included) VALUES ($1, true)`, [included]);
+    for (const g of [unselected, included]) {
+      await admin.query(
+        `INSERT INTO summary_group_marks (group_id, last_summarized_at) VALUES ($1, now())`,
+        [g],
+      );
+    }
+
+    await purgeUnselectedChats(admin);
+
+    expect(await count("summary_group_marks", "group_id = $1", [unselected])).toBe(0);
+    expect(await count("summary_group_marks", "group_id = $1", [included])).toBe(1);
+  });
+
   it("with olderThanDays, spares unselected chats that had recent activity", async () => {
     const dormant = await newGroup("dormant");
     const active = await newGroup("active");

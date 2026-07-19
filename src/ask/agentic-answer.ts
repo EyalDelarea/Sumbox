@@ -8,7 +8,6 @@ import type { Embedder } from "./embedder.js";
 import {
   askerLine,
   buildAgenticSystem,
-  citeTag,
   fenceRetrieved,
   NOT_IN_CHAT,
   neutralizeFence,

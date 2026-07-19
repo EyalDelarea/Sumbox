@@ -9,11 +9,17 @@
  * No message content leaves the device for inference — the summary is
  * Ollama-generated and returns to the same participants.
  *
- * Range = "since the last summary for this group" (any type). The most recent
- * `summaries.created_at` is the shared anchor; because runSummarize inserts a
- * summary row, each command advances the anchor for the next one. The per-user
- * read watermark is intentionally NOT touched, so members' commands never
- * consume the web app's catch-up state.
+ * Range = "since this group's last /סיכום". `summary_group_marks` holds one
+ * shared cursor per group, advanced only by a successful command — so every
+ * asker gets the same window and the conversation is summarized once, not once
+ * per participant. (It used to be a cursor per participant, which meant a member
+ * who hadn't asked in a week got a week-wide summary minutes after someone else
+ * got an hour-wide one.) The cursor deliberately does NOT fall back to
+ * `summaries.created_at`: the scheduled digest writes summary rows too, and
+ * anchoring on them would let a digest shrink the next manual window. A group
+ * with no cursor yet gets a last-N window. The per-user read watermark is
+ * intentionally NOT touched, so members' commands never consume the web app's
+ * catch-up state.
  *
  * ── Leak contract ───────────────────────────────────────────────────────────
  * This is the only path that sends into a WhatsApp group. A leak = a reply into
@@ -48,7 +54,7 @@
 
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
-import type { SummaryUserMark } from "../db/repositories/summary-user-marks.js";
+import type { SummaryGroupMark } from "../db/repositories/summary-group-marks.js";
 import { normalizeSummaryOutput } from "../summarization/normalize.js";
 import { stripAllMarkers } from "../summarization/parse-structured.js";
 import type { RunSummarizeResult } from "../summarization/summarize.js";
@@ -103,24 +109,27 @@ export type SummaryCommandDeps = {
    */
   resolvePn?: (lid: string) => Promise<string | null>;
   /**
-   * Per-user marks — the asker's own catch-up cursor and reply thread. Each
-   * person who runs the command gets "since I last asked" and quotes their own
-   * previous summary. Identity is the message sender resolved to a participant.
+   * The group's shared catch-up cursor and reply thread. One window per group:
+   * whoever asks, the summary covers everything since the last successful
+   * command, and the reply quotes the summary the group last received.
+   * `resolveParticipantId` survives the switch to a shared cursor — it no longer
+   * keys the window, only stamps `requesterId` on the summary row for adoption
+   * metrics.
    */
   marks: {
     resolveParticipantId: (senderName: string) => Promise<number>;
-    getMark: (groupId: number, participantId: number) => Promise<SummaryUserMark | null>;
+    getMark: (groupId: number) => Promise<SummaryGroupMark | null>;
+    /** Returns whether the write landed; the advance is monotonic and can refuse. */
     setMark: (m: {
       groupId: number;
-      participantId: number;
       lastSummarizedAt: Date;
       lastSummaryId: number;
       lastReplyWaMessageId: string | null;
-    }) => Promise<void>;
+    }) => Promise<boolean>;
     getSummaryOutput: (summaryId: number) => Promise<SummaryOutput | null>;
   };
-  /** Per-user in-memory fast path for the quote target (key `${groupId}:${participantId}`). */
-  lastSummaryByUser?: Map<string, WAMessage>;
+  /** In-memory fast path for the group's quote target, keyed by groupId. */
+  lastSummaryByGroup?: Map<number, WAMessage>;
   /**
    * Generate the summary for the ALREADY-verified group id, on the caller's
    * tenant-scoped pool (wired to runSummarizeOnPool in prod). Keyed on groupId —
@@ -136,7 +145,7 @@ export type SummaryCommandDeps = {
   log?: MinimalLog;
 };
 
-/** Fallback range when the group has no prior summary to anchor on. */
+/** Range for a group that has no shared marker yet. */
 const FALLBACK_LAST_N = 50;
 
 /**
@@ -145,6 +154,12 @@ const FALLBACK_LAST_N = 50;
  * reconnect (which auto-fires every few seconds on any blip). Without this
  * gate, a `/סיכום` in a replayed window would re-fire and send an unsolicited
  * reply. Live messages arrive within seconds; anything older is a replay.
+ *
+ * The gate is two-sided. `sentAt` is the sender's device clock, and it becomes
+ * the group's shared cursor — so a forward-skewed clock would write a future
+ * cursor that leaves every later /סיכום matching no messages, for everyone,
+ * with no in-app recovery. A one-sided check missed that entirely: `now - sentAt`
+ * is negative for a future message, which is never `> LIVENESS_WINDOW_MS`.
  */
 const LIVENESS_WINDOW_MS = 120_000;
 
@@ -192,9 +207,16 @@ export async function maybeHandleSummaryCommand(
   }
   if (!allowlist.has(jid)) return false;
 
-  // Ignore replayed/history messages (see LIVENESS_WINDOW_MS) — act on live only.
-  if (now() - mapped.sentAt.getTime() > LIVENESS_WINDOW_MS) {
-    deps.log?.info({ jid, sentAt: mapped.sentAt }, "summary command: stale (replay), skipping");
+  // Ignore replayed/history messages AND clock-skewed future ones (see
+  // LIVENESS_WINDOW_MS) — act on live only.
+  const drift = now() - mapped.sentAt.getTime();
+  if (Math.abs(drift) > LIVENESS_WINDOW_MS) {
+    deps.log?.info(
+      { jid, sentAt: mapped.sentAt, driftMs: drift },
+      drift > 0
+        ? "summary command: stale (replay), skipping"
+        : "summary command: future-dated (clock skew), skipping",
+    );
     return false;
   }
 
@@ -227,22 +249,14 @@ export async function maybeHandleSummaryCommand(
 
     // Identify the asker → their participant (same keying ingest used, so it
     // resolves the existing id). senderName falls back to the JID defensively.
+    // This no longer keys the window; it only stamps requesterId below.
     const senderName = (mapped.senderName ?? "").trim() || jid;
     const participantId = await deps.marks.resolveParticipantId(senderName);
-    const userKey = `${groupId}:${participantId}`;
-    const userMark = await deps.marks.getMark(groupId, participantId);
+    const groupMark = await deps.marks.getMark(groupId);
 
-    // Anchor: the asker's OWN last mark ("since I last asked"); a first-timer uses
-    // the group's most recent summary; nothing at all → a last-N window.
-    let anchor: Date | undefined = userMark?.lastSummarizedAt;
-    if (!anchor) {
-      const { rows: sRows } = await deps.pool.query<{ created_at: Date }>(
-        `SELECT created_at FROM summaries WHERE group_id = $1 ORDER BY created_at DESC LIMIT 1`,
-        [groupId],
-      );
-      anchor = sRows[0]?.created_at;
-    }
-    const selection = anchor ? { since: anchor } : { last: FALLBACK_LAST_N };
+    // One anchor: the group's shared cursor. No summaries.created_at fallback —
+    // see the header. A group that has never run the command gets a last-N window.
+    const selection = groupMark ? { since: groupMark.lastSummarizedAt } : { last: FALLBACK_LAST_N };
 
     const result = await deps.runSummarize({ groupId, selection, requesterId: participantId });
     const text =
@@ -253,29 +267,65 @@ export async function maybeHandleSummaryCommand(
             droppedCount: result.droppedCount,
           });
 
-    // Quote the asker's OWN previous summary to chain their thread. Prefer the
-    // live in-memory message; else reconstruct it from their mark (survives a
-    // restart); else quote the /סיכום request.
-    let quoted = deps.lastSummaryByUser?.get(userKey);
-    if (!quoted && userMark?.lastSummaryId && userMark.lastReplyWaMessageId && deps.makeQuoted) {
-      const out = await deps.marks.getSummaryOutput(userMark.lastSummaryId);
-      if (out)
-        quoted = deps.makeQuoted(jid, userMark.lastReplyWaMessageId, buildWhatsAppReply(out));
+    // Quote the GROUP's previous summary so the thread reads as one chain.
+    // Prefer the live in-memory message; else reconstruct it from the marker
+    // (survives a restart); else quote the /סיכום request.
+    let quoted = deps.lastSummaryByGroup?.get(groupId);
+    if (!quoted && groupMark?.lastSummaryId && groupMark.lastReplyWaMessageId && deps.makeQuoted) {
+      // Isolated: this lookup only rebuilds quote TEXT. Letting it throw past
+      // here would discard an already-generated summary over a decoration —
+      // and `lastSummaryId` is documented as "null if purged", so the row going
+      // missing is expected operation, not an exceptional case.
+      try {
+        const out = await deps.marks.getSummaryOutput(groupMark.lastSummaryId);
+        if (out)
+          quoted = deps.makeQuoted(jid, groupMark.lastReplyWaMessageId, buildWhatsAppReply(out));
+        else deps.log?.info({ groupId }, "summary command: previous summary gone, quoting request");
+      } catch (err) {
+        deps.log?.warn({ err, groupId }, "summary command: quote rebuild failed, quoting request");
+      }
     }
 
     const sent = await deps.sendText(jid, text, { quoted: quoted ?? msg });
 
-    // Only a real summary advances the user's cursor / thread (an empty "nothing
+    // Only a real summary advances the shared cursor / thread (an empty "nothing
     // new" reply is not a thread anchor and has no summary row to point at).
-    if (sent && result.kind === "ok" && sent.key?.id) {
-      deps.lastSummaryByUser?.set(userKey, sent);
-      await deps.marks.setMark({
-        groupId,
-        participantId,
-        lastSummarizedAt: mapped.sentAt,
-        lastSummaryId: result.summaryId,
-        lastReplyWaMessageId: sent.key.id,
-      });
+    if (result.kind === "ok") {
+      if (!sent?.key?.id) {
+        // Nothing to anchor the thread on and nothing to prove delivery, so the
+        // cursor cannot move — but the reply may well have gone out. Silence here
+        // reads as success in the logs while the group re-summarizes the same
+        // window on every subsequent command.
+        deps.log?.warn(
+          { groupId, summaryId: result.summaryId },
+          "summary command: send returned no confirmable message id; cursor did not advance, the next /סיכום will repeat this window",
+        );
+      } else {
+        // The summary is already delivered — a failure from here on is an
+        // operator problem, not a user-facing one. Falling through to the outer
+        // catch would post ERROR_REPLY directly beneath a good summary.
+        try {
+          const advanced = await deps.marks.setMark({
+            groupId,
+            lastSummarizedAt: mapped.sentAt,
+            lastSummaryId: result.summaryId,
+            lastReplyWaMessageId: sent.key.id,
+          });
+          // Cache only AFTER the durable write, so the in-memory quote target can
+          // never point past the cursor that decides the window.
+          if (advanced) deps.lastSummaryByGroup?.set(groupId, sent);
+          else
+            deps.log?.warn(
+              { groupId, lastSummarizedAt: mapped.sentAt },
+              "summary command: cursor did not advance — the stored mark is not older than this command",
+            );
+        } catch (err) {
+          deps.log?.warn(
+            { err, groupId, summaryId: result.summaryId },
+            "summary command: reply sent but the cursor did not advance; the next /סיכום will repeat this window",
+          );
+        }
+      }
     }
 
     await react("✅");
