@@ -123,6 +123,17 @@ describe("buildAskPrompt", () => {
     expect(system.toLowerCase()).not.toContain("citation");
   });
 
+  it("forbids the hedge-denial contradiction on both prompts", () => {
+    // "לא מצאתי... אבל [the answer]" — measured at false_denial_generation
+    // 0.18/0.09/0.00 across 3 runs; with this rule 0.08/0.00/0.00, and the two
+    // hedging items answered cleanly. (A sibling world-knowledge rule was tried
+    // in the same experiment and REVERTED: it moved nothing and taught her to
+    // dress the fabrication as "לפי מה שנאמר בשיחה".)
+    const { system } = buildAskPrompt("x", ctx);
+    expect(system).toContain("NEVER open with 'לא מצאתי' and then provide");
+    expect(buildAgenticSystem()).toContain("NEVER open with 'לא מצאתי' and then provide");
+  });
+
   it("names the asker so first-person questions can resolve", () => {
     // Live false denial: "מה אמרתי על אלכס?" with the answer in her window —
     // the transcript named every speaker but nothing said which one is the "I"
