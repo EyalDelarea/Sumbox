@@ -34,7 +34,6 @@ import type pg from "pg";
 export const SCOPED_TABLES_DELETE_ORDER = [
   // ── message/group-derived (most CASCADE from messages; listed for completeness) ──
   "read_watermarks",
-  "summary_user_marks", // → summaries (SET NULL) · groups/participants (CASCADE); delete before them
   "transcripts",
   "media_analyses",
   "message_embeddings",
@@ -135,7 +134,10 @@ export const UNSELECTED_PURGE_GROUP_TABLES = [
   "aida_messages",
   "summaries",
   "read_watermarks",
-  "summary_user_marks",
+  // The group's shared /סיכום cursor. The group row SURVIVES the unselected
+  // purge, so its ON DELETE CASCADE never fires and this would otherwise outlive
+  // the conversation it points into.
+  "summary_group_marks",
   "suggestion_feedback",
   "suggestions",
   "meetings",
@@ -228,7 +230,7 @@ export async function purgeUnselectedChats(
   await client.query(`DELETE FROM suggestion_feedback WHERE group_id = ANY($1::bigint[])`, ids);
   await client.query(`DELETE FROM suggestions WHERE group_id = ANY($1::bigint[])`, ids);
   await client.query(`DELETE FROM read_watermarks WHERE group_id = ANY($1::bigint[])`, ids);
-  await client.query(`DELETE FROM summary_user_marks WHERE group_id = ANY($1::bigint[])`, ids);
+  await client.query(`DELETE FROM summary_group_marks WHERE group_id = ANY($1::bigint[])`, ids);
   await client.query(`DELETE FROM meetings WHERE group_id = ANY($1::bigint[])`, ids); // → meeting_sources
   await client.query(`DELETE FROM todos WHERE group_id = ANY($1::bigint[])`, ids); // → todo_sources
   // Cascades: transcripts, media_analyses, message_media, message_embeddings, and any
