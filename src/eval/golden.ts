@@ -60,6 +60,12 @@ export type GoldenItem = {
   mustNotRefuse: boolean;
   /** Tools the agentic loop must have called. A denial with zero tool calls is a distinct bug. */
   expectedToolCalls?: string[];
+  /**
+   * Who asked, when the question is first-person ("מה אמרתי…"). Replayed into
+   * the prompt's asker line; absent for third-person items, whose prompt must
+   * stay byte-identical with or without the feature.
+   */
+  askerName?: string;
   slice: Slice[];
   provenance: { added: string; reason: string; traceId?: string };
 };
@@ -111,6 +117,9 @@ function validate(v: unknown, line: number): GoldenItem {
   if (!Array.isArray(o["goldExternalIds"])) fail("`goldExternalIds` must be an array");
   if (typeof o["mustNotRefuse"] !== "boolean") fail("`mustNotRefuse` must be a boolean");
   if (!Array.isArray(o["slice"]) || o["slice"].length === 0) fail("`slice` must be non-empty");
+  if (o["askerName"] !== undefined && (typeof o["askerName"] !== "string" || !o["askerName"])) {
+    fail("`askerName`, when present, must be a non-empty string");
+  }
 
   const gold = o["goldExternalIds"] as string[];
   const mustNotRefuse = o["mustNotRefuse"] as boolean;

@@ -60,7 +60,12 @@ export type AskCommandDeps = {
    * citations are already stripped from `text`, so this layer never has to know
    * the tag format.
    */
-  answer: (input: { groupId: number; question: string }) => Promise<CitedAnswer>;
+  answer: (input: {
+    groupId: number;
+    question: string;
+    /** The asker's display name — lets her resolve "מה אמרתי?" to a person. */
+    askerName?: string;
+  }) => Promise<CitedAnswer>;
   log?: MinimalLog;
 };
 
@@ -261,7 +266,15 @@ export async function maybeHandleAskCommand(
 
     await react("⏳");
     // groupId is the VERIFIED inbound id — the privacy boundary for retrieval.
-    const { text: answer, citedIds } = await deps.answer({ groupId, question });
+    // askerName lets her resolve first-person questions ("מה אמרתי על אלכס?"):
+    // the transcript names every speaker, but nothing else says which of them
+    // is the "I" doing the asking — measured live as a false denial on a fact
+    // that was in her window.
+    const { text: answer, citedIds } = await deps.answer({
+      groupId,
+      question,
+      askerName: mapped.senderName,
+    });
     const source = await resolveQuotedSource(deps, { groupId, jid, citedIds });
     const sent = await deps.sendText(jid, answer, { quoted: source ?? msg });
     // Record HER OWN message id, here and now.

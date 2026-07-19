@@ -6,6 +6,7 @@ import { attributeSources } from "./attribution.js";
 import type { CitedAnswer } from "./citations.js";
 import type { Embedder } from "./embedder.js";
 import {
+  askerLine,
   buildAgenticSystem,
   citeTag,
   fenceRetrieved,
@@ -88,7 +89,13 @@ export type AgenticDeps = {
  *  (a closure in the tool). Empty output falls back to the grounded refusal. */
 export async function answerAgentic(
   deps: AgenticDeps,
-  input: { groupId: number; question: string; asOf?: Date; excludeExternalId?: string },
+  input: {
+    groupId: number;
+    question: string;
+    asOf?: Date;
+    excludeExternalId?: string;
+    askerName?: string;
+  },
 ): Promise<CitedAnswer> {
   const generate = deps.generate ?? (sdkGenerateText as unknown as GenerateFn);
 
@@ -161,7 +168,12 @@ export async function answerAgentic(
     model: deps.model,
     ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
     system: buildAgenticSystem(),
-    prompt: [...renderWindow(window), ...searchSection, neutralizeFence(input.question)].join("\n"),
+    prompt: [
+      ...renderWindow(window),
+      ...searchSection,
+      ...askerLine(input.askerName),
+      neutralizeFence(input.question),
+    ].join("\n"),
     stopWhen: stepCountIs(deps.maxSteps ?? 3),
     tools: { search_chat: searchChat },
     // AI SDK v7 auto-enables telemetry once a Langfuse integration is
@@ -171,23 +183,29 @@ export async function answerAgentic(
       functionId: "aida-agentic-answer",
     },
   } as Parameters<typeof sdkGenerateText>[0];
-  // With telemetry + trace attrs, wrap the call so sessionId/userId/tags
-  // propagate onto the emitted spans (AI SDK v7 has no per-call metadata field).
-  const run = (): Promise<{ text: string }> => generate(opts);
-  const { text } =
-    deps.telemetry && deps.trace
-      ? await (
-          deps.propagate ?? (await import("../observability/langfuse.js")).withTraceAttributes
-        )(deps.trace, run)
-      : await run();
-  const trimmed = (text ?? "").trim();
-  if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
+  // With telemetry + trace attrs, wrap the WHOLE turn — generation AND the
+  // attribution pass — so sessionId/userId/tags propagate onto every span (AI
+  // SDK v7 has no per-call metadata field). Attribution used to run outside
+  // this scope and its trace landed session-less in Langfuse, which made the
+  // one live debugging session that needed it a manual hunt.
+  const run = async (): Promise<CitedAnswer> => {
+    const { text } = await generate(opts);
+    const trimmed = (text ?? "").trim();
+    if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
 
-  // Post-hoc: the answer above is already final and was produced from a prompt
-  // with no ids in it. This pass only labels it — it cannot change a word.
-  const citedIds = await attributeSources(
-    { model: deps.model, ...(deps.generate ? { generate: deps.generate } : {}) },
-    { question: input.question, answer: trimmed, candidates: [...window, ...freshHits] },
-  );
-  return { text: trimmed, citedIds };
+    // Post-hoc: the answer above is already final and was produced from a
+    // prompt with no ids in it. This pass only labels it — it cannot change a
+    // word.
+    const citedIds = await attributeSources(
+      { model: deps.model, ...(deps.generate ? { generate: deps.generate } : {}) },
+      { question: input.question, answer: trimmed, candidates: [...window, ...freshHits] },
+    );
+    return { text: trimmed, citedIds };
+  };
+  return deps.telemetry && deps.trace
+    ? await (deps.propagate ?? (await import("../observability/langfuse.js")).withTraceAttributes)(
+        deps.trace,
+        run,
+      )
+    : await run();
 }

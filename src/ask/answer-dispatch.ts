@@ -1,6 +1,6 @@
 import type { CitedAnswer } from "./citations.js";
 
-type Run = (i: { groupId: number; question: string }) => Promise<CitedAnswer>;
+type Run = (i: { groupId: number; question: string; askerName?: string }) => Promise<CitedAnswer>;
 
 /** Route @Aida's answer: agentic (with fallback) when the flag is on, else the
  *  proven single-shot. The agentic path can never make the feature worse — any
@@ -12,7 +12,7 @@ export async function answerAida(
     runSingleShot: Run;
     log?: { warn: (o: unknown, m?: string) => void };
   },
-  input: { groupId: number; question: string },
+  input: { groupId: number; question: string; askerName?: string },
 ): Promise<CitedAnswer> {
   if (!deps.agentic) return deps.runSingleShot(input);
   try {

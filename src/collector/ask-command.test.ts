@@ -53,7 +53,11 @@ describe("maybeHandleAskCommand", () => {
     const d = deps();
     const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d);
     expect(ok).toBe(true);
-    expect(d.answer).toHaveBeenCalledWith({ groupId, question: "מתי נפגשים?" });
+    expect(d.answer).toHaveBeenCalledWith({
+      groupId,
+      question: "מתי נפגשים?",
+      askerName: expect.any(String),
+    });
     expect(d.sendText).toHaveBeenCalledWith(JID, "לפי השיחה, נפגשים ב-21:00.", expect.anything());
   });
 
@@ -224,6 +228,21 @@ describe("maybeHandleAskCommand", () => {
     expect(d.sendText).toHaveBeenCalledWith(JID, "תכף תכף... כן.", expect.anything());
   });
 
+  it("tells the answer path WHO is asking, so 'מה אמרתי' can resolve", async () => {
+    // The transcript names every speaker, but nothing said which of them is the
+    // "I" doing the asking — she attributed the asker's own words to a third
+    // person and denied first-person questions whose answer she was holding.
+    const d = deps();
+    const msg = {
+      key: { id: "m-asker", remoteJid: JID, fromMe: false },
+      message: { conversation: "@אידה מה אמרתי על אלכס?" },
+      pushName: "Eyal Delarea",
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    } as unknown as WAMessage;
+    await maybeHandleAskCommand(msg, d);
+    expect(d.answer).toHaveBeenCalledWith(expect.objectContaining({ askerName: "Eyal Delarea" }));
+  });
+
   it("ignores a message with no @Aida tag", async () => {
     const d = deps();
     expect(await maybeHandleAskCommand(askMsg("סתם הודעה"), d)).toBe(false);
@@ -332,7 +351,9 @@ describe("reply-threading", () => {
     const ok = await maybeHandleAskCommand(replyMsg("ומה לגבי אתמול?", "aida-said-this", RJID), d);
     expect(ok).toBe(true);
     // The whole body is the question — there is no tag to strip.
-    expect(d.answer).toHaveBeenCalledWith({ groupId, question: "ומה לגבי אתמול?" });
+    expect(d.answer).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId, question: "ומה לגבי אתמול?" }),
+    );
   });
 
   it("does NOT fire on a reply to someone else's message", async () => {
