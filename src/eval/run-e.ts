@@ -29,6 +29,11 @@ export type RunEDeps = {
   /** Injectable for tests; defaults to the real agentic loop. */
   answer?: typeof answerAgentic;
   onItem?: (id: string, out: TaskOutput) => void;
+  /**
+   * A/B lever for the numeral guard — the harness is the referee for whether
+   * the guard ships on the live path.
+   */
+  groundednessGuard?: boolean;
 };
 
 /**
@@ -103,6 +108,9 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
       onPrompt: (p) => {
         promptText = p;
       },
+      ...(deps.groundednessGuard !== undefined
+        ? { groundednessGuard: deps.groundednessGuard }
+        : {}),
     },
     {
       groupId: item.groupId,

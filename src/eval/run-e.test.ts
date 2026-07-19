@@ -79,6 +79,26 @@ describe("runItem", () => {
     // Must not be read as a retrieval regression.
     await expect(runItem(deps({ pool: fakePool([]) }) as never, item())).rejects.toThrow(/rotted/);
   });
+
+  it("passes groundednessGuard through to the answer fn's deps when set", async () => {
+    let seen: boolean | undefined;
+    const answer = (async (d: { groundednessGuard?: boolean }) => {
+      seen = d.groundednessGuard;
+      return { text: "תכף תכף... תשובה.", citedIds: [] };
+    }) as never;
+    await runItem(deps({ answer, groundednessGuard: true }) as never, item());
+    expect(seen).toBe(true);
+  });
+
+  it("leaves groundednessGuard out of the answer fn's deps when unset", async () => {
+    let seen: unknown = "unset";
+    const answer = (async (d: { groundednessGuard?: boolean }) => {
+      seen = d.groundednessGuard;
+      return { text: "תכף תכף... תשובה.", citedIds: [] };
+    }) as never;
+    await runItem(deps({ answer }) as never, item());
+    expect(seen).toBeUndefined();
+  });
 });
 
 describe("runSuiteE", () => {
