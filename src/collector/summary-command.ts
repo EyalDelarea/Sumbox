@@ -119,12 +119,13 @@ export type SummaryCommandDeps = {
   marks: {
     resolveParticipantId: (senderName: string) => Promise<number>;
     getMark: (groupId: number) => Promise<SummaryGroupMark | null>;
+    /** Returns whether the write landed; the advance is monotonic and can refuse. */
     setMark: (m: {
       groupId: number;
       lastSummarizedAt: Date;
       lastSummaryId: number;
       lastReplyWaMessageId: string | null;
-    }) => Promise<void>;
+    }) => Promise<boolean>;
     getSummaryOutput: (summaryId: number) => Promise<SummaryOutput | null>;
   };
   /** In-memory fast path for the group's quote target, keyed by groupId. */
@@ -153,6 +154,12 @@ const FALLBACK_LAST_N = 50;
  * reconnect (which auto-fires every few seconds on any blip). Without this
  * gate, a `/סיכום` in a replayed window would re-fire and send an unsolicited
  * reply. Live messages arrive within seconds; anything older is a replay.
+ *
+ * The gate is two-sided. `sentAt` is the sender's device clock, and it becomes
+ * the group's shared cursor — so a forward-skewed clock would write a future
+ * cursor that leaves every later /סיכום matching no messages, for everyone,
+ * with no in-app recovery. A one-sided check missed that entirely: `now - sentAt`
+ * is negative for a future message, which is never `> LIVENESS_WINDOW_MS`.
  */
 const LIVENESS_WINDOW_MS = 120_000;
 
@@ -200,9 +207,16 @@ export async function maybeHandleSummaryCommand(
   }
   if (!allowlist.has(jid)) return false;
 
-  // Ignore replayed/history messages (see LIVENESS_WINDOW_MS) — act on live only.
-  if (now() - mapped.sentAt.getTime() > LIVENESS_WINDOW_MS) {
-    deps.log?.info({ jid, sentAt: mapped.sentAt }, "summary command: stale (replay), skipping");
+  // Ignore replayed/history messages AND clock-skewed future ones (see
+  // LIVENESS_WINDOW_MS) — act on live only.
+  const drift = now() - mapped.sentAt.getTime();
+  if (Math.abs(drift) > LIVENESS_WINDOW_MS) {
+    deps.log?.info(
+      { jid, sentAt: mapped.sentAt, driftMs: drift },
+      drift > 0
+        ? "summary command: stale (replay), skipping"
+        : "summary command: future-dated (clock skew), skipping",
+    );
     return false;
   }
 
@@ -258,23 +272,60 @@ export async function maybeHandleSummaryCommand(
     // (survives a restart); else quote the /סיכום request.
     let quoted = deps.lastSummaryByGroup?.get(groupId);
     if (!quoted && groupMark?.lastSummaryId && groupMark.lastReplyWaMessageId && deps.makeQuoted) {
-      const out = await deps.marks.getSummaryOutput(groupMark.lastSummaryId);
-      if (out)
-        quoted = deps.makeQuoted(jid, groupMark.lastReplyWaMessageId, buildWhatsAppReply(out));
+      // Isolated: this lookup only rebuilds quote TEXT. Letting it throw past
+      // here would discard an already-generated summary over a decoration —
+      // and `lastSummaryId` is documented as "null if purged", so the row going
+      // missing is expected operation, not an exceptional case.
+      try {
+        const out = await deps.marks.getSummaryOutput(groupMark.lastSummaryId);
+        if (out)
+          quoted = deps.makeQuoted(jid, groupMark.lastReplyWaMessageId, buildWhatsAppReply(out));
+        else deps.log?.info({ groupId }, "summary command: previous summary gone, quoting request");
+      } catch (err) {
+        deps.log?.warn({ err, groupId }, "summary command: quote rebuild failed, quoting request");
+      }
     }
 
     const sent = await deps.sendText(jid, text, { quoted: quoted ?? msg });
 
     // Only a real summary advances the shared cursor / thread (an empty "nothing
     // new" reply is not a thread anchor and has no summary row to point at).
-    if (sent && result.kind === "ok" && sent.key?.id) {
-      deps.lastSummaryByGroup?.set(groupId, sent);
-      await deps.marks.setMark({
-        groupId,
-        lastSummarizedAt: mapped.sentAt,
-        lastSummaryId: result.summaryId,
-        lastReplyWaMessageId: sent.key.id,
-      });
+    if (result.kind === "ok") {
+      if (!sent?.key?.id) {
+        // Nothing to anchor the thread on and nothing to prove delivery, so the
+        // cursor cannot move — but the reply may well have gone out. Silence here
+        // reads as success in the logs while the group re-summarizes the same
+        // window on every subsequent command.
+        deps.log?.warn(
+          { groupId, summaryId: result.summaryId },
+          "summary command: send returned no confirmable message id; cursor did not advance, the next /סיכום will repeat this window",
+        );
+      } else {
+        // The summary is already delivered — a failure from here on is an
+        // operator problem, not a user-facing one. Falling through to the outer
+        // catch would post ERROR_REPLY directly beneath a good summary.
+        try {
+          const advanced = await deps.marks.setMark({
+            groupId,
+            lastSummarizedAt: mapped.sentAt,
+            lastSummaryId: result.summaryId,
+            lastReplyWaMessageId: sent.key.id,
+          });
+          // Cache only AFTER the durable write, so the in-memory quote target can
+          // never point past the cursor that decides the window.
+          if (advanced) deps.lastSummaryByGroup?.set(groupId, sent);
+          else
+            deps.log?.warn(
+              { groupId, lastSummarizedAt: mapped.sentAt },
+              "summary command: cursor did not advance — the stored mark is not older than this command",
+            );
+        } catch (err) {
+          deps.log?.warn(
+            { err, groupId, summaryId: result.summaryId },
+            "summary command: reply sent but the cursor did not advance; the next /סיכום will repeat this window",
+          );
+        }
+      }
     }
 
     await react("✅");

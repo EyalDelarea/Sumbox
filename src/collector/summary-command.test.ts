@@ -66,7 +66,7 @@ function defaultMarks(
   return {
     resolveParticipantId: vi.fn(async (name: string) => (name === "Noa" ? 22 : 11)),
     getMark: vi.fn(async () => null),
-    setMark: vi.fn(async () => {}),
+    setMark: vi.fn(async () => true),
     getSummaryOutput: vi.fn(async () => ({ overview: "prev summary" }) as never),
     ...over,
   };
@@ -403,7 +403,7 @@ describe("maybeHandleSummaryCommand — the shared group marker", () => {
     return {
       resolveParticipantId: vi.fn(async (name: string) => (name === "Dana Cohen" ? 11 : 22)),
       getMark: vi.fn(async () => null),
-      setMark: vi.fn(async () => {}),
+      setMark: vi.fn(async () => true),
       getSummaryOutput: vi.fn(async () => ({ overview: "prev summary" }) as never),
       ...over,
     } as never;
@@ -471,7 +471,7 @@ describe("maybeHandleSummaryCommand — the shared group marker", () => {
     // This is the whole point: the conversation is summarized once, not once per
     // participant. The second command in quick succession has nothing new to say.
     const send = vi.fn(async () => SENT);
-    const setMark = vi.fn(async () => {});
+    const setMark = vi.fn(async () => true);
     const marks = makeMarks({
       getMark: vi.fn(async () => ({
         lastSummarizedAt: new Date("2026-07-06T20:00:00Z"),
@@ -526,7 +526,7 @@ describe("maybeHandleSummaryCommand — the shared group marker", () => {
   });
 
   it("two different askers write to the same marker — no per-participant divergence", async () => {
-    const setMark = vi.fn(async () => {});
+    const setMark = vi.fn(async () => true);
     const marks = makeMarks({ setMark });
     const deps = baseDeps({
       pool: fakePool({ group: { id: 7, name: "g" } }),
@@ -539,6 +539,86 @@ describe("maybeHandleSummaryCommand — the shared group marker", () => {
     expect(setMark.mock.calls[1]![0]).toMatchObject({ groupId: 7 });
     // Same target row both times — under per-user marks these diverged (11 vs 22).
     expect(setMark.mock.calls[0]![0]).toEqual(setMark.mock.calls[1]![0]);
+  });
+
+  it("ignores a FUTURE-dated command, so one skewed clock can't soft-lock the group", async () => {
+    // sentAt is the sender's device clock, unvalidated, and it becomes the shared
+    // cursor. A far-future value would leave every later /סיכום in the group
+    // matching nothing. The liveness gate used to be one-sided — `now - sentAt`
+    // is NEGATIVE for a future message, so it sailed through.
+    const send = vi.fn(async () => SENT);
+    const deps = baseDeps({ sendText: send, marks: makeMarks() });
+    const future = textMsg(SUMMARY_COMMAND, JID, false, Date.now() / 1000 + 3600);
+    expect(await maybeHandleSummaryCommand(future, deps)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("keeps the delivered summary when the cursor write fails — no contradictory error reply", async () => {
+    // The send already succeeded. Falling through to the generic handler would
+    // post "לא הצלחתי להכין סיכום" directly beneath a perfectly good summary.
+    const send = vi.fn(async () => SENT);
+    const warn = vi.fn();
+    const marks = makeMarks({
+      setMark: vi.fn(async () => {
+        throw new Error("pool exhausted");
+      }),
+    });
+    const cache = new Map<number, WAMessage>();
+    const deps = baseDeps({
+      sendText: send,
+      marks,
+      lastSummaryByGroup: cache,
+      log: { info: vi.fn(), warn },
+    });
+    expect(await maybeHandleSummaryCommand(danaMsg(), deps, now)).toBe(true);
+    // Exactly one message: the summary. No ERROR_REPLY chaser.
+    expect(send).toHaveBeenCalledOnce();
+    // The failure is loud in the logs, and names the consequence.
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: 7 }),
+      expect.stringMatching(/cursor did not advance/i),
+    );
+    // In-memory must not lead the DB: a stale cache would thread the reply off a
+    // summary the cursor doesn't know about.
+    expect(cache.has(7)).toBe(false);
+  });
+
+  it("logs when the send returns no confirmable id instead of skipping the advance silently", async () => {
+    const warn = vi.fn();
+    const marks = makeMarks();
+    const deps = baseDeps({
+      sendText: vi.fn(async () => undefined),
+      marks,
+      log: { info: vi.fn(), warn },
+    });
+    await maybeHandleSummaryCommand(danaMsg(), deps, now);
+    expect(marks.setMark).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: 7 }),
+      expect.stringMatching(/no confirmable message id/i),
+    );
+  });
+
+  it("still delivers the summary when the quote rebuild throws — a quote is cosmetic", async () => {
+    // getSummaryOutput exists only to rebuild quote TEXT. Letting it throw past
+    // the send discards a finished Ollama run over a decoration.
+    const send = vi.fn(async () => SENT);
+    const msg = danaMsg();
+    const marks = makeMarks({
+      getMark: vi.fn(async () => ({
+        lastSummarizedAt: new Date("2026-07-06T20:00:00Z"),
+        lastSummaryId: 5,
+        lastReplyWaMessageId: "wa-5",
+      })),
+      getSummaryOutput: vi.fn(async () => {
+        throw new Error("summary row purged");
+      }),
+    });
+    const deps = baseDeps({ sendText: send, makeQuoted: vi.fn(), marks });
+    expect(await maybeHandleSummaryCommand(msg, deps, now)).toBe(true);
+    expect(send).toHaveBeenCalledOnce();
+    // Falls back to quoting the request rather than losing the summary.
+    expect(send.mock.calls[0]![2]).toEqual({ quoted: msg });
   });
 
   it("the in-memory quote fast path is keyed by group, so any asker reuses it", async () => {
