@@ -142,7 +142,9 @@ describe("answerAgentic", () => {
         },
         { groupId: 7, question: "מה קורה?" },
       );
-      expect(out.text).toBe(NOT_IN_CHAT);
+      // Persona-prefixed like every refusal she produces herself — a
+      // guard-forced refusal must not stand out by its missing prefix.
+      expect(out.text).toBe(`תכף תכף... ${NOT_IN_CHAT}`);
       expect(out.citedIds).toEqual([]);
       expect(generate).toHaveBeenCalledTimes(2);
     });

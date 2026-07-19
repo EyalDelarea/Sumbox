@@ -255,10 +255,16 @@ export async function answerAgentic(
         const retryCorpus = `${system}\n${prompt}\n${toolResultText(retry.steps)}`;
         novel = retried.length === 0 ? novel : ungroundedNumerals(retried, retryCorpus);
         // Still inventing → the clean refusal beats a confident fabrication.
-        answerText = novel.length > 0 || retried.length === 0 ? NOT_IN_CHAT : retried;
+        // Persona-prefixed like every refusal SHE produces (the system prompt
+        // mandates the prefix), so a guard-forced refusal is indistinguishable
+        // in tone from one she chose herself. A refusal has no source, so
+        // attribution is skipped — matching attribution.ts's REFUSALS rule.
+        if (novel.length > 0 || retried.length === 0) {
+          return { text: `תכף תכף... ${NOT_IN_CHAT}`, citedIds: [] };
+        }
+        answerText = retried;
       }
     }
-    if (answerText === NOT_IN_CHAT) return { text: NOT_IN_CHAT, citedIds: [] };
 
     // Post-hoc: the answer above is already final and was produced from a
     // prompt with no ids in it. This pass only labels it — it cannot change a
