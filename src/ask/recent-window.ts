@@ -87,6 +87,8 @@ export async function selectRecentMessages(
               CASE
                 WHEN m.message_type = 'media' AND m.media_status = 'present'
                      AND (m.media_filename IS NULL OR m.media_filename NOT ILIKE 'STK-%')
+                     -- 10 minutes == PENDING_MEDIA_HORIZON_MS in collector/ask-command.ts;
+                     -- tune BOTH or the wait and the window disagree about what is pending.
                      AND m.sent_at > $2::timestamptz - interval '10 minutes'
                 THEN CASE
                   WHEN ${IMAGE_PREDICATE} AND NOT EXISTS (SELECT 1 FROM media_analyses pa

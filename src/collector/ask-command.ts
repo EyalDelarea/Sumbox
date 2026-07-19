@@ -157,6 +157,9 @@ const ERROR_REPLY = "סליחה, לא הצלחתי לענות כרגע. נסו �
 /** Wait horizon/budget for media still being analyzed. The wait lives HERE, in
  *  the collector layer, so the eval harness and ask-sandbox (which call
  *  answerAgentic directly with a historical asOf) never wait by construction. */
+// Mirrored by the window's `interval '10 minutes'` age bound in
+// ask/recent-window.ts — tune BOTH or the wait polls for media the window
+// never flags (or the window flags media the wait never waited for).
 const PENDING_MEDIA_HORIZON_MS = 10 * 60_000;
 const PENDING_MEDIA_WAIT_MS = 30_000;
 const PENDING_MEDIA_POLL_MS = 2_000;
