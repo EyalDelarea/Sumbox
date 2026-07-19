@@ -78,6 +78,14 @@ export type AgenticDeps = {
    * refusal she made while holding the answer in the window.
    */
   onWindow?: (messageIds: number[]) => void;
+  /**
+   * Probe: the EXACT grounding corpus she saw — window + pre-seeded hits +
+   * question + system, assembled the same way the real call is. Fired once,
+   * right before the generation call. Used by the eval harness's
+   * ungrounded_number metric so it can never drift from what she actually saw;
+   * prod passes nothing.
+   */
+  onPrompt?: (prompt: string) => void;
   /** Injectable for tests; defaults to the AI SDK. */
   generate?: GenerateFn;
   /** Injectable for tests; defaults to observability/langfuse.ts withTraceAttributes. */
@@ -163,16 +171,19 @@ export async function answerAgentic(
         ]
       : [];
 
+  const system = buildAgenticSystem();
+  const prompt = [
+    ...renderWindow(window),
+    ...searchSection,
+    ...askerLine(input.askerName),
+    neutralizeFence(input.question),
+  ].join("\n");
+
   const opts = {
     model: deps.model,
     ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
-    system: buildAgenticSystem(),
-    prompt: [
-      ...renderWindow(window),
-      ...searchSection,
-      ...askerLine(input.askerName),
-      neutralizeFence(input.question),
-    ].join("\n"),
+    system,
+    prompt,
     stopWhen: stepCountIs(deps.maxSteps ?? 3),
     tools: { search_chat: searchChat },
     // AI SDK v7 auto-enables telemetry once a Langfuse integration is
@@ -182,6 +193,10 @@ export async function answerAgentic(
       functionId: "aida-agentic-answer",
     },
   } as Parameters<typeof sdkGenerateText>[0];
+  // The probe hands the eval the EXACT grounding corpus — window + pre-seeded
+  // hits + question + system — so the ungrounded_number metric can never
+  // drift from what she saw.
+  deps.onPrompt?.(`${system}\n${prompt}`);
   // With telemetry + trace attrs, wrap the WHOLE turn — generation AND the
   // attribution pass — so sessionId/userId/tags propagate onto every span (AI
   // SDK v7 has no per-call metadata field). Attribution used to run outside

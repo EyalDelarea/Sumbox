@@ -92,4 +92,17 @@ describe("answerAgentic", () => {
     );
     expect(generate).toHaveBeenCalledOnce();
   });
+
+  it("fires onPrompt once with the exact system+user prompt she saw", async () => {
+    const generate = vi.fn(async () => ({ text: "תכף תכף... ok", steps: [] }));
+    const onPrompt = vi.fn();
+    await answerAgentic(
+      { pool: noMessagesPool, embedder, model, generate: generate as never, onPrompt },
+      { groupId: 7, question: "מה קורה?" },
+    );
+    expect(onPrompt).toHaveBeenCalledOnce();
+    const prompt = onPrompt.mock.calls[0][0] as string;
+    expect(prompt).toContain("תכף תכף");
+    expect(prompt).toContain("מה קורה?");
+  });
 });
