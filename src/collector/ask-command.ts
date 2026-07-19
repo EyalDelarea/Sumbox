@@ -183,7 +183,12 @@ async function waitForPendingEnrichment(
       const pending = await countPending(deps.pool, {
         groupId,
         since: new Date(now() - PENDING_MEDIA_HORIZON_MS),
-        until: new Date(now()),
+        // sent_at is the SENDER's device clock, not ours — the same skew this
+        // file already concedes via LIVENESS_WINDOW_MS. A photo timestamped a
+        // few seconds ahead of `now()` would otherwise fall outside [since,
+        // until] and make countPendingEnrichment return 0, silently no-op-ing
+        // the wait in exactly the race it exists for.
+        until: new Date(now() + LIVENESS_WINDOW_MS),
       });
       if (pending === 0) return;
       if (now() + PENDING_MEDIA_POLL_MS > deadline) {

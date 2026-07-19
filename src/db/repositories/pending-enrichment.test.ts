@@ -104,6 +104,25 @@ describe("countPendingEnrichment", () => {
     expect(n).toBe(1);
   });
 
+  it("still counts an image whose completed analysis has an empty description — must stay in lockstep with CONTENT_EXPR", async () => {
+    const g = await upsertGroup(pool, { name: "PE-3b", source: "live" });
+    const id = await seedMedia(pool, g, {
+      externalId: "pe3b-a",
+      sentAt: "2026-07-19T10:30:00Z",
+      mediaFilename: "photo.jpg",
+    });
+    await insertMediaAnalysis(pool, {
+      messageId: id,
+      kind: "image",
+      description: "   ", // whitespace-only — CONTENT_EXPR still renders ''
+      engine: "test",
+      status: "completed",
+    });
+
+    const n = await countPendingEnrichment(pool, { groupId: g, since, until });
+    expect(n).toBe(1);
+  });
+
   it("counts a voice note with no transcript", async () => {
     const g = await upsertGroup(pool, { name: "PE-4", source: "live" });
     await seedMedia(pool, g, {

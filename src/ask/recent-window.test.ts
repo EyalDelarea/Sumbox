@@ -254,6 +254,49 @@ describe("selectRecentMessages", () => {
     expect(w[0]!.pendingMedia).toBeNull();
   });
 
+  it("drops the pending flag past the 10-minute horizon — no forever-false 'ask again in a moment'", async () => {
+    const g = await upsertGroup(pool, { name: "RW-13", source: "live" });
+    await seedMedia(pool, g, {
+      externalId: "rw13-a",
+      // 11 minutes before asOf — outside the horizon.
+      sentAt: "2026-07-16T12:54:00Z",
+      mediaFilename: "photo.jpg",
+    });
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    // Empty content, no pending flag -> invisible, same as any other empty row.
+    expect(w).toHaveLength(0);
+  });
+
+  it("keeps pendingMedia set for a completed row with an empty description — the #45 bug, closed", async () => {
+    const g = await upsertGroup(pool, { name: "RW-14", source: "live" });
+    const id = await seedMedia(pool, g, {
+      externalId: "rw14-a",
+      sentAt: "2026-07-16T13:04:00Z", // 1 minute before asOf, inside the horizon
+      mediaFilename: "photo.jpg",
+    });
+    await insertMediaAnalysis(pool, {
+      messageId: id,
+      kind: "image",
+      description: "   ", // whitespace-only — CONTENT_EXPR still renders ''
+      engine: "test",
+      status: "completed",
+    });
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    expect(w).toHaveLength(1);
+    expect(w[0]!.content).toBe("");
+    expect(w[0]!.pendingMedia).toBe("image");
+  });
+
   it("still excludes stickers and empty-text rows even under the new pending check", async () => {
     const g = await upsertGroup(pool, { name: "RW-12", source: "live" });
     await seedMedia(pool, g, {

@@ -208,6 +208,15 @@ describe("pending media placeholder in the window", () => {
     expect(withField.user).toContain("כן");
     expect(withField.user).not.toContain("עדיין בניתוח");
   });
+
+  it("degrades to plain content on a drifted pendingMedia value, instead of rendering 'undefined'", () => {
+    // pendingMedia is an unchecked cast off a DB CASE; simulate the SQL and the
+    // union type drifting apart so PENDING_MEDIA_PLACEHOLDER[...] misses.
+    const drifted = { ...base, content: "כן", pendingMedia: "gif" as unknown as "image" };
+    const { user } = buildAskPrompt("x", ctx, [drifted]);
+    expect(user).toContain("כן");
+    expect(user).not.toContain("undefined");
+  });
 });
 
 describe("fenceRetrieved", () => {

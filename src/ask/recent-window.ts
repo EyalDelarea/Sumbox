@@ -38,6 +38,12 @@ export type WindowMessage = RetrievedMessage & {
    * it (the #45 race: she'd deny seeing a photo that hadn't finished analysis
    * yet). Surfacing the flag lets the prompt render an honest placeholder
    * instead of pretending the message never arrived.
+   *
+   * Age-bounded to the same 10-minute horizon as the collector's pending-media
+   * wait: a permanently-failed analysis (corrupt file, retries exhausted) would
+   * otherwise flag forever, rendering "עדיין בניתוח... ask again in a moment" —
+   * a promise that never becomes true. Past the horizon the row falls back to
+   * today's plain behaviour (invisible if empty) instead of a false promise.
    */
   pendingMedia: "image" | "video" | "voice" | null;
 };
@@ -81,13 +87,17 @@ export async function selectRecentMessages(
               CASE
                 WHEN m.message_type = 'media' AND m.media_status = 'present'
                      AND (m.media_filename IS NULL OR m.media_filename NOT ILIKE 'STK-%')
+                     AND m.sent_at > $2::timestamptz - interval '10 minutes'
                 THEN CASE
                   WHEN ${IMAGE_PREDICATE} AND NOT EXISTS (SELECT 1 FROM media_analyses pa
-                       WHERE pa.message_id = m.id AND pa.status = 'completed') THEN 'image'
+                       WHERE pa.message_id = m.id AND pa.status = 'completed'
+                         AND NULLIF(trim(pa.description), '') IS NOT NULL) THEN 'image'
                   WHEN ${VIDEO_PREDICATE} AND NOT EXISTS (SELECT 1 FROM media_analyses pa
-                       WHERE pa.message_id = m.id AND pa.status = 'completed') THEN 'video'
+                       WHERE pa.message_id = m.id AND pa.status = 'completed'
+                         AND NULLIF(trim(pa.description), '') IS NOT NULL) THEN 'video'
                   WHEN ${AUDIO_PREDICATE} AND NOT EXISTS (SELECT 1 FROM transcripts pt
-                       WHERE pt.message_id = m.id AND pt.status = 'completed') THEN 'voice'
+                       WHERE pt.message_id = m.id AND pt.status = 'completed'
+                         AND NULLIF(trim(pt.transcript), '') IS NOT NULL) THEN 'voice'
                 END
               END AS pending_kind
          FROM messages m

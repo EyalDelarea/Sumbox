@@ -97,6 +97,10 @@ export const PENDING_MEDIA_PLACEHOLDER = {
 function withPendingTag(m: AskWindowMessage, content: string): string {
   if (!m.pendingMedia) return content;
   const tag = PENDING_MEDIA_PLACEHOLDER[m.pendingMedia];
+  // pendingMedia is an unchecked cast off a DB CASE, not something TypeScript
+  // enforces at the boundary. If the SQL and this union ever drift, `tag` is
+  // undefined — degrade to plain content rather than render "content undefined".
+  if (!tag) return content;
   return content.length > 0 ? `${content} ${tag}` : tag;
 }
 
