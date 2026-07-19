@@ -17,6 +17,7 @@ import type pg from "pg";
 import type { CitedAnswer } from "../ask/citations.js";
 import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { resolveCitationSource } from "../db/repositories/citation-sources.js";
+import { countPendingEnrichment } from "../db/repositories/pending-enrichment.js";
 import { matchAskTrigger } from "./ask-trigger.js";
 import { mapWaMessage } from "./message-mapper.js";
 
@@ -52,6 +53,13 @@ export type AskCommandDeps = {
   inFlight: Set<number>;
   /** Canonicalize a 1:1 @lid to its phone JID (groups @g.us pass through). */
   resolvePn?: (lid: string) => Promise<string | null>;
+  /** Delay between polls while waiting on pending media. Prod defaults to real
+   *  setTimeout; tests inject a fake that advances the fake clock instead of
+   *  actually waiting. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Count of recent media still unanalyzed. Prod defaults to the repository;
+   *  tests inject a fake so the wait loop can be driven without a DB. */
+  countPending?: typeof countPendingEnrichment;
   /**
    * Answer the question for the ALREADY-verified group id, grounded in that
    * group's messages. Wired to answerQuestion in prod; tests inject a fake.
@@ -145,6 +153,53 @@ async function resolveQuotedSource(
 const LIVENESS_WINDOW_MS = 120_000;
 /** Sent when the LLM/retrieval fails, so a failed @Aida isn't a silent no-op. */
 const ERROR_REPLY = "סליחה, לא הצלחתי לענות כרגע. נסו שוב עוד רגע.";
+
+/** Wait horizon/budget for media still being analyzed. The wait lives HERE, in
+ *  the collector layer, so the eval harness and ask-sandbox (which call
+ *  answerAgentic directly with a historical asOf) never wait by construction. */
+const PENDING_MEDIA_HORIZON_MS = 10 * 60_000;
+const PENDING_MEDIA_WAIT_MS = 30_000;
+const PENDING_MEDIA_POLL_MS = 2_000;
+
+/**
+ * Bounded wait for recent media (photo/voice note) still being analyzed.
+ *
+ * #45: a photo sent seconds before the question can still be in flight through
+ * the vision/transcription pipeline when @Aida goes to answer — without this,
+ * she answers off a bare placeholder even though the real analysis lands a
+ * couple seconds later. Polls briefly so it has a chance to land; on timeout
+ * she answers anyway (the placeholder + prompt rule keeps that honest).
+ */
+async function waitForPendingEnrichment(
+  deps: AskCommandDeps,
+  groupId: number,
+  now: () => number,
+): Promise<void> {
+  const countPending = deps.countPending ?? countPendingEnrichment;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const deadline = now() + PENDING_MEDIA_WAIT_MS;
+  try {
+    while (true) {
+      const pending = await countPending(deps.pool, {
+        groupId,
+        since: new Date(now() - PENDING_MEDIA_HORIZON_MS),
+        until: new Date(now()),
+      });
+      if (pending === 0) return;
+      if (now() + PENDING_MEDIA_POLL_MS > deadline) {
+        deps.log?.info(
+          { groupId, pending },
+          "@Aida: pending media still unanalyzed; answering with placeholder",
+        );
+        return;
+      }
+      await sleep(PENDING_MEDIA_POLL_MS);
+    }
+  } catch (err) {
+    // The wait is an enhancement; a DB hiccup must not cost the answer.
+    deps.log?.warn({ err, groupId }, "@Aida: pending-media check failed; answering now");
+  }
+}
 
 /**
  * If `msg` mentions @Aida in an allowlisted group, answer it and reply. Returns
@@ -265,6 +320,7 @@ export async function maybeHandleAskCommand(
     acquired = true;
 
     await react("⏳");
+    await waitForPendingEnrichment(deps, groupId, now);
     // groupId is the VERIFIED inbound id — the privacy boundary for retrieval.
     // askerName lets her resolve first-person questions ("מה אמרתי על אלכס?"):
     // the transcript names every speaker, but nothing else says which of them

@@ -321,6 +321,66 @@ describe("maybeHandleAskCommand", () => {
     expect(d.sendText).toHaveBeenCalledWith(JID, expect.stringMatching(/סליחה/), expect.anything());
     expect(inFlight.has(groupId)).toBe(false); // lock released even on failure
   });
+
+  /** A monotonic fake clock: `sleep` advances it, mirroring real setTimeout. */
+  function fakeClock(startMs = Date.now()) {
+    let now = startMs;
+    return {
+      now: () => now,
+      sleep: vi.fn(async (ms: number) => {
+        now += ms;
+      }),
+    };
+  }
+
+  it("waits once when pending media clears on the next poll, then answers", async () => {
+    const clock = fakeClock();
+    const countPending = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+    const d = deps({ sleep: clock.sleep, countPending });
+    const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d, clock.now);
+    expect(ok).toBe(true);
+    expect(clock.sleep).toHaveBeenCalledTimes(1);
+    expect(countPending).toHaveBeenCalledTimes(2);
+    expect(d.answer).toHaveBeenCalled();
+  });
+
+  it("stops polling once the 30s wait budget is exhausted and answers anyway", async () => {
+    const clock = fakeClock();
+    const countPending = vi.fn(async () => 1); // always pending
+    const d = deps({ sleep: clock.sleep, countPending });
+    const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d, clock.now);
+    expect(ok).toBe(true);
+    // Budget is 30s, polling every 2s -> 15 sleeps before the deadline is hit.
+    expect(clock.sleep).toHaveBeenCalledTimes(15);
+    expect(d.answer).toHaveBeenCalled();
+  });
+
+  it("never sleeps when nothing is pending", async () => {
+    const clock = fakeClock();
+    const countPending = vi.fn(async () => 0);
+    const d = deps({ sleep: clock.sleep, countPending });
+    const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d, clock.now);
+    expect(ok).toBe(true);
+    expect(clock.sleep).not.toHaveBeenCalled();
+    expect(countPending).toHaveBeenCalledTimes(1);
+  });
+
+  it("a pending-media check failure costs nothing — logs a warning and still answers", async () => {
+    const clock = fakeClock();
+    const countPending = vi.fn(async () => {
+      throw new Error("db hiccup");
+    });
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const d = deps({ sleep: clock.sleep, countPending, log });
+    const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d, clock.now);
+    expect(ok).toBe(true);
+    expect(clock.sleep).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId, err: expect.any(Error) }),
+      expect.stringMatching(/pending-media check failed/),
+    );
+    expect(d.answer).toHaveBeenCalled();
+  });
 });
 
 describe("reply-threading", () => {
