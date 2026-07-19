@@ -227,7 +227,7 @@ export function evaluateAll(input: EvalInput): Evaluation[] {
 
 export type SuiteESummary = {
   n: number;
-  /** Mean of each metric across items. false_denial_* and false_affirmation are BUGS — lower is better. */
+  /** Mean of each metric across items. false_denial_*, false_affirmation, and ungrounded_number are BUGS — lower is better. */
   metrics: Record<string, number>;
   perItem: { id: string; evaluations: Evaluation[] }[];
 };

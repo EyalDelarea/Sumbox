@@ -146,6 +146,11 @@ describe("ungrounded_number", () => {
     const output = out({ answer: "תכף תכף... 3 אנשים אמרו כן.", promptText: "" });
     expect(ungroundedNumber({ item: present(), output }).value).toBe(0);
   });
+
+  it("flags a multi-digit numeral against an empty promptText — an unwired probe flags everything rather than silently passing", () => {
+    const output = out({ answer: "תכף תכף... התוצאה הייתה 102.", promptText: "" });
+    expect(ungroundedNumber({ item: present(), output }).value).toBe(1);
+  });
 });
 
 describe("evaluateAll / summarize", () => {
