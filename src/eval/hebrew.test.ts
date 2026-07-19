@@ -44,16 +44,12 @@ describe("stemPattern / containsStem", () => {
     expect(containsStem("יש פגישה מחר", "פגישה")).toBe(true);
   });
 
-  it.each([
-    "לפגישה",
-    "בפגישה",
-    "הפגישה",
-    "מהפגישה",
-    "ולפגישה",
-    "שבפגישה",
-  ])("matches the stem behind clitic prefix(es): %s", (word) => {
-    expect(containsStem(`הגענו ${word} אתמול`, "פגישה")).toBe(true);
-  });
+  it.each(["לפגישה", "בפגישה", "הפגישה", "מהפגישה", "ולפגישה", "שבפגישה"])(
+    "matches the stem behind clitic prefix(es): %s",
+    (word) => {
+      expect(containsStem(`הגענו ${word} אתמול`, "פגישה")).toBe(true);
+    },
+  );
 
   it("matches despite niqqud on the haystack", () => {
     expect(containsStem("הגענו לַפְּגִישָׁה", "פגישה")).toBe(true);

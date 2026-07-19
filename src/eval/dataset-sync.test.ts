@@ -32,13 +32,12 @@ const LOCAL = { baseUrl: "http://localhost:3000", datasetName: "aida-golden" };
 describe("assertLocal — the privacy guard", () => {
   // @langfuse/client POSTs wherever LANGFUSE_BASEURL points and does NOT go
   // through the exporter's check. Golden items quote real group messages.
-  it.each([
-    "https://cloud.langfuse.com",
-    "http://192.0.2.10:3000",
-    "https://langfuse.example.com",
-  ])("refuses a non-local baseUrl: %s", (url) => {
-    expect(() => assertLocal(url)).toThrow(/never leave the device/);
-  });
+  it.each(["https://cloud.langfuse.com", "http://192.0.2.10:3000", "https://langfuse.example.com"])(
+    "refuses a non-local baseUrl: %s",
+    (url) => {
+      expect(() => assertLocal(url)).toThrow(/never leave the device/);
+    },
+  );
 
   it.each(["http://localhost:3000", "http://127.0.0.1:3000"])("allows local: %s", (url) => {
     expect(() => assertLocal(url)).not.toThrow();
