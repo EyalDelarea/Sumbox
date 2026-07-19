@@ -242,9 +242,7 @@ export async function maybeHandleSummaryCommand(
 
     // One anchor: the group's shared cursor. No summaries.created_at fallback —
     // see the header. A group that has never run the command gets a last-N window.
-    const selection = groupMark
-      ? { since: groupMark.lastSummarizedAt }
-      : { last: FALLBACK_LAST_N };
+    const selection = groupMark ? { since: groupMark.lastSummarizedAt } : { last: FALLBACK_LAST_N };
 
     const result = await deps.runSummarize({ groupId, selection, requesterId: participantId });
     const text =
