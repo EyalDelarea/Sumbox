@@ -69,6 +69,7 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
   let preSeeded = false;
   let windowIds: number[] = [];
   let preSeededIds: number[] = [];
+  let promptText = "";
   const goldIds = await resolveGold(deps.pool, item);
   const answerFn = deps.answer ?? answerAgentic;
 
@@ -99,6 +100,9 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
       onWindow: (ids) => {
         windowIds = ids;
       },
+      onPrompt: (p) => {
+        promptText = p;
+      },
     },
     {
       groupId: item.groupId,
@@ -119,6 +123,7 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
     citedIds: answer.citedIds,
     goldIds,
     toolCalls: retrieved.length,
+    promptText,
   };
 }
 
