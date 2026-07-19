@@ -1,6 +1,6 @@
 import type pg from "pg";
 import {
-  selectUnembeddedContentMessages,
+  selectMessagesNeedingEmbedding,
   upsertMessageEmbedding,
 } from "../db/repositories/message-embeddings.js";
 import type { Embedder } from "./embedder.js";
@@ -23,29 +23,39 @@ export type EmbeddingSweepDeps = {
 export type SweepResult = { embedded: number; failed: number; remaining: number };
 
 /**
- * Embed one batch of the oldest-unembedded messages.
+ * Embed one batch of the messages whose embedding is missing or stale.
  *
- * This is the ONE mechanism that keeps embeddings current: it drains both the
- * stale historical gap (messages embedded once, long ago) and every newly
- * ingested message, because both are simply "content messages with no embedding
- * row". No hook in the hot ingest path, no separate backfill script.
+ * This is the ONE mechanism that keeps embeddings current: it drains the stale
+ * historical gap, every newly ingested message, AND every message whose meaning
+ * changed after it was embedded (a vision description or transcript that arrived
+ * late). All three are simply "content messages whose stored hash != their
+ * content's hash". No hook in the hot ingest path, no separate backfill script —
+ * the enrichment writers stay unaware of embeddings entirely.
  *
  * A single message that fails to embed (transient Ollama error, odd content) is
- * logged and skipped — it must not abort the batch or wedge the sweep, and it
- * will be retried on the next pass since it stays unembedded. Returns counts so
- * the caller (a loop, or the backfill CLI) can decide whether to continue.
+ * logged and skipped — it must not abort the batch or wedge the sweep. Its row
+ * keeps its OLD hash (or none), so it stays selected and is retried next pass
+ * rather than being silently marked clean. Returns counts so the caller (a loop,
+ * or the backfill CLI) can decide whether to continue.
  */
 export async function embedPendingBatch(
   deps: EmbeddingSweepDeps,
   batchSize: number,
 ): Promise<SweepResult> {
-  const pending = await selectUnembeddedContentMessages(deps.pool, batchSize);
+  const pending = await selectMessagesNeedingEmbedding(deps.pool, batchSize);
   let embedded = 0;
   let failed = 0;
   for (const msg of pending) {
     try {
       const embedding = await deps.embedder.embed(msg.content);
-      await upsertMessageEmbedding(deps.pool, { messageId: msg.id, embedding, model: deps.model });
+      // msg.contentHash is the SELECT's own md5 — never recomputed here. See the
+      // convergence invariant on upsertMessageEmbedding.
+      await upsertMessageEmbedding(deps.pool, {
+        messageId: msg.id,
+        embedding,
+        model: deps.model,
+        contentHash: msg.contentHash,
+      });
       embedded++;
     } catch (err) {
       failed++;

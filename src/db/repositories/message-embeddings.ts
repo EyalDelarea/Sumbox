@@ -19,6 +19,19 @@ import { toVectorLiteral } from "../vector.js";
  * (images/video). Kept in sync by copy because select.ts owns the summary path
  * and this owns the retrieval path; a drift between them would embed different
  * text than the reader sees.
+ *
+ * ── Editing this expression now costs a full re-embed ────────────────────────
+ * Embeddings are keyed to it by `message_embeddings.content_hash`, which hashes
+ * this expression's RESULT. So reformatting the SQL is free, but any change to
+ * the text it produces — the ' — ' separator, the trim/NULLIF semantics, which
+ * columns are concatenated — re-hashes every message, and the sweep re-derives
+ * the whole corpus (hours on the single local GPU). That is correct: this formula
+ * defines what a vector MEANS, and a vector built from different text is stale by
+ * definition. It just makes such a change a deliberate act with a known cost.
+ *
+ * The same literal is inlined in the migration that added content_hash (a
+ * migration is a historical record and must keep running unchanged). They must
+ * agree byte-for-byte, separator included, or the seed hashes the wrong text.
  */
 /**
  * Exported for the recency window (ask/recent-window.ts), which MUST extract
@@ -47,49 +60,89 @@ export const CONTENT_JOINS = `
  */
 const EXCLUDE_ASK_MENTION = `AND coalesce(m.text_content, '') !~* '@(אידה|aida)'`;
 
-export type UnembeddedMessage = { id: number; content: string };
+export type PendingEmbedding = { id: number; content: string; contentHash: string };
 
 /**
- * Content-bearing messages that have no embedding row yet, newest first.
+ * Content-bearing messages whose embedding is missing or STALE, newest first.
  *
  * Newest-first so a fresh backfill/sweep makes RECENT history searchable soonest
- * — that is what an @Aida question most often needs. Drives both the one-time
- * catch-up of the stale historical gap and the ongoing sweep of new messages;
- * one query, one mechanism.
+ * — that is what an @Aida question most often needs. Drives the one-time catch-up,
+ * the ongoing sweep of new messages, AND the re-embed of enriched ones; one query,
+ * one mechanism.
+ *
+ * ── Why the hash (do not swap it for a timestamp) ────────────────────────────
+ * A captioned photo has non-empty content at ingest, so it gets embedded on the
+ * caption alone; the vision description lands minutes later. The old predicate
+ * (`e.message_id IS NULL`) never looked at an already-embedded row again, so that
+ * vector stayed stale forever — findable by its caption, but not by what was in
+ * it.
+ *
+ * A timestamp comparison (`e.created_at < a.created_at OR e.created_at <
+ * t.created_at`) would catch today's cases — insertMediaAnalysis does bump
+ * created_at on re-analysis, and insertTranscript is DO NOTHING so a transcript
+ * never changes. The hash is chosen anyway because it compares the CONTENT
+ * ITSELF rather than a proxy for it: it needs no OR-chain across two nullable
+ * joins, does not depend on cross-table clock ordering (now() is transaction
+ * time — ties are possible), and it keeps working for a caption edit or any
+ * future content source without that writer having to maintain a timestamp.
+ *
+ * `content_hash IS DISTINCT FROM md5(…)` covers every case in one expression —
+ * never embedded (no row → NULL, and NULL IS DISTINCT FROM any hash), late
+ * description, late transcript, re-analysis, edited caption.
+ *
+ * The message_type and `<> ''` guards are INDEPENDENT of the hash arm and must
+ * stay: without the non-empty check, an empty or system message with no embedding
+ * row would satisfy `NULL IS DISTINCT FROM md5('')` and the sweep would embed
+ * empty strings forever.
  */
-export async function selectUnembeddedContentMessages(
+export async function selectMessagesNeedingEmbedding(
   client: pg.Pool | pg.PoolClient,
   limit: number,
-): Promise<UnembeddedMessage[]> {
-  const res = await client.query<{ id: string; content: string }>(
-    `SELECT m.id, ${CONTENT_EXPR} AS content
+): Promise<PendingEmbedding[]> {
+  const res = await client.query<{ id: string; content: string; content_hash: string }>(
+    `SELECT m.id, ${CONTENT_EXPR} AS content, md5(${CONTENT_EXPR}) AS content_hash
        FROM messages m
        ${CONTENT_JOINS}
        LEFT JOIN message_embeddings e ON e.message_id = m.id
-      WHERE e.message_id IS NULL
-        AND m.message_type <> 'system'
+      WHERE m.message_type <> 'system'
         AND ${CONTENT_EXPR} <> ''
+        AND e.content_hash IS DISTINCT FROM md5(${CONTENT_EXPR})
       ORDER BY m.sent_at DESC, m.id DESC
       LIMIT $1`,
     [limit],
   );
-  return res.rows.map((r) => ({ id: Number(r.id), content: r.content }));
+  return res.rows.map((r) => ({
+    id: Number(r.id),
+    content: r.content,
+    contentHash: r.content_hash,
+  }));
 }
 
 /**
  * Store (or refresh) one message's embedding. Idempotent on `message_id` (unique
  * constraint) so re-running the sweep or a re-embed never duplicates or errors.
+ *
+ * ── CONVERGENCE INVARIANT (load-bearing) ─────────────────────────────────────
+ * `contentHash` MUST be the hash that {@link selectMessagesNeedingEmbedding}
+ * computed and handed back — never one recomputed here or in JS. The select's
+ * WHERE and this write must agree byte-for-byte; if they ever disagree (JS vs
+ * Postgres md5, separator or unicode-normalization differences), every enriched
+ * message re-selects on EVERY sweep forever — a silent busy-loop that pins the
+ * local GPU and merely looks like "the sweep is always working".
+ * `embedding-sweep.test.ts` asserts convergence: sweep to completion, then the
+ * next select returns nothing.
  */
 export async function upsertMessageEmbedding(
   client: pg.Pool | pg.PoolClient,
-  input: { messageId: number; embedding: number[]; model: string },
+  input: { messageId: number; embedding: number[]; model: string; contentHash: string },
 ): Promise<void> {
   await client.query(
-    `INSERT INTO message_embeddings (message_id, embedding, model)
-     VALUES ($1, $2::vector, $3)
+    `INSERT INTO message_embeddings (message_id, embedding, model, content_hash)
+     VALUES ($1, $2::vector, $3, $4)
      ON CONFLICT (message_id)
-     DO UPDATE SET embedding = EXCLUDED.embedding, model = EXCLUDED.model, created_at = now()`,
-    [input.messageId, toVectorLiteral(input.embedding), input.model],
+     DO UPDATE SET embedding = EXCLUDED.embedding, model = EXCLUDED.model,
+                   content_hash = EXCLUDED.content_hash, created_at = now()`,
+    [input.messageId, toVectorLiteral(input.embedding), input.model, input.contentHash],
   );
 }
 

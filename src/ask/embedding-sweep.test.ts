@@ -1,6 +1,7 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { upsertGroup } from "../db/repositories/groups.js";
+import { insertMediaAnalysis } from "../db/repositories/media-analyses.js";
 import { insertMessages } from "../db/repositories/messages.js";
 import type { NormalizedMessage } from "../importer/types.js";
 import { createTestDatabase } from "../test/db.js";
@@ -101,6 +102,78 @@ describe("embedPendingBatch", () => {
       [good],
     );
     expect(Number(rows[0].c)).toBe(1); // the good one still got embedded
+  });
+
+  // ── RE-EMBED ON ENRICHMENT (#45) ────────────────────────────────────────────
+
+  it("re-embeds a message whose description arrived after it was embedded", async () => {
+    const g = await upsertGroup(pool, { name: "SWEEP-enrich", source: "import" });
+    const id = await seed(pool, g, "קפצו לראות", "sw-enrich-1");
+    const embedder = fakeEmbedder();
+
+    // Embedded on the caption alone.
+    await embedPendingBatch({ pool, embedder, model: "bge-m3" }, 100);
+    expect(embedder.calls).toContain("קפצו לראות");
+
+    await insertMediaAnalysis(pool, {
+      messageId: id,
+      kind: "image",
+      description: "צלחת פסטה על שולחן",
+      engine: "test",
+      status: "completed",
+    });
+    await embedPendingBatch({ pool, embedder, model: "bge-m3" }, 100);
+
+    // Re-embedded on caption + description — the whole point of the fix.
+    expect(embedder.calls.some((c) => c.includes("צלחת פסטה על שולחן"))).toBe(true);
+    const { rows } = await pool.query(
+      "select count(*) c from message_embeddings where message_id=$1",
+      [id],
+    );
+    expect(Number(rows[0].c)).toBe(1); // refreshed in place, not duplicated
+  });
+
+  it("CONVERGES — after a full sweep, nothing re-selects (guards a GPU busy-loop)", async () => {
+    // If the hash written by the sweep ever disagreed with the hash the SELECT
+    // computes, every enriched row would re-select on EVERY tick forever, pinning
+    // the local GPU while looking like ordinary activity. This is the test that
+    // fails loudly if that ever becomes possible.
+    const g = await upsertGroup(pool, { name: "SWEEP-conv", source: "import" });
+    const withDesc = await seed(pool, g, "עם תיאור", "sw-conv-1");
+    await seed(pool, g, "טקסט רגיל", "sw-conv-2");
+    await insertMediaAnalysis(pool, {
+      messageId: withDesc,
+      kind: "image",
+      description: "תיאור כלשהו",
+      engine: "test",
+      status: "completed",
+    });
+
+    await embedPendingBatch({ pool, embedder: fakeEmbedder(), model: "bge-m3" }, 100);
+
+    const second = fakeEmbedder();
+    const r = await embedPendingBatch({ pool, embedder: second, model: "bge-m3" }, 100);
+    expect(r.embedded).toBe(0);
+    expect(second.calls).toEqual([]); // the sweep has genuinely settled
+  });
+
+  it("leaves the old hash intact when an embed fails, so it retries next pass", async () => {
+    // A failure must not mark the message clean — that would silently strand a
+    // stale vector forever.
+    const g = await upsertGroup(pool, { name: "SWEEP-keep", source: "import" });
+    const id = await seed(pool, g, "רעיל", "sw-keep-1");
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    await embedPendingBatch({ pool, embedder: fakeEmbedder("רעיל"), model: "bge-m3", log }, 100);
+    const { rows } = await pool.query(
+      "select count(*) c from message_embeddings where message_id=$1",
+      [id],
+    );
+    expect(Number(rows[0].c)).toBe(0); // no row written at all
+
+    const retry = fakeEmbedder(); // now healthy
+    await embedPendingBatch({ pool, embedder: retry, model: "bge-m3" }, 100);
+    expect(retry.calls).toContain("רעיל"); // still pending → retried
   });
 
   it("reports remaining=batchSize when the batch was full (more work to do)", async () => {
