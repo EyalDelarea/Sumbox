@@ -64,6 +64,46 @@ describe("summary_group_marks", () => {
     });
   });
 
+  it("refuses to move the cursor backwards, and reports that it refused", async () => {
+    // The cursor is written from the command message's own timestamp, which is
+    // the SENDER'S DEVICE CLOCK — unvalidated. Because the marker is shared, one
+    // skewed clock writing a far-future cursor would make every later /סיכום in
+    // the group answer "no new messages" forever, with no in-app recovery. The
+    // guard makes an advance the only possible outcome of a write.
+    const groupId = await upsertGroup(pool, { name: "GM-3", source: "import" });
+    const s = await insertSummary(pool, {
+      groupId,
+      summaryType: "since",
+      parameters: {},
+      output: { overview: "s" },
+      model: "m",
+    });
+    const later = new Date("2026-07-06T22:00:00Z");
+    expect(
+      await upsertSummaryGroupMark(pool, {
+        groupId,
+        lastSummarizedAt: later,
+        lastSummaryId: s,
+        lastReplyWaMessageId: "late",
+      }),
+    ).toBe(true);
+
+    // An earlier timestamp must not land, and must not silently report success.
+    expect(
+      await upsertSummaryGroupMark(pool, {
+        groupId,
+        lastSummarizedAt: new Date("2026-07-06T20:00:00Z"),
+        lastSummaryId: s,
+        lastReplyWaMessageId: "early",
+      }),
+    ).toBe(false);
+    expect(await getSummaryGroupMark(pool, groupId)).toEqual({
+      lastSummarizedAt: later,
+      lastSummaryId: s,
+      lastReplyWaMessageId: "late",
+    });
+  });
+
   it("keys the mark per group — two groups stay independent", async () => {
     const a = await upsertGroup(pool, { name: "GM-2a", source: "import" });
     const b = await upsertGroup(pool, { name: "GM-2b", source: "import" });
