@@ -18,7 +18,7 @@ export type SummaryCommandRuntimeDeps = {
   resolveEnabledJids: () => Promise<ReadonlySet<string>>;
   resolveTrigger: () => Promise<string>;
   inFlight: Set<number>;
-  lastSummaryByUser: Map<string, WAMessage>;
+  lastSummaryByGroup: Map<number, WAMessage>;
 };
 
 /**
@@ -36,6 +36,6 @@ export function makeSummaryCommandDeps(
     resolveTrigger: async () =>
       (await getPreferences(pool as pg.Pool))?.summaryCommandTrigger ?? DEFAULT_SUMMARY_TRIGGER,
     inFlight: new Set<number>(),
-    lastSummaryByUser: new Map(),
+    lastSummaryByGroup: new Map(),
   };
 }

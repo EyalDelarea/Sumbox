@@ -25,7 +25,7 @@ describe("makeSummaryCommandDeps", () => {
     const deps = makeSummaryCommandDeps(pool, log);
     expect(deps).not.toBeUndefined();
     expect(deps.inFlight.size).toBe(0);
-    expect(deps.lastSummaryByUser.size).toBe(0);
+    expect(deps.lastSummaryByGroup.size).toBe(0);
   });
 
   it("resolveEnabledJids reflects the DB live — reads the group enabled AFTER construction", async () => {

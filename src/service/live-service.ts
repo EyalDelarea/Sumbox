@@ -95,7 +95,7 @@ export type AttachCollectorDeps = {
     /** Per-group in-flight lock, owned by the caller so it survives across messages. */
     inFlight: Set<number>;
     /** Per-user memory of the last summary sent (key `${groupId}:${participantId}`). */
-    lastSummaryByUser: Map<string, WAMessage>;
+    lastSummaryByGroup: Map<number, WAMessage>;
   };
   /**
    * Optional @Aida (@אידה) in-group Q&A. Same allowlist as summaryCommand,
@@ -261,12 +261,12 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
         const [
           { getSummaryOutputById },
           { upsertParticipant },
-          { getSummaryUserMark, upsertSummaryUserMark },
+          { getSummaryGroupMark, upsertSummaryGroupMark },
           { runSummarizeOnPool },
         ] = await Promise.all([
           import("../db/repositories/summaries.js"),
           import("../db/repositories/participants.js"),
-          import("../db/repositories/summary-user-marks.js"),
+          import("../db/repositories/summary-group-marks.js"),
           import("../summarization/summarize.js"),
         ]);
         return maybeHandleSummaryCommand(msg, {
@@ -276,15 +276,15 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           sendText: (jid, text, opts) => session.sendText(jid, text, opts),
           react: (jid, key, emoji) => session.react(jid, key, emoji),
           inFlight: sc.inFlight,
-          lastSummaryByUser: sc.lastSummaryByUser,
+          lastSummaryByGroup: sc.lastSummaryByGroup,
           makeQuoted: (jid, waId, text) => session.quotedFrom(jid, waId, text),
           resolvePn: (lid) => session.pnForLid(lid),
           runSummarize: ({ groupId, selection, requesterId }) =>
             runSummarizeOnPool(p, groupId, selection, { requesterId }),
           marks: {
             resolveParticipantId: (name) => upsertParticipant(p, name),
-            getMark: (groupId, pid) => getSummaryUserMark(p, groupId, pid),
-            setMark: (m) => upsertSummaryUserMark(p, m),
+            getMark: (groupId) => getSummaryGroupMark(p, groupId),
+            setMark: (m) => upsertSummaryGroupMark(p, m),
             getSummaryOutput: (id) => getSummaryOutputById(p, id),
           },
           log,
