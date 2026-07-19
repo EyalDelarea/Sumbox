@@ -31,6 +31,16 @@ export type AgenticTrace = { sessionId?: string; userId?: string; tags?: string[
  *  never loads unless telemetry + trace are both set. */
 type PropagateFn = <T>(attrs: AgenticTrace, fn: () => Promise<T>) => Promise<T>;
 
+/**
+ * The groundedness guard's view of a tool step: only the RESULT — something
+ * she was shown — not `text`/`content`, which echo her own draft for that
+ * step and would self-ground any fabrication if included.
+ */
+const toolResultText = (steps: unknown[] | undefined): string =>
+  JSON.stringify(
+    (steps ?? []).flatMap((s) => (s as { toolResults?: unknown[] }).toolResults ?? []),
+  );
+
 /** Matches answer.ts — one concept, one number. */
 const DEFAULT_WINDOW_N = 20;
 /** Matches answer.ts. */
@@ -220,15 +230,17 @@ export async function answerAgentic(
     if (answerText.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
 
     if (deps.groundednessGuard === true) {
-      // WHY steps are part of the corpus, not just system+prompt: onRetrieved
-      // unions mid-loop search_chat calls into what counted as "retrieved" for
-      // the eval, so this guard must union them too — otherwise a numeral she
-      // legitimately searched for mid-loop reads as invented and gets refused.
-      // JSON.stringify(steps) is a superset of what the model actually saw
-      // (tool args, ids, etc. ride along with the content), which only ever
-      // errs toward NOT flagging — the safe direction for a guard whose
-      // failure action is a refusal.
-      const corpus = `${system}\n${prompt}\n${JSON.stringify(steps ?? [])}`;
+      // WHY only toolResults, not the whole step: AI SDK v7's StepResult.text
+      // and .content ECHO the model's own generated text for that step — for
+      // the common no-tool-call case, steps[0].text IS the very answer being
+      // checked. Stringifying the whole step would self-ground every
+      // fabrication (the numeral is always "present" because the step just
+      // repeats it) and make the guard a no-op for exactly the scenario it
+      // exists for. toolResults are the one part of a step that's genuinely
+      // something she was SHOWN (not something she SAID), so — mirroring
+      // onRetrieved's union of mid-loop search_chat hits into "what was
+      // retrieved" — only toolResults belong in the corpus.
+      const corpus = `${system}\n${prompt}\n${toolResultText(steps)}`;
       let novel = ungroundedNumerals(answerText, corpus);
       if (novel.length > 0) {
         // One corrective retry: the number is the ONLY thing challenged, so a
@@ -240,7 +252,7 @@ export async function answerAgentic(
           system: `${system}\nGROUNDING CHECK: your draft asserted the number(s) ${novel.join(", ")} which appear in NO message you were shown. Rewrite the answer without any unsupported number — or, if the answer depends on it, refuse with '${NOT_IN_CHAT}'.`,
         } as Parameters<typeof sdkGenerateText>[0]);
         const retried = (retry.text ?? "").trim();
-        const retryCorpus = `${system}\n${prompt}\n${JSON.stringify(retry.steps ?? [])}`;
+        const retryCorpus = `${system}\n${prompt}\n${toolResultText(retry.steps)}`;
         novel = retried.length === 0 ? novel : ungroundedNumerals(retried, retryCorpus);
         // Still inventing → the clean refusal beats a confident fabrication.
         answerText = novel.length > 0 || retried.length === 0 ? NOT_IN_CHAT : retried;

@@ -163,10 +163,15 @@ describe("answerAgentic", () => {
       expect(generate).toHaveBeenCalledOnce();
     });
 
-    it("does not retry when a novel numeral was legitimately surfaced by a mid-loop search_chat call (in steps)", async () => {
+    it("does not retry when a novel numeral was legitimately surfaced by a mid-loop search_chat call (in toolResults)", async () => {
       const generate = vi.fn(async () => ({
         text: "תכף תכף... התוצאה הייתה 45.",
-        steps: [{ type: "tool-result", output: "נמצאה הודעה: התוצאה 45 אתמול" }],
+        steps: [
+          {
+            text: "תכף תכף... התוצאה הייתה 45.",
+            toolResults: [{ output: "נמצאה הודעה: התוצאה 45 אתמול" }],
+          },
+        ],
       }));
       const out = await answerAgentic(
         {
@@ -180,6 +185,36 @@ describe("answerAgentic", () => {
       );
       expect(out.text).toBe("תכף תכף... התוצאה הייתה 45.");
       expect(generate).toHaveBeenCalledOnce();
+    });
+
+    it("does not let a step's own echoed text/content self-ground its numeral — the realistic no-tool-call shape still retries", async () => {
+      const draft = "תכף תכף... התוצאה הייתה 102.";
+      const generate = vi
+        .fn()
+        .mockResolvedValueOnce({
+          text: draft,
+          steps: [
+            {
+              text: draft,
+              content: [{ type: "text", text: draft }],
+              toolCalls: [],
+              toolResults: [],
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ text: "תכף תכף... לא בטוחה בתוצאה המדויקת.", steps: [] });
+      const out = await answerAgentic(
+        {
+          pool: noMessagesPool,
+          embedder,
+          model,
+          generate: generate as never,
+          groundednessGuard: true,
+        },
+        { groupId: 7, question: "מה קורה?" },
+      );
+      expect(out.text).toBe("תכף תכף... לא בטוחה בתוצאה המדויקת.");
+      expect(generate).toHaveBeenCalledTimes(2);
     });
 
     it("stays a single call with novel numerals when the guard is OFF (default) — byte-identical to today", async () => {
