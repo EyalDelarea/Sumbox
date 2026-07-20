@@ -29,6 +29,11 @@ export type RunEDeps = {
   /** Injectable for tests; defaults to the real agentic loop. */
   answer?: typeof answerAgentic;
   onItem?: (id: string, out: TaskOutput) => void;
+  /**
+   * A/B lever for the numeral guard — the harness is the referee for whether
+   * the guard ships on the live path.
+   */
+  groundednessGuard?: boolean;
 };
 
 /**
@@ -69,6 +74,7 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
   let preSeeded = false;
   let windowIds: number[] = [];
   let preSeededIds: number[] = [];
+  let promptText = "";
   const goldIds = await resolveGold(deps.pool, item);
   const answerFn = deps.answer ?? answerAgentic;
 
@@ -99,6 +105,12 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
       onWindow: (ids) => {
         windowIds = ids;
       },
+      onPrompt: (p) => {
+        promptText = p;
+      },
+      ...(deps.groundednessGuard !== undefined
+        ? { groundednessGuard: deps.groundednessGuard }
+        : {}),
     },
     {
       groupId: item.groupId,
@@ -119,6 +131,7 @@ export async function runItem(deps: RunEDeps, item: GoldenItem): Promise<TaskOut
     citedIds: answer.citedIds,
     goldIds,
     toolCalls: retrieved.length,
+    promptText,
   };
 }
 

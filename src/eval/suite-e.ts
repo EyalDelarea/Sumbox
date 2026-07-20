@@ -27,6 +27,7 @@
  * local) and independently the more reliable choice for Hebrew.
  */
 
+import { ungroundedNumerals } from "../ask/groundedness.js";
 import { detectRefusal } from "./denial.js";
 import type { GoldenItem } from "./golden.js";
 
@@ -56,6 +57,12 @@ export type TaskOutput = {
    * source (which is what makes the reply pin to it).
    */
   citedIds: number[];
+  /**
+   * The exact system+user prompt of the final generation call — the grounding
+   * corpus ungrounded_number checks against. Captured via AgenticDeps.onPrompt
+   * so this can never drift from what she actually saw.
+   */
+  promptText: string;
 };
 
 /** Langfuse's evaluator return shape. */
@@ -184,6 +191,24 @@ export function citedExactlyOne({ item, output }: EvalInput): Evaluation {
   };
 }
 
+/**
+ * Did she assert a numeral (score, time, price, year — ≥2 digits) that never
+ * appeared anywhere in the prompt she was shown? A refusal asserts nothing, so
+ * it is vacuously grounded. 1 = bug — the concrete-number fabrications that
+ * survived every prompt fix (PR #53's absent-03 invented a sports score twice
+ * at temp 0). See ask/groundedness.ts for why numerals and why ≥2 digits.
+ */
+export function ungroundedNumber({ output }: EvalInput): Evaluation {
+  if (detectRefusal(output.answer) !== null)
+    return { name: "ungrounded_number", value: 0, comment: "n/a (refusal)" };
+  const novel = ungroundedNumerals(output.answer, output.promptText);
+  return {
+    name: "ungrounded_number",
+    value: novel.length > 0 ? 1 : 0,
+    comment: novel.length > 0 ? `asserts numerals never shown: ${novel.join(", ")}` : "ok",
+  };
+}
+
 export const EVALUATORS = [
   falseDenialGeneration,
   falseDenialRetrieval,
@@ -192,6 +217,7 @@ export const EVALUATORS = [
   searchedOnOwnInitiative,
   citedASource,
   citedExactlyOne,
+  ungroundedNumber,
 ] as const;
 
 /** Run every evaluator over one item's output. */
@@ -201,7 +227,7 @@ export function evaluateAll(input: EvalInput): Evaluation[] {
 
 export type SuiteESummary = {
   n: number;
-  /** Mean of each metric across items. false_denial_* and false_affirmation are BUGS — lower is better. */
+  /** Mean of each metric across items. false_denial_*, false_affirmation, and ungrounded_number are BUGS — lower is better. */
   metrics: Record<string, number>;
   perItem: { id: string; evaluations: Evaluation[] }[];
 };

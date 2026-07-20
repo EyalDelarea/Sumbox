@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { NOT_IN_CHAT } from "../ask/prompt.js";
 import type { GoldenItem } from "./golden.js";
 import {
   evaluateAll,
@@ -9,6 +10,7 @@ import {
   searchedOnOwnInitiative,
   summarize,
   type TaskOutput,
+  ungroundedNumber,
 } from "./suite-e.js";
 
 // Pure evaluators: no DB, no model. Real @Aida phrasings as fixtures.
@@ -35,6 +37,7 @@ const out = (over: Partial<TaskOutput> = {}): TaskOutput => ({
   goldIds: [1],
   toolCalls: 1,
   citedIds: [1],
+  promptText: "",
   ...over,
 });
 
@@ -112,6 +115,44 @@ describe("searched_on_own_initiative", () => {
   });
 });
 
+describe("ungrounded_number", () => {
+  it("flags a numeral the answer asserts but the prompt never showed", () => {
+    const output = out({
+      answer: "תכף תכף... התוצאה הייתה 102:99.",
+      promptText: "רועי שאל מה קרה במשחק אתמול",
+    });
+    const r = ungroundedNumber({ item: present(), output });
+    expect(r.value).toBe(1);
+    expect(r.comment).toContain("102");
+    expect(r.comment).toContain("99");
+  });
+
+  it("does not flag a numeral that was actually shown in the prompt", () => {
+    const output = out({
+      answer: "תכף תכף... התוצאה הייתה 102:99.",
+      promptText: "המשחק הסתיים 102:99 אמש",
+    });
+    expect(ungroundedNumber({ item: present(), output }).value).toBe(0);
+  });
+
+  it("is n/a for a refusal — a refusal asserts nothing", () => {
+    const output = out({ answer: `תכף תכף... ${NOT_IN_CHAT}`, promptText: "" });
+    const r = ungroundedNumber({ item: present(), output });
+    expect(r.value).toBe(0);
+    expect(r.comment).toMatch(/n\/a \(refusal\)/);
+  });
+
+  it("does not flag single-digit numerals (routinely derived, not fabricated)", () => {
+    const output = out({ answer: "תכף תכף... 3 אנשים אמרו כן.", promptText: "" });
+    expect(ungroundedNumber({ item: present(), output }).value).toBe(0);
+  });
+
+  it("flags a multi-digit numeral against an empty promptText — an unwired probe flags everything rather than silently passing", () => {
+    const output = out({ answer: "תכף תכף... התוצאה הייתה 102.", promptText: "" });
+    expect(ungroundedNumber({ item: present(), output }).value).toBe(1);
+  });
+});
+
 describe("evaluateAll / summarize", () => {
   it("returns one evaluation per evaluator", () => {
     expect(evaluateAll({ item: present(), output: out() }).map((e) => e.name)).toEqual([
@@ -122,6 +163,7 @@ describe("evaluateAll / summarize", () => {
       "searched_on_own_initiative",
       "cited_a_source",
       "cited_exactly_one",
+      "ungrounded_number",
     ]);
   });
 

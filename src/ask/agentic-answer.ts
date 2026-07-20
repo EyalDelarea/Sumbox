@@ -5,6 +5,7 @@ import { makeSearchChatTool } from "./agentic-tools.js";
 import { attributeSources } from "./attribution.js";
 import type { CitedAnswer } from "./citations.js";
 import type { Embedder } from "./embedder.js";
+import { ungroundedNumerals } from "./groundedness.js";
 import {
   askerLine,
   buildAgenticSystem,
@@ -29,6 +30,16 @@ export type AgenticTrace = { sessionId?: string; userId?: string; tags?: string[
  *  Injected (default lazily loads observability/langfuse.ts) so @langfuse/core
  *  never loads unless telemetry + trace are both set. */
 type PropagateFn = <T>(attrs: AgenticTrace, fn: () => Promise<T>) => Promise<T>;
+
+/**
+ * The groundedness guard's view of a tool step: only the RESULT — something
+ * she was shown — not `text`/`content`, which echo her own draft for that
+ * step and would self-ground any fabrication if included.
+ */
+const toolResultText = (steps: unknown[] | undefined): string =>
+  JSON.stringify(
+    (steps ?? []).flatMap((s) => (s as { toolResults?: unknown[] }).toolResults ?? []),
+  );
 
 /** Matches answer.ts — one concept, one number. */
 const DEFAULT_WINDOW_N = 20;
@@ -78,6 +89,25 @@ export type AgenticDeps = {
    * refusal she made while holding the answer in the window.
    */
   onWindow?: (messageIds: number[]) => void;
+  /**
+   * Probe: the INITIAL grounding corpus — window + pre-seeded hits + question +
+   * system, assembled the same way the real call is. Fired once, right before
+   * the generation call, so it reflects only what she was handed up front: a
+   * mid-loop search_chat result is NOT included (those live in `steps`, which
+   * this probe never sees). Used by the eval harness's ungrounded_number
+   * metric; prod passes nothing. The runtime guard (`groundednessGuard`)
+   * separately accounts for `steps` — see the WHY comment at its call site.
+   */
+  onPrompt?: (prompt: string) => void;
+  /**
+   * Runtime guard: after generation, refuse or retry once if the answer
+   * asserts a numeral that appears nowhere in what she was shown (see
+   * ask/groundedness.ts). Default OFF — the eval harness's ungrounded_number
+   * metric already MEASURES this; this flag is what would eventually ACT on
+   * it, kept behind a flag until the eval proves the retry doesn't regress
+   * other metrics (e.g. trading a correct answer for an unnecessary refusal).
+   */
+  groundednessGuard?: boolean;
   /** Injectable for tests; defaults to the AI SDK. */
   generate?: GenerateFn;
   /** Injectable for tests; defaults to observability/langfuse.ts withTraceAttributes. */
@@ -163,16 +193,19 @@ export async function answerAgentic(
         ]
       : [];
 
+  const system = buildAgenticSystem();
+  const prompt = [
+    ...renderWindow(window),
+    ...searchSection,
+    ...askerLine(input.askerName),
+    neutralizeFence(input.question),
+  ].join("\n");
+
   const opts = {
     model: deps.model,
     ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
-    system: buildAgenticSystem(),
-    prompt: [
-      ...renderWindow(window),
-      ...searchSection,
-      ...askerLine(input.askerName),
-      neutralizeFence(input.question),
-    ].join("\n"),
+    system,
+    prompt,
     stopWhen: stepCountIs(deps.maxSteps ?? 3),
     tools: { search_chat: searchChat },
     // AI SDK v7 auto-enables telemetry once a Langfuse integration is
@@ -182,24 +215,65 @@ export async function answerAgentic(
       functionId: "aida-agentic-answer",
     },
   } as Parameters<typeof sdkGenerateText>[0];
+  // The probe hands the eval the EXACT grounding corpus — window + pre-seeded
+  // hits + question + system — so the ungrounded_number metric can never
+  // drift from what she saw.
+  deps.onPrompt?.(`${system}\n${prompt}`);
   // With telemetry + trace attrs, wrap the WHOLE turn — generation AND the
   // attribution pass — so sessionId/userId/tags propagate onto every span (AI
   // SDK v7 has no per-call metadata field). Attribution used to run outside
   // this scope and its trace landed session-less in Langfuse, which made the
   // one live debugging session that needed it a manual hunt.
   const run = async (): Promise<CitedAnswer> => {
-    const { text } = await generate(opts);
-    const trimmed = (text ?? "").trim();
-    if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
+    const { text, steps } = await generate(opts);
+    let answerText = (text ?? "").trim();
+    if (answerText.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };
+
+    if (deps.groundednessGuard === true) {
+      // WHY only toolResults, not the whole step: AI SDK v7's StepResult.text
+      // and .content ECHO the model's own generated text for that step — for
+      // the common no-tool-call case, steps[0].text IS the very answer being
+      // checked. Stringifying the whole step would self-ground every
+      // fabrication (the numeral is always "present" because the step just
+      // repeats it) and make the guard a no-op for exactly the scenario it
+      // exists for. toolResults are the one part of a step that's genuinely
+      // something she was SHOWN (not something she SAID), so — mirroring
+      // onRetrieved's union of mid-loop search_chat hits into "what was
+      // retrieved" — only toolResults belong in the corpus.
+      const corpus = `${system}\n${prompt}\n${toolResultText(steps)}`;
+      let novel = ungroundedNumerals(answerText, corpus);
+      if (novel.length > 0) {
+        // One corrective retry: the number is the ONLY thing challenged, so a
+        // mostly-right answer keeps its substance and drops the invention.
+        // The retry fires only on a failed check, so the happy path costs
+        // zero extra inference.
+        const retry = await generate({
+          ...opts,
+          system: `${system}\nGROUNDING CHECK: your draft asserted the number(s) ${novel.join(", ")} which appear in NO message you were shown. Rewrite the answer without any unsupported number — or, if the answer depends on it, refuse with '${NOT_IN_CHAT}'.`,
+        } as Parameters<typeof sdkGenerateText>[0]);
+        const retried = (retry.text ?? "").trim();
+        const retryCorpus = `${system}\n${prompt}\n${toolResultText(retry.steps)}`;
+        novel = retried.length === 0 ? novel : ungroundedNumerals(retried, retryCorpus);
+        // Still inventing → the clean refusal beats a confident fabrication.
+        // Persona-prefixed like every refusal SHE produces (the system prompt
+        // mandates the prefix), so a guard-forced refusal is indistinguishable
+        // in tone from one she chose herself. A refusal has no source, so
+        // attribution is skipped — matching attribution.ts's REFUSALS rule.
+        if (novel.length > 0 || retried.length === 0) {
+          return { text: `תכף תכף... ${NOT_IN_CHAT}`, citedIds: [] };
+        }
+        answerText = retried;
+      }
+    }
 
     // Post-hoc: the answer above is already final and was produced from a
     // prompt with no ids in it. This pass only labels it — it cannot change a
     // word.
     const citedIds = await attributeSources(
       { model: deps.model, ...(deps.generate ? { generate: deps.generate } : {}) },
-      { question: input.question, answer: trimmed, candidates: [...window, ...freshHits] },
+      { question: input.question, answer: answerText, candidates: [...window, ...freshHits] },
     );
-    return { text: trimmed, citedIds };
+    return { text: answerText, citedIds };
   };
   return deps.telemetry && deps.trace
     ? await (deps.propagate ?? (await import("../observability/langfuse.js")).withTraceAttributes)(

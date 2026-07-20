@@ -92,4 +92,141 @@ describe("answerAgentic", () => {
     );
     expect(generate).toHaveBeenCalledOnce();
   });
+
+  it("fires onPrompt once with the exact system+user prompt she saw", async () => {
+    const generate = vi.fn(async () => ({ text: "תכף תכף... ok", steps: [] }));
+    const onPrompt = vi.fn();
+    await answerAgentic(
+      { pool: noMessagesPool, embedder, model, generate: generate as never, onPrompt },
+      { groupId: 7, question: "מה קורה?" },
+    );
+    expect(onPrompt).toHaveBeenCalledOnce();
+    const prompt = onPrompt.mock.calls[0][0] as string;
+    expect(prompt).toContain("תכף תכף");
+    expect(prompt).toContain("מה קורה?");
+  });
+
+  describe("groundednessGuard", () => {
+    it("retries once when the first draft asserts a numeral absent from the prompt, then returns the clean retry", async () => {
+      const generate = vi
+        .fn()
+        .mockResolvedValueOnce({ text: "תכף תכף... התוצאה הייתה 102.", steps: [] })
+        .mockResolvedValueOnce({ text: "תכף תכף... לא בטוחה בתוצאה המדויקת.", steps: [] });
+      const out = await answerAgentic(
+        {
+          pool: noMessagesPool,
+          embedder,
+          model,
+          generate: generate as never,
+          groundednessGuard: true,
+        },
+        { groupId: 7, question: "מה קורה?" },
+      );
+      expect(out.text).toBe("תכף תכף... לא בטוחה בתוצאה המדויקת.");
+      expect(generate).toHaveBeenCalledTimes(2);
+    });
+
+    it("returns the grounded refusal when both attempts assert novel numerals", async () => {
+      const { NOT_IN_CHAT } = await import("./prompt.js");
+      const generate = vi
+        .fn()
+        .mockResolvedValueOnce({ text: "תכף תכף... התוצאה הייתה 102.", steps: [] })
+        .mockResolvedValueOnce({ text: "תכף תכף... אז זה היה 205.", steps: [] });
+      const out = await answerAgentic(
+        {
+          pool: noMessagesPool,
+          embedder,
+          model,
+          generate: generate as never,
+          groundednessGuard: true,
+        },
+        { groupId: 7, question: "מה קורה?" },
+      );
+      // Persona-prefixed like every refusal she produces herself — a
+      // guard-forced refusal must not stand out by its missing prefix.
+      expect(out.text).toBe(`תכף תכף... ${NOT_IN_CHAT}`);
+      expect(out.citedIds).toEqual([]);
+      expect(generate).toHaveBeenCalledTimes(2);
+    });
+
+    it("calls generate once when the first draft is already grounded", async () => {
+      const generate = vi.fn(async () => ({ text: "תכף תכף... הכל טוב, בלי מספרים.", steps: [] }));
+      const out = await answerAgentic(
+        {
+          pool: noMessagesPool,
+          embedder,
+          model,
+          generate: generate as never,
+          groundednessGuard: true,
+        },
+        { groupId: 7, question: "מה קורה?" },
+      );
+      expect(out.text).toBe("תכף תכף... הכל טוב, בלי מספרים.");
+      expect(generate).toHaveBeenCalledOnce();
+    });
+
+    it("does not retry when a novel numeral was legitimately surfaced by a mid-loop search_chat call (in toolResults)", async () => {
+      const generate = vi.fn(async () => ({
+        text: "תכף תכף... התוצאה הייתה 45.",
+        steps: [
+          {
+            text: "תכף תכף... התוצאה הייתה 45.",
+            toolResults: [{ output: "נמצאה הודעה: התוצאה 45 אתמול" }],
+          },
+        ],
+      }));
+      const out = await answerAgentic(
+        {
+          pool: noMessagesPool,
+          embedder,
+          model,
+          generate: generate as never,
+          groundednessGuard: true,
+        },
+        { groupId: 7, question: "מה קורה?" },
+      );
+      expect(out.text).toBe("תכף תכף... התוצאה הייתה 45.");
+      expect(generate).toHaveBeenCalledOnce();
+    });
+
+    it("does not let a step's own echoed text/content self-ground its numeral — the realistic no-tool-call shape still retries", async () => {
+      const draft = "תכף תכף... התוצאה הייתה 102.";
+      const generate = vi
+        .fn()
+        .mockResolvedValueOnce({
+          text: draft,
+          steps: [
+            {
+              text: draft,
+              content: [{ type: "text", text: draft }],
+              toolCalls: [],
+              toolResults: [],
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ text: "תכף תכף... לא בטוחה בתוצאה המדויקת.", steps: [] });
+      const out = await answerAgentic(
+        {
+          pool: noMessagesPool,
+          embedder,
+          model,
+          generate: generate as never,
+          groundednessGuard: true,
+        },
+        { groupId: 7, question: "מה קורה?" },
+      );
+      expect(out.text).toBe("תכף תכף... לא בטוחה בתוצאה המדויקת.");
+      expect(generate).toHaveBeenCalledTimes(2);
+    });
+
+    it("stays a single call with novel numerals when the guard is OFF (default) — byte-identical to today", async () => {
+      const generate = vi.fn(async () => ({ text: "תכף תכף... התוצאה הייתה 102.", steps: [] }));
+      const out = await answerAgentic(
+        { pool: noMessagesPool, embedder, model, generate: generate as never },
+        { groupId: 7, question: "מה קורה?" },
+      );
+      expect(out.text).toBe("תכף תכף... התוצאה הייתה 102.");
+      expect(generate).toHaveBeenCalledOnce();
+    });
+  });
 });
