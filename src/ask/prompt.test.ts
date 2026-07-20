@@ -401,6 +401,33 @@ describe("buildAgenticSystem", () => {
     expect(lower).toContain("until you have called search_chat at least once");
   });
 
+  it("does not mandate an unconditional off-topic refusal on the agentic path", () => {
+    // Fix for the SYSTEM/agentic divergence class from PR #62: the agentic prompt
+    // granted the general-knowledge fallback in TOOLS but eleven lines later still
+    // ordered an unconditional refusal for any off-topic question, contradicting
+    // it. This asserts the exact contradicting shape is GONE, so the test fails
+    // against the pre-fix text.
+    const s = buildAgenticSystem();
+    expect(s).not.toContain(
+      `If the question isn't about this group's conversation, reply (after 'תכף תכף...'): ${OFF_TOPIC}`,
+    );
+  });
+
+  it("agrees with the single-shot prompt on the world-knowledge policy", () => {
+    // Both prompts must grant the general-knowledge fallback AND condition the
+    // OFF_TOPIC refusal rather than mandating it unconditionally — a policy
+    // divergence between them is exactly what let the branch's headline feature
+    // fail to land on the live (agentic) path while SYSTEM alone got fixed.
+    for (const p of [buildAskPrompt("x", ctx).system, buildAgenticSystem()]) {
+      const lower = p.toLowerCase();
+      expect(lower).toContain("general knowledge");
+      // The refusal must be conditioned ("only when...cannot answer at all"),
+      // never a bare unconditional instruction to reply OFF_TOPIC for any
+      // off-topic question.
+      expect(lower).toMatch(/only when you genuinely can(no|')t answer at all/);
+    }
+  });
+
   it("answers identity questions from a static blurb, not from retrieval", () => {
     // Asked 6+ times in the g70 audit what she is and what /סיכום does; answered
     // zero times, because identity was routed through retrieval and always missed.
