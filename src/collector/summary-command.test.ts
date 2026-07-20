@@ -106,6 +106,24 @@ describe("maybeHandleSummaryCommand — dispatch", () => {
     expect(sendText).not.toHaveBeenCalled();
   });
 
+  it("fires on the trigger WITH trailing text, ignoring the extra words", async () => {
+    // Exact equality made "/סיכום <anything>" a silent no-op: members typed it
+    // repeatedly and got nothing at all. The trailing text is ignored rather
+    // than read as a topic — that would be a feature, this is the bug fix.
+    for (const text of ["/סיכום אוהבים אותך", "/סיכום HELP SOS CALL 911"]) {
+      const deps = baseDeps({});
+      expect(await maybeHandleSummaryCommand(textMsg(text), deps)).toBe(true);
+      expect(deps.sendText).toHaveBeenCalled();
+    }
+  });
+
+  it("does NOT fire on a longer word that merely starts with the trigger", async () => {
+    // "/סיכוםX" is a different word, not the command with an argument.
+    const deps = baseDeps({});
+    expect(await maybeHandleSummaryCommand(textMsg("/סיכוםX"), deps)).toBe(false);
+    expect(deps.sendText).not.toHaveBeenCalled();
+  });
+
   it("ignores the command from an unlisted group", async () => {
     const deps = baseDeps({ resolveEnabledJids: async () => new Set(["other@g.us"]) });
     expect(await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps)).toBe(false);

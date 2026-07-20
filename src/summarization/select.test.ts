@@ -159,6 +159,31 @@ describe("selectMessages", () => {
     const msgs = await selectMessages(pool, g, { last: 100 });
     expect(msgs.map((x) => x.content)).toEqual(["actual message"]);
   });
+
+  it("excludes /סיכום WITH trailing text, but keeps a word that merely starts with it", async () => {
+    // The collector now fires on "/סיכום <anything>", so excluding only the bare
+    // literal would let every invocation with trailing text back in as content —
+    // 5 landed in the corpus that way in the measured 24h window. The boundary
+    // keeps "/סיכוםX" (a different word, not the command) as real conversation.
+    const g = await upsertGroup(pool, { name: "SEL-CMD-ARGS", source: "import" });
+    await seed(g, {
+      dedupeKey: "cmd-args",
+      sentAt: new Date("2026-01-01T10:00:00Z"),
+      textContent: "/סיכום אוהבים אותך",
+    });
+    await seed(g, {
+      dedupeKey: "cmd-sos",
+      sentAt: new Date("2026-01-01T10:30:00Z"),
+      textContent: "  /סיכום HELP SOS CALL 911  ",
+    });
+    await seed(g, {
+      dedupeKey: "not-cmd",
+      sentAt: new Date("2026-01-01T11:00:00Z"),
+      textContent: "/סיכוםX משהו אחר",
+    });
+    const msgs = await selectMessages(pool, g, { last: 100 });
+    expect(msgs.map((x) => x.content)).toEqual(["/סיכוםX משהו אחר"]);
+  });
 });
 
 describe("selectAfterCursor", () => {

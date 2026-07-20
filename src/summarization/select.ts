@@ -26,7 +26,18 @@ export type Selection = { last: number } | { since: Date };
  */
 // coalesce so a NULL text_content (media / voice-note rows) is kept — a bare
 // `trim(NULL) <> '…'` is NULL, which would silently drop every media message.
-const EXCLUDE_SUMMARY_COMMAND = "AND coalesce(trim(m.text_content), '') <> '/סיכום'";
+//
+// Prefix match, mirroring isSummaryTrigger in collector/summary-command.ts: the
+// collector now fires on `/סיכום <anything>`, so excluding only the bare literal
+// would let every invocation WITH trailing text back into the corpus as content
+// ("someone said /סיכום אוהבים אותך"). The two rules have to move together.
+//
+// The `' '` boundary mirrors isSummaryTrigger's whitespace check so `/סיכוםX` —
+// a different word — is still ordinary conversation. Safe to interpolate: a
+// hardcoded constant, never user input.
+const EXCLUDE_SUMMARY_COMMAND =
+  "AND coalesce(trim(m.text_content), '') NOT IN ('/סיכום') " +
+  "AND coalesce(trim(m.text_content), '') NOT LIKE '/סיכום ' || '%'";
 
 /**
  * Read content-bearing messages for a group, transcript substituting for voice

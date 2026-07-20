@@ -64,6 +64,27 @@ import { mapWaMessage } from "./message-mapper.js";
 /** The shipped default trigger. The live value comes from deps.resolveTrigger(). */
 export const SUMMARY_COMMAND = "/סיכום";
 
+/**
+ * Does this message invoke the summary command?
+ *
+ * Prefix match, not equality. Equality made `/סיכום <anything>` a SILENT no-op:
+ * members typed "/סיכום אוהבים אותך", "/סיכום HELP SOS CALL 911" and similar
+ * repeatedly and got nothing back, while the text also landed in the corpus as
+ * ordinary conversation (see select.ts, which mirrors this).
+ *
+ * The trailing text is deliberately IGNORED rather than treated as a topic or
+ * focus hint — that would be a new feature, and this is a bug fix. The command
+ * fires exactly as if it had been typed bare.
+ *
+ * The boundary check matters: without it `/סיכוםX` — a different word that
+ * merely starts with the trigger — would fire the command.
+ */
+export function isSummaryTrigger(text: string, trigger: string): boolean {
+  if (!text.startsWith(trigger)) return false;
+  const rest = text.slice(trigger.length);
+  return rest.length === 0 || /^\s/.test(rest);
+}
+
 const EMPTY_REPLY = "אין הודעות חדשות מאז הסיכום האחרון.";
 /** Sent when generation fails, so a failed command isn't a silent no-op. */
 const ERROR_REPLY = "סליחה, לא הצלחתי להכין סיכום כרגע. נסו שוב עוד רגע.";
@@ -193,7 +214,7 @@ export async function maybeHandleSummaryCommand(
     return false;
   }
 
-  if (text !== trigger) return false;
+  if (!isSummaryTrigger(text, trigger)) return false;
   // fromMe is intentionally allowed: the linked account is the primary user, so
   // typing /סיכום from your own phone must trigger. No loop risk — the reply is
   // a summary, never the command string, so it can't re-match above.
