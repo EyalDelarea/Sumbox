@@ -55,6 +55,16 @@ describe("buildAskPrompt", () => {
     expect(system).toContain("never say only 'תכף תכף'");
   });
 
+  it("keeps the persona without inventing group culture", () => {
+    // prompt.ts told the model 'תכף תכף' was "the group's running catchphrase".
+    // The corpus does not support that. The persona is fine; presenting an
+    // invented catchphrase to the model as pre-existing group culture is not, and
+    // it may be part of why the opener reads as templated.
+    const { system } = buildAskPrompt("x", ctx);
+    expect(system).toContain("תכף תכף");
+    expect(system).not.toContain("the group's running catchphrase");
+  });
+
   it("carries the people-safety guardrail (no defamation amplification)", () => {
     // Peer testing surfaced @Aida flatly repeating group banter as serious fact
     // ("X 100% abuses his friends"). The prompt must instruct it not to amplify
@@ -368,6 +378,19 @@ describe("buildAgenticSystem", () => {
       "NEVER repeat an insult, tease, or negative claim about a real person as though it were established fact",
     );
     expect(s.toLowerCase()).toContain("never repeat an insult"); // existing assertion must still hold
+  });
+
+  it("keeps her in first person and forbids the self-justifying meta loop", () => {
+    // ~14 of 100 audit replies were variants of "אני בוחנת את ההקשר… ועונה רק על מה
+    // שנכתב בקבוצה" — content-free, and the group read it as a malfunction
+    // ("היא עונה לי כבר 10 הודעות אותו דבר"). Separately she referred to herself in
+    // the third person ("רועי כתב שאידה היא דמות רעה"), dropping out of the group
+    // and becoming its narrator.
+    for (const p of [buildAskPrompt("x", ctx).system, buildAgenticSystem()]) {
+      const lower = p.toLowerCase();
+      expect(lower).toContain("first person");
+      expect(lower).toContain("never explain your own grounding rules");
+    }
   });
 
   it("forbids refusing before searching", () => {
