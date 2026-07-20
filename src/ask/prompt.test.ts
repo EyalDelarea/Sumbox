@@ -124,6 +124,23 @@ describe("buildAskPrompt", () => {
     expect(system.toLowerCase()).not.toContain("citation");
   });
 
+  it("attributes @Aida's own messages to her in the RETRIEVED transcript, not just the window", () => {
+    // isAida was honored only in renderWindowLine, so her own replies came back
+    // from retrieval as "משתתף לא ידוע" — she read her own past words as an
+    // anonymous stranger's. Now renderLine honors it, so every caller does.
+    const { user } = buildAskPrompt("שאלה", [
+      {
+        messageId: 301,
+        sentAt: new Date("2026-07-10T18:00:00Z"),
+        sender: "120363406567322025@g.us",
+        content: "תכף תכף... אמרתי קודם משהו",
+        isAida: true,
+      },
+    ]);
+    expect(user).toContain("אידה: תכף תכף... אמרתי קודם משהו");
+    expect(user).not.toContain("משתתף לא ידוע");
+  });
+
   it("forbids the hedge-denial contradiction on both prompts", () => {
     // "לא מצאתי... אבל [the answer]" — measured at false_denial_generation
     // 0.18/0.09/0.00 across 3 runs; with this rule 0.08/0.00/0.00, and the two

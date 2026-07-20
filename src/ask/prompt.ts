@@ -15,6 +15,12 @@ export type AskContextMessage = {
   sentAt: Date;
   sender: string;
   content: string;
+  /**
+   * True when @Aida herself wrote it. Optional because most constructors of this
+   * shape don't know — but when it IS known, every renderer must honor it, or
+   * she reads her own past replies back as an anonymous group member.
+   */
+  isAida?: boolean;
 };
 
 export type AskPrompt = { system: string; user: string };
@@ -122,11 +128,29 @@ export function citeTag(messageId: number): string {
 /** Render one retrieved message as a transcript line (sender resolved, fences neutralized).
  *  contentOverride lets callers (renderWindowLine) inject a post-neutralize
  *  transform, e.g. the pending-media tag, without duplicating the ts/sender assembly. */
-function renderLine(m: AskContextMessage, contentOverride?: (content: string) => string): string {
+export function renderLine(
+  m: AskContextMessage,
+  contentOverride?: (content: string) => string,
+): string {
   const ts = m.sentAt.toISOString().slice(0, 16).replace("T", " ");
-  const sender = neutralizeFence(resolveSenderName(m.sender));
+  // isAida is honored HERE rather than only in renderWindowLine, so every caller
+  // gets it: retrieval used to hand her own replies back as "משתתף לא ידוע",
+  // which is how she ends up treating her own past words as a stranger's.
+  const sender = m.isAida ? AIDA_SENDER : neutralizeFence(resolveSenderName(m.sender));
   const content = neutralizeFence(m.content);
   return `[${ts}] ${sender}: ${contentOverride ? contentOverride(content) : content}`;
+}
+
+/**
+ * A retrieved search hit, rendered for the agentic tool result.
+ *
+ * Same line shape as the transcript, plus the citation tag — the search block
+ * used to carry NEITHER a timestamp nor @Aida attribution, so she could not
+ * order what she found, say when anything was said, or recognize her own
+ * replies, and quoted stale messages in the present tense.
+ */
+export function renderRetrievedLine(m: AskContextMessage): string {
+  return `${citeTag(m.messageId)} ${renderLine(m)}`;
 }
 
 /**
@@ -137,9 +161,8 @@ function renderLine(m: AskContextMessage, contentOverride?: (content: string) =>
  * alone, so only the aida_messages marker can make the call.
  */
 function renderWindowLine(m: AskWindowMessage): string {
-  if (!m.isAida) return renderLine(m, (content) => withPendingTag(m, content));
-  const ts = m.sentAt.toISOString().slice(0, 16).replace("T", " ");
-  return `[${ts}] ${AIDA_SENDER}: ${withPendingTag(m, neutralizeFence(m.content))}`;
+  // renderLine now honors isAida itself, so this is just the pending-media tag.
+  return renderLine(m, (content) => withPendingTag(m, content));
 }
 
 /**
