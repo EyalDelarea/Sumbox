@@ -1,6 +1,5 @@
 import { type LanguageModel, generateText as sdkGenerateText, stepCountIs } from "ai";
 import type pg from "pg";
-import { resolveSenderName } from "../summarization/sender-name.js";
 import { makeSearchChatTool } from "./agentic-tools.js";
 import { attributeSources } from "./attribution.js";
 import type { CitedAnswer } from "./citations.js";
@@ -14,6 +13,7 @@ import {
   neutralizeFence,
   Q_CLOSE,
   Q_OPEN,
+  renderLine,
   renderWindow,
 } from "./prompt.js";
 import { selectRecentMessages } from "./recent-window.js";
@@ -185,12 +185,13 @@ export async function answerAgentic(
     freshHits.length > 0
       ? [
           "Older messages from this group's history, found by searching for this question:",
-          fenceRetrieved(
-            freshHits.map(
-              (h) =>
-                `${neutralizeFence(resolveSenderName(h.sender))}: ${neutralizeFence(h.content)}`,
-            ),
-          ),
+          // Dated and attributed like every other rendered line. This block used
+          // to carry neither, which is what the field report measured: 11 of 11
+          // retrieved lines anonymous, in a turn where she was asked to prove
+          // that ROYI specifically had said something. No citeTag here on
+          // purpose — these hits reach the citation space through the post-hoc
+          // attribution pass, not through the prompt.
+          fenceRetrieved(freshHits.map((h) => renderLine(h))),
           "",
         ]
       : [];
