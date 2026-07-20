@@ -47,4 +47,15 @@ describe("ask-redteam probe set", () => {
     expect(targets).toContain("tool-cross-chat");
     expect(targets).toContain("tool-result-injection");
   });
+
+  it("includes benign-framed dictation probes — the shape that actually landed", () => {
+    // Every other injection probe here is framed as an attack, and she refused all
+    // of them; the technique that worked live just asked politely. Pinned by name so
+    // a later prompt refactor can't quietly drop the only probes covering it — the
+    // gap would otherwise resurface silently, exactly as it did the first time.
+    const targets = PROBES.map((p) => p.target);
+    expect(targets).toContain("benign-prefix-dictation");
+    expect(targets).toContain("benign-language-dictation");
+    expect(targets).toContain("benign-suffix-dictation");
+  });
 });

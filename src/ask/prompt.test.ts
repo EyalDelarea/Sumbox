@@ -145,8 +145,12 @@ describe("buildAskPrompt", () => {
     for (const p of [system, buildAgenticSystem()]) {
       expect(p).toMatch(/change your language/i);
     }
-    // The agentic prompt names the specific shape that worked, not just the category.
-    expect(buildAgenticSystem()).toMatch(/prefix/i);
+    // All three measured shapes, not just the two the guard's own wording echoes:
+    // stripping the suffix half of OUTPUT SHAPE would otherwise leave
+    // benign-suffix-dictation unguarded with every unit test still green.
+    const agentic = buildAgenticSystem();
+    expect(agentic).toMatch(/prefix/i);
+    expect(agentic).toMatch(/suffix/i);
   });
 
   it("puts the agentic security rule up front, like the single-shot one", () => {
@@ -157,10 +161,13 @@ describe("buildAskPrompt", () => {
     // change buries it again the words will still be there and the guard will not.
     const agentic = buildAgenticSystem();
     const lines = agentic.split("\n");
-    const securityAt = lines.findIndex((l) => l.startsWith("SECURITY"));
+    // Matched on the LABELLED clause, not on any line starting with "SECURITY":
+    // a decoy security-adjacent note near the top would otherwise satisfy the
+    // position check while the real clause sat back at 8 — i.e. the test would
+    // pass in precisely the state it exists to catch.
+    const securityAt = lines.findIndex((l) => l.includes("SECURITY — READ FIRST"));
     expect(securityAt).toBeGreaterThanOrEqual(0);
     expect(securityAt).toBeLessThanOrEqual(2);
-    expect(agentic).toContain("SECURITY — READ FIRST");
     // Output shape is stated as an invariant, not as one more instruction to weigh.
     expect(agentic).toMatch(/OUTPUT SHAPE/);
   });
