@@ -311,7 +311,13 @@ describe("buildAgenticSystem", () => {
     // unconditionally, so "only from what the tools return" would have been a
     // false contract that forbids the very context we inject.
     expect(lower).toContain("from the recent messages you are shown or from what the tools return");
-    expect(lower).toContain("do not answer from world knowledge");
+    // #59 D1: the world-knowledge ban is deliberately GONE — it produced dead-ends
+    // on trivia ("what does מקנטרים mean?") that the chat was never going to answer.
+    // What replaces it is a PREFERENCE plus an attribution floor, not a ban.
+    expect(lower).not.toContain("do not answer from world knowledge");
+    expect(lower).toContain("primary ground");
+    expect(lower).toContain("your own general knowledge");
+    expect(lower).toContain("never present your own knowledge as something the group said");
     expect(s).toContain(NOT_IN_CHAT); // exact refusal kept
   });
 
