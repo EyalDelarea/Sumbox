@@ -2,6 +2,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { upsertGroup } from "../db/repositories/groups.js";
+import { insertMediaAnalysis } from "../db/repositories/media-analyses.js";
 import { insertMessages } from "../db/repositories/messages.js";
 import { upsertParticipant } from "../db/repositories/participants.js";
 import type { NormalizedMessage } from "../importer/types.js";
@@ -36,6 +37,33 @@ async function seed(
   };
   const { ids } = await insertMessages(pool, [row]);
   return Number(ids[0]!);
+}
+
+async function seedMedia(
+  pool: pg.Pool,
+  groupId: number,
+  opts: {
+    externalId: string;
+    sentAt: string;
+    mediaFilename: string;
+    caption?: string;
+    mediaStatus?: "present" | "missing";
+  },
+): Promise<number> {
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO messages (group_id, source, external_id, message_type, media_filename, media_status, text_content, sent_at, dedupe_key)
+     VALUES ($1, 'live', $2, 'media', $3, $4, $5, $6, $2)
+     RETURNING id`,
+    [
+      groupId,
+      opts.externalId,
+      opts.mediaFilename,
+      opts.mediaStatus ?? "present",
+      opts.caption ?? null,
+      T(opts.sentAt),
+    ],
+  );
+  return Number(rows[0]!.id);
 }
 
 describe("selectRecentMessages", () => {
@@ -145,5 +173,144 @@ describe("selectRecentMessages", () => {
       asOf: T("2026-07-16T13:05:00Z"),
     });
     expect(w.map((m) => m.content)).toEqual(["אמיתי"]);
+  });
+
+  it("surfaces a captionless unanalyzed image with empty content and pendingMedia: image", async () => {
+    const g = await upsertGroup(pool, { name: "RW-8", source: "live" });
+    await seedMedia(pool, g, {
+      externalId: "rw8-a",
+      sentAt: "2026-07-16T13:00:00Z",
+      mediaFilename: "photo.jpg",
+    });
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    expect(w).toHaveLength(1);
+    expect(w[0]!.content).toBe("");
+    expect(w[0]!.pendingMedia).toBe("image");
+  });
+
+  it("surfaces an unanalyzed voice note with pendingMedia: voice", async () => {
+    const g = await upsertGroup(pool, { name: "RW-9", source: "live" });
+    await seedMedia(pool, g, {
+      externalId: "rw9-a",
+      sentAt: "2026-07-16T13:00:00Z",
+      mediaFilename: "note.opus",
+    });
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    expect(w).toHaveLength(1);
+    expect(w[0]!.pendingMedia).toBe("voice");
+  });
+
+  it("keeps a captioned-but-unanalyzed image flagged pending — the caption must not hide the unread photo", async () => {
+    const g = await upsertGroup(pool, { name: "RW-10", source: "live" });
+    await seedMedia(pool, g, {
+      externalId: "rw10-a",
+      sentAt: "2026-07-16T13:00:00Z",
+      mediaFilename: "photo.jpg",
+      caption: "כיתוב",
+    });
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    expect(w).toHaveLength(1);
+    expect(w[0]!.content).toBe("כיתוב");
+    expect(w[0]!.pendingMedia).toBe("image");
+  });
+
+  it("clears pendingMedia once the image is analyzed — description becomes content", async () => {
+    const g = await upsertGroup(pool, { name: "RW-11", source: "live" });
+    const id = await seedMedia(pool, g, {
+      externalId: "rw11-a",
+      sentAt: "2026-07-16T13:00:00Z",
+      mediaFilename: "photo.jpg",
+    });
+    await insertMediaAnalysis(pool, {
+      messageId: id,
+      kind: "image",
+      description: "תיאור התמונה",
+      engine: "test",
+      status: "completed",
+    });
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    expect(w).toHaveLength(1);
+    expect(w[0]!.content).toBe("תיאור התמונה");
+    expect(w[0]!.pendingMedia).toBeNull();
+  });
+
+  it("drops the pending flag past the 10-minute horizon — no forever-false 'ask again in a moment'", async () => {
+    const g = await upsertGroup(pool, { name: "RW-13", source: "live" });
+    await seedMedia(pool, g, {
+      externalId: "rw13-a",
+      // 11 minutes before asOf — outside the horizon.
+      sentAt: "2026-07-16T12:54:00Z",
+      mediaFilename: "photo.jpg",
+    });
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    // Empty content, no pending flag -> invisible, same as any other empty row.
+    expect(w).toHaveLength(0);
+  });
+
+  it("keeps pendingMedia set for a completed row with an empty description — the #45 bug, closed", async () => {
+    const g = await upsertGroup(pool, { name: "RW-14", source: "live" });
+    const id = await seedMedia(pool, g, {
+      externalId: "rw14-a",
+      sentAt: "2026-07-16T13:04:00Z", // 1 minute before asOf, inside the horizon
+      mediaFilename: "photo.jpg",
+    });
+    await insertMediaAnalysis(pool, {
+      messageId: id,
+      kind: "image",
+      description: "   ", // whitespace-only — CONTENT_EXPR still renders ''
+      engine: "test",
+      status: "completed",
+    });
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    expect(w).toHaveLength(1);
+    expect(w[0]!.content).toBe("");
+    expect(w[0]!.pendingMedia).toBe("image");
+  });
+
+  it("still excludes stickers and empty-text rows even under the new pending check", async () => {
+    const g = await upsertGroup(pool, { name: "RW-12", source: "live" });
+    await seedMedia(pool, g, {
+      externalId: "rw12-a",
+      sentAt: "2026-07-16T13:00:00Z",
+      mediaFilename: "STK-x.webp",
+    });
+    await seed(pool, g, "", "rw12-b", "2026-07-16T13:01:00Z");
+
+    const w = await selectRecentMessages(pool, {
+      groupId: g,
+      n: 10,
+      asOf: T("2026-07-16T13:05:00Z"),
+    });
+    expect(w).toHaveLength(0);
   });
 });

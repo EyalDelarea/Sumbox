@@ -7,6 +7,7 @@ import {
   fenceRetrieved,
   NOT_IN_CHAT,
   OFF_TOPIC,
+  PENDING_MEDIA_PLACEHOLDER,
 } from "./prompt.js";
 
 const ctx = [
@@ -164,6 +165,57 @@ describe("buildAskPrompt", () => {
     ];
     const { user } = buildAskPrompt("שאלה", jidCtx);
     expect(user).not.toContain("12345@g.us");
+  });
+});
+
+describe("pending media placeholder in the window", () => {
+  const base = {
+    messageId: 301,
+    sentAt: new Date("2026-07-10T18:00:00Z"),
+    sender: "Royi",
+    isAida: false,
+  };
+
+  it("renders an image still being analyzed as the placeholder when content is empty", () => {
+    const { user } = buildAskPrompt("x", ctx, [{ ...base, content: "", pendingMedia: "image" }]);
+    expect(user).toContain(PENDING_MEDIA_PLACEHOLDER.image);
+    expect(user).toContain("[תמונה — עדיין בניתוח]");
+  });
+
+  it("appends the placeholder after an existing caption rather than replacing it", () => {
+    const { user } = buildAskPrompt("x", ctx, [{ ...base, content: "כן", pendingMedia: "image" }]);
+    expect(user).toContain("כן [תמונה — עדיין בניתוח]");
+  });
+
+  it("renders the video and voice placeholders", () => {
+    const video = buildAskPrompt("x", ctx, [{ ...base, content: "", pendingMedia: "video" }]);
+    expect(video.user).toContain(PENDING_MEDIA_PLACEHOLDER.video);
+
+    const voice = buildAskPrompt("x", ctx, [{ ...base, content: "", pendingMedia: "voice" }]);
+    expect(voice.user).toContain(PENDING_MEDIA_PLACEHOLDER.voice);
+  });
+
+  it("teaches both prompts the pending-media rule", () => {
+    const { system } = buildAskPrompt("x", ctx);
+    expect(system).toContain("עדיין בניתוח");
+    expect(buildAgenticSystem()).toContain("עדיין בניתוח");
+  });
+
+  it("without pendingMedia, window rendering is byte-identical to today", () => {
+    const withField = buildAskPrompt("x", ctx, [{ ...base, content: "כן", pendingMedia: null }]);
+    const withoutField = buildAskPrompt("x", ctx, [{ ...base, content: "כן" }]);
+    expect(withField.user).toBe(withoutField.user);
+    expect(withField.user).toContain("כן");
+    expect(withField.user).not.toContain("עדיין בניתוח");
+  });
+
+  it("degrades to plain content on a drifted pendingMedia value, instead of rendering 'undefined'", () => {
+    // pendingMedia is an unchecked cast off a DB CASE; simulate the SQL and the
+    // union type drifting apart so PENDING_MEDIA_PLACEHOLDER[...] misses.
+    const drifted = { ...base, content: "כן", pendingMedia: "gif" as unknown as "image" };
+    const { user } = buildAskPrompt("x", ctx, [drifted]);
+    expect(user).toContain("כן");
+    expect(user).not.toContain("undefined");
   });
 });
 
