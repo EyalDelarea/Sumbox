@@ -115,6 +115,22 @@ describe("makeSearchChatTool", () => {
     expect(out).not.toContain("12345@g.us"); // raw JID never leaks
     expect(out).toContain("משתתף לא ידוע"); // resolved unknown-sender label
   });
+
+  it("dates every search hit, so she can order events and say when something was said", async () => {
+    // The search block used to carry NO timestamp while the window timestamped
+    // every line. She could not order what she found, could not answer "when",
+    // and quoted stale messages in the present tense. seed() fixes sentAt at
+    // 2026-07-10T10:00Z, so this asserts the rendered value exactly.
+    const g = await upsertGroup(pool, { name: "AT-TS", source: "import" });
+    await seed(pool, g, "משהו עם תאריך", "at-ts", 5);
+    const embedder: Embedder = { embed: async () => vec(5) };
+    const t = makeSearchChatTool({ pool, embedder, groupId: g, question: "מה קרה?" });
+    const out = String(await t.execute!({ query: "משהו" }, {} as never));
+
+    expect(out).toContain("[2026-07-10 10:00]");
+    // Still citable — the tag and the timestamp coexist rather than replacing.
+    expect(out).toMatch(/\[msg:\d+] \[2026-07-10 10:00] Dana: משהו עם תאריך/);
+  });
 });
 
 describe("onRetrieved probe", () => {
