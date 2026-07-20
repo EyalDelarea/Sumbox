@@ -309,6 +309,19 @@ describe("maybeHandleAskCommand", () => {
     expect(inFlight.has(groupId)).toBe(true); // still held — not stolen
   });
 
+  it("acks a question dropped as already-running, instead of dropping it silently", async () => {
+    // The guard used to return BEFORE any reaction, so asking while she was
+    // mid-answer produced no output at all and the group had to infer the rule
+    // ("חכה היא עונה אחד אחד אם לא היא מתעלמת"). ⏸ and not ⏳: the question is
+    // dropped rather than queued, so it must not look like work in progress.
+    const react = vi.fn(async () => {});
+    const d = deps({ inFlight: new Set<number>([groupId]), react });
+    await maybeHandleAskCommand(askMsg("@אידה מה?"), d);
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏸");
+    expect(react).not.toHaveBeenCalledWith(JID, expect.anything(), "⏳");
+    expect(d.sendText).not.toHaveBeenCalled();
+  });
+
   it("sends an error reply (not silence) when answering throws, and releases the lock", async () => {
     const inFlight = new Set<number>();
     const d = deps({

@@ -231,12 +231,10 @@ export async function maybeHandleSummaryCommand(
   }
   const groupId = Number(group.id);
 
-  if (deps.inFlight.has(groupId)) {
-    deps.log?.info({ groupId }, "summary command: already generating, skipping");
-    return false;
-  }
-  deps.inFlight.add(groupId);
-  // Best-effort reaction (⏳ working → ✅ done → ❌ failed); never throws.
+  // Best-effort reaction (⏸ busy → ⏳ working → ✅ done → ❌ failed); never throws.
+  // Defined ABOVE the in-flight guard so the guard can ack before returning —
+  // it used to drop a concurrent /סיכום in total silence, the same defect the
+  // @Aida path had (they are mirrored on purpose, so they regressed together).
   const react = async (emoji: string) => {
     try {
       await deps.react?.(jid, msg.key, emoji);
@@ -244,6 +242,14 @@ export async function maybeHandleSummaryCommand(
       /* reactions are cosmetic — ignore failures */
     }
   };
+
+  if (deps.inFlight.has(groupId)) {
+    // ⏸, not ⏳: this request is dropped, not queued. See ask-command.ts.
+    await react("⏸");
+    deps.log?.info({ groupId }, "summary command: already generating, skipping");
+    return false;
+  }
+  deps.inFlight.add(groupId);
   try {
     await react("⏳");
 

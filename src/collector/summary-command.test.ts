@@ -339,6 +339,16 @@ describe("maybeHandleSummaryCommand — in-flight lock", () => {
     expect(deps.sendText).not.toHaveBeenCalled();
   });
 
+  it("acks the skipped command instead of dropping it silently", async () => {
+    // Same defect as the @Aida path — the two guards are mirrored on purpose,
+    // so the missing ack was mirrored too and #60 item 3 only named one of them.
+    const react = vi.fn(async () => {});
+    const deps = baseDeps({ inFlight: new Set([7]), react });
+    await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps);
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏸");
+    expect(react).not.toHaveBeenCalledWith(JID, expect.anything(), "⏳");
+  });
+
   it("releases the lock after completion so a later command runs", async () => {
     const inFlight = new Set<number>();
     const deps = baseDeps({ inFlight });
