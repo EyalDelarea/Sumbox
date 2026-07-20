@@ -82,6 +82,19 @@ describe("buildAskPrompt", () => {
     }
   });
 
+  it("default-denies group membership when unsure, on both prompts", () => {
+    // The non-member floor (a) scopes to people "NOT in this group" but never
+    // said how to decide who counts — the model had no trigger. Motivating case:
+    // "אשתו של רועי" (Royi's wife), a non-member the bot fabricated a marital
+    // breakdown about. Without this default-deny sentence, an ambiguous person
+    // could silently fall through the floor entirely.
+    for (const p of [buildAskPrompt("x", ctx).system, buildAgenticSystem()]) {
+      expect(p).toContain(
+        "If you are not sure whether someone is in this group, treat them as NOT in it.",
+      );
+    }
+  });
+
   it("permits grounded inference but forbids inventing specific facts", () => {
     // The refuse-everything-not-verbatim prompt made @Aida useless for "did we
     // meet?"-style questions. It may now infer from what messages IMPLY, while
@@ -343,6 +356,18 @@ describe("buildAgenticSystem", () => {
     const s = buildAgenticSystem();
     expect(s).not.toMatch(/\[msg:/i);
     expect(s.toLowerCase()).not.toContain("citation");
+  });
+
+  it("widens floor (b) to cover negative claims, not just insults/teases", () => {
+    // SYSTEM's floor (b) already barred repeating "an insult, tease, or negative
+    // claim about a real person" as fact; the agentic version only barred "an
+    // insult or tease" — a real gap on the live path. Fix aligns it up to SYSTEM's
+    // breadth without adding/removing array elements (would break securityAt <= 2).
+    const s = buildAgenticSystem();
+    expect(s).toContain(
+      "NEVER repeat an insult, tease, or negative claim about a real person as though it were established fact",
+    );
+    expect(s.toLowerCase()).toContain("never repeat an insult"); // existing assertion must still hold
   });
 
   it("forbids refusing before searching", () => {
