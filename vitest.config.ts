@@ -16,6 +16,14 @@ export default defineConfig({
     // They call real Ollama and gracefully skip when it's absent, but running
     // them on every `npm test` would be unexpectedly slow locally.
     // Run them explicitly with `npm run eval:*`.
-    exclude: ["**/node_modules/**", "**/.git/**", "**/*.eval.test.ts"],
+    // `.claude/**` keeps agent worktrees out of the run. `npm test` is
+    // `vitest run src`, and that argument is a substring FILTER, not a
+    // directory — so it also matches `.claude/worktrees/<branch>/src/**` and
+    // runs every checked-out branch's tests alongside this one's. Measured on a
+    // checkout with three worktrees: 7,368 tests and 27 failures, versus 1,624
+    // and zero here. Those failures are stale code from other branches, they
+    // are invisible to CI (which has no worktrees), and chasing them has burned
+    // real time more than once.
+    exclude: ["**/node_modules/**", "**/.git/**", "**/.claude/**", "**/*.eval.test.ts"],
   },
 });
