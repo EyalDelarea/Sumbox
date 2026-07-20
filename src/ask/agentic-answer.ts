@@ -12,6 +12,8 @@ import {
   fenceRetrieved,
   NOT_IN_CHAT,
   neutralizeFence,
+  Q_CLOSE,
+  Q_OPEN,
   renderWindow,
 } from "./prompt.js";
 import { selectRecentMessages } from "./recent-window.js";
@@ -198,7 +200,15 @@ export async function answerAgentic(
     ...renderWindow(window),
     ...searchSection,
     ...askerLine(input.askerName),
+    // Fenced exactly like the single-shot path (buildAskPrompt). Neutralizing alone
+    // already made a forged ⟦…⟧ marker impossible, but the question still arrived as
+    // a bare trailing line — indistinguishable from the instructions above it, while
+    // the SECURITY clause told the model the question would be wrapped in markers.
+    // The fence makes that promise true.
+    "The question to answer:",
+    Q_OPEN,
     neutralizeFence(input.question),
+    Q_CLOSE,
   ].join("\n");
 
   const opts = {
