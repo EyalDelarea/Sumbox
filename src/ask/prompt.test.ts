@@ -63,7 +63,23 @@ describe("buildAskPrompt", () => {
     const lower = system.toLowerCase();
     expect(lower).toContain("people-safety");
     expect(lower).toContain("never repeat an insult");
-    expect(lower).toContain("do not render a verdict");
+    // #59 D2: the BLANKET verdict ban is lifted — these are four friends who tease
+    // each other constantly and want her in on it. What survives is the D3 floor,
+    // which is narrower and load-bearing: the audit caught her fabricating a
+    // marital breakdown for a friend who is NOT in the group and cannot answer back.
+    expect(lower).toContain("never render a verdict");
+    expect(lower).toContain("not in this group");
+  });
+
+  it("keeps the non-member floor on both prompts", () => {
+    // The one case the blanket ban existed for, now stated explicitly rather than
+    // as a side effect of banning all verdicts.
+    for (const p of [buildAskPrompt("x", ctx).system, buildAgenticSystem()]) {
+      const lower = p.toLowerCase();
+      expect(lower).toContain("never render a verdict");
+      expect(lower).toContain("not in this group");
+      expect(lower).toContain("never repeat an insult");
+    }
   });
 
   it("permits grounded inference but forbids inventing specific facts", () => {
