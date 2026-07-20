@@ -321,6 +321,16 @@ export async function maybeHandleAskCommand(
     if (question.length === 0) return false;
 
     if (deps.inFlight.has(groupId)) {
+      // React BEFORE returning. The guard used to return ahead of any ack, so a
+      // question asked while she was mid-answer produced no output whatsoever —
+      // the group reverse-engineered the behaviour rather than being told it
+      // ("חכה היא עונה אחד אחד אם לא היא מתעלמת", "היא לא מגיבה לי").
+      //
+      // A distinct emoji, not the ⏳ she uses when actually working: this question
+      // is NOT queued and will never be answered, so promising progress would be
+      // a lie. ⏸ says heard-but-not-now, which is the truth and tells the asker
+      // to send it again.
+      await react("⏸");
       deps.log?.info({ groupId }, "@Aida: already answering, skipping");
       return false;
     }
