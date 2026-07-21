@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import "dotenv/config";
+import { GroupTurnQueue } from "./collector/group-turn-queue.js";
 import { loadConfig } from "./config.js";
 import { runImport } from "./importer/run-import.js";
 import type { JobBus } from "./jobs/job-bus.js";
@@ -221,7 +222,7 @@ program
       onError: (err) => collectorLog.warn({ err }, "collector message handler error"),
       summaryCommand: cmdDeps,
       // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
-      askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, inFlight: new Set() },
+      askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, turns: new GroupTurnQueue() },
       telemetry: config.langfuse.enabled
         ? {
             baseUrl: config.langfuse.baseUrl,

@@ -1,5 +1,6 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { GroupTurnQueue } from "../collector/group-turn-queue.js";
 import { upsertCommandPermission } from "../db/repositories/group-command-permissions.js";
 import { upsertGroupByWhatsappId } from "../db/repositories/groups.js";
 import {
@@ -24,7 +25,7 @@ describe("makeSummaryCommandDeps", () => {
     const log = { info: vi.fn(), warn: vi.fn() };
     const deps = makeSummaryCommandDeps(pool, log);
     expect(deps).not.toBeUndefined();
-    expect(deps.inFlight.size).toBe(0);
+    expect(deps.turns).toBeInstanceOf(GroupTurnQueue);
     expect(deps.lastSummaryByGroup.size).toBe(0);
   });
 

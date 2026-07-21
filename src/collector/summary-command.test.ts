@@ -2,6 +2,7 @@ import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
 import { describe, expect, it, vi } from "vitest";
 import type { RunSummarizeResult } from "../summarization/summarize.js";
+import { GroupTurnQueue } from "./group-turn-queue.js";
 import {
   buildWhatsAppReply,
   formatSummaryForWhatsApp,
@@ -79,7 +80,7 @@ function baseDeps(over: Partial<SummaryCommandDeps> = {}): SummaryCommandDeps {
     resolveTrigger: async () => SUMMARY_COMMAND,
     sendText: vi.fn(async () => SENT),
     react: vi.fn(async () => {}),
-    inFlight: new Set<number>(),
+    turns: new GroupTurnQueue(),
     lastSummaryByGroup: new Map(),
     marks: defaultMarks(),
     runSummarize: vi.fn(async () => okResult("שלום")),
@@ -350,41 +351,85 @@ describe("maybeHandleSummaryCommand — reply content", () => {
   });
 });
 
-describe("maybeHandleSummaryCommand — in-flight lock", () => {
-  it("skips a second concurrent command for the same group", async () => {
-    const deps = baseDeps({ inFlight: new Set([7]) });
-    expect(await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps)).toBe(false);
-    expect(deps.sendText).not.toHaveBeenCalled();
-  });
+describe("maybeHandleSummaryCommand — turn queue", () => {
+  const groupId = 7;
 
-  it("acks the skipped command instead of dropping it silently", async () => {
-    // Same defect as the @Aida path — the two guards are mirrored on purpose,
-    // so the missing ack was mirrored too and #60 item 3 only named one of them.
+  /** Poll until `cond` holds — the handler awaits several times before it
+   *  reaches the queue, so a fixed tick count can't observe "now queued". */
+  async function waitUntil(cond: () => boolean, label: string): Promise<void> {
+    for (let i = 0; i < 200; i++) {
+      if (cond()) return;
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    throw new Error(`waitUntil timed out: ${label}`);
+  }
+
+  it("waits its turn and runs when the in-flight summary finishes", async () => {
+    const turns = new GroupTurnQueue();
+    await turns.take(groupId);
     const react = vi.fn(async () => {});
-    const deps = baseDeps({ inFlight: new Set([7]), react });
-    await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps);
-    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏸");
-    expect(react).not.toHaveBeenCalledWith(JID, expect.anything(), "⏳");
+    const deps = baseDeps({ turns, react });
+
+    const pending = maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps);
+    await waitUntil(() => react.mock.calls.length > 0, "queued ack");
+    expect(deps.sendText).not.toHaveBeenCalled(); // waiting, not dropped
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏳");
+
+    turns.release(groupId);
+    expect(await pending).toBe(true);
+    expect(deps.sendText).toHaveBeenCalled();
   });
 
-  it("releases the lock after completion so a later command runs", async () => {
-    const inFlight = new Set<number>();
-    const deps = baseDeps({ inFlight });
+  it("acks ⏸ when someone is already waiting — the queue is one deep", async () => {
+    const turns = new GroupTurnQueue();
+    await turns.take(groupId);
+    const waiter = turns.take(groupId);
+    await Promise.resolve();
+
+    const react = vi.fn(async () => {});
+    const deps = baseDeps({ turns, react });
+    expect(await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps)).toBe(false);
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏸");
+    expect(deps.sendText).not.toHaveBeenCalled();
+
+    turns.release(groupId);
+    await waiter;
+  });
+
+  it("drops a queued command that outlived the TTL", async () => {
+    let clock = 0;
+    const turns = new GroupTurnQueue({ ttlMs: 1000, now: () => clock });
+    await turns.take(groupId);
+    const react = vi.fn(async () => {});
+    const deps = baseDeps({ turns, react });
+
+    const pending = maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps);
+    await waitUntil(() => react.mock.calls.length > 0, "queued ack");
+    clock = 5000;
+    turns.release(groupId);
+
+    expect(await pending).toBe(false);
+    expect(deps.sendText).not.toHaveBeenCalled();
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏸");
+  });
+
+  it("releases the turn after completion so a later command runs", async () => {
+    const turns = new GroupTurnQueue();
+    const deps = baseDeps({ turns });
     await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps);
-    expect(inFlight.has(7)).toBe(false);
     expect(await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps)).toBe(true);
   });
 
-  it("releases the lock even when generation throws", async () => {
-    const inFlight = new Set<number>();
+  it("releases the turn even when generation throws", async () => {
+    const turns = new GroupTurnQueue();
     const deps = baseDeps({
-      inFlight,
+      turns,
       runSummarize: vi.fn(async () => {
         throw new Error("ollama down");
       }),
     });
     expect(await maybeHandleSummaryCommand(textMsg(SUMMARY_COMMAND), deps)).toBe(false);
-    expect(inFlight.has(7)).toBe(false);
+    expect(await turns.take(groupId)).toBe("acquired");
   });
 });
 

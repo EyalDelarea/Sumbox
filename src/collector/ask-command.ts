@@ -19,6 +19,7 @@ import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messag
 import { resolveCitationSource } from "../db/repositories/citation-sources.js";
 import { countPendingEnrichment } from "../db/repositories/pending-enrichment.js";
 import { matchAskTrigger } from "./ask-trigger.js";
+import type { GroupTurnQueue } from "./group-turn-queue.js";
 import { mapWaMessage } from "./message-mapper.js";
 
 type MinimalLog = {
@@ -49,8 +50,9 @@ export type AskCommandDeps = {
     text: string,
     author?: { jid?: string | null; fromMe?: boolean },
   ) => WAMessage;
-  /** Per-group in-flight lock so two @Aida questions don't run Ollama concurrently. */
-  inFlight: Set<number>;
+  /** Per-group serial turn queue so two @Aida questions don't run Ollama
+   *  concurrently — the second one waits its turn instead of being dropped. */
+  turns: GroupTurnQueue;
   /** Canonicalize a 1:1 @lid to its phone JID (groups @g.us pass through). */
   resolvePn?: (lid: string) => Promise<string | null>;
   /** Delay between polls while waiting on pending media. Prod defaults to real
@@ -320,23 +322,29 @@ export async function maybeHandleAskCommand(
     }
     if (question.length === 0) return false;
 
-    if (deps.inFlight.has(groupId)) {
-      // React BEFORE returning. The guard used to return ahead of any ack, so a
-      // question asked while she was mid-answer produced no output whatsoever —
-      // the group reverse-engineered the behaviour rather than being told it
-      // ("חכה היא עונה אחד אחד אם לא היא מתעלמת", "היא לא מגיבה לי").
-      //
-      // A distinct emoji, not the ⏳ she uses when actually working: this question
-      // is NOT queued and will never be answered, so promising progress would be
-      // a lie. ⏸ says heard-but-not-now, which is the truth and tells the asker
-      // to send it again.
+    /**
+     * Wait our turn rather than dropping the question.
+     *
+     * This used to be a bare in-flight check that reacted ⏸ and returned: a
+     * question asked while she was mid-answer was never answered at all, and the
+     * asker had to work out from the emoji that resending was on them. Now the
+     * second question waits behind the first and is answered in order, so ⏳ —
+     * "an answer is coming" — is the truth for it too.
+     *
+     * ⏸ survives for the two cases where it is still honest: someone is ALREADY
+     * waiting (the queue is one deep), or the wait outlived the TTL and an answer
+     * now would land in a conversation that has moved on.
+     */
+    const outcome = await deps.turns.take(groupId, { onQueued: () => react("⏳") });
+    if (outcome !== "acquired") {
       await react("⏸");
-      deps.log?.info({ groupId }, "@Aida: already answering, skipping");
+      deps.log?.info({ groupId, outcome }, "@Aida: turn not taken, skipping");
       return false;
     }
-    deps.inFlight.add(groupId);
     acquired = true;
 
+    // No-op when we already reacted ⏳ on the way into the queue; WhatsApp keeps
+    // one reaction per sender, so re-sending the same emoji changes nothing.
     await react("⏳");
     await waitForPendingEnrichment(deps, groupId, now);
     // groupId is the VERIFIED inbound id — the privacy boundary for retrieval.
@@ -386,6 +394,6 @@ export async function maybeHandleAskCommand(
     }
     return false;
   } finally {
-    if (acquired && groupId !== null) deps.inFlight.delete(groupId);
+    if (acquired && groupId !== null) deps.turns.release(groupId);
   }
 }

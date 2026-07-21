@@ -16,6 +16,7 @@
 
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
+import type { GroupTurnQueue } from "../collector/group-turn-queue.js";
 import type { CollectorSession } from "../collector/session.js";
 import type { JobBus } from "../jobs/job-bus.js";
 import type { Logger } from "../logging/logger.js";
@@ -92,20 +93,20 @@ export type AttachCollectorDeps = {
   summaryCommand?: {
     resolveEnabledJids: () => Promise<ReadonlySet<string>>;
     resolveTrigger: () => Promise<string>;
-    /** Per-group in-flight lock, owned by the caller so it survives across messages. */
-    inFlight: Set<number>;
+    /** Per-group serial turn queue, owned by the caller so it survives across messages. */
+    turns: GroupTurnQueue;
     /** Per-user memory of the last summary sent (key `${groupId}:${participantId}`). */
     lastSummaryByGroup: Map<number, WAMessage>;
   };
   /**
    * Optional @Aida (@אידה) in-group Q&A. Same allowlist as summaryCommand,
-   * resolved per message for the same live-toggle reason. Its own in-flight lock,
+   * resolved per message for the same live-toggle reason. Its own turn queue,
    * separate from the summary command's (the two features can run concurrently
-   * on one group; the lock only serializes repeated @Aida calls to that group).
+   * on one group; the queue only serializes repeated @Aida calls to that group).
    */
   askCommand?: {
     resolveEnabledJids: () => Promise<ReadonlySet<string>>;
-    inFlight: Set<number>;
+    turns: GroupTurnQueue;
   };
   /**
    * Opt-in Langfuse observability for the agentic @Aida loop (LANGFUSE_ENABLED).
@@ -275,7 +276,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           resolveTrigger: sc.resolveTrigger,
           sendText: (jid, text, opts) => session.sendText(jid, text, opts),
           react: (jid, key, emoji) => session.react(jid, key, emoji),
-          inFlight: sc.inFlight,
+          turns: sc.turns,
           lastSummaryByGroup: sc.lastSummaryByGroup,
           makeQuoted: (jid, waId, text) => session.quotedFrom(jid, waId, text),
           resolvePn: (lid) => session.pnForLid(lid),
@@ -327,7 +328,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           resolveEnabledJids: ac.resolveEnabledJids,
           sendText: (jid, text, opts) => session.sendText(jid, text, opts),
           react: (jid, key, emoji) => session.react(jid, key, emoji),
-          inFlight: ac.inFlight,
+          turns: ac.turns,
           resolvePn: (lid) => session.pnForLid(lid),
           makeQuoted: (jid, waId, text, author) => session.quotedFrom(jid, waId, text, author),
           answer: ({ groupId, question }) =>
