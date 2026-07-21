@@ -1,5 +1,6 @@
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
+import { GroupTurnQueue } from "../collector/group-turn-queue.js";
 import { getEnabledGroupJids } from "../db/repositories/group-command-permissions.js";
 import { DEFAULT_SUMMARY_TRIGGER, getPreferences } from "../db/repositories/user-preferences.js";
 
@@ -17,7 +18,7 @@ type MinimalLog = {
 export type SummaryCommandRuntimeDeps = {
   resolveEnabledJids: () => Promise<ReadonlySet<string>>;
   resolveTrigger: () => Promise<string>;
-  inFlight: Set<number>;
+  turns: GroupTurnQueue;
   lastSummaryByGroup: Map<number, WAMessage>;
 };
 
@@ -35,7 +36,7 @@ export function makeSummaryCommandDeps(
     resolveEnabledJids: async () => new Set(await getEnabledGroupJids(pool as pg.Pool)),
     resolveTrigger: async () =>
       (await getPreferences(pool as pg.Pool))?.summaryCommandTrigger ?? DEFAULT_SUMMARY_TRIGGER,
-    inFlight: new Set<number>(),
+    turns: new GroupTurnQueue(),
     lastSummaryByGroup: new Map(),
   };
 }

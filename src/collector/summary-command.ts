@@ -59,6 +59,7 @@ import { normalizeSummaryOutput } from "../summarization/normalize.js";
 import { stripAllMarkers } from "../summarization/parse-structured.js";
 import type { RunSummarizeResult } from "../summarization/summarize.js";
 import type { SummaryBullet, SummaryOutput } from "../summarization/summarizer.js";
+import type { GroupTurnQueue } from "./group-turn-queue.js";
 import { mapWaMessage } from "./message-mapper.js";
 
 /** The shipped default trigger. The live value comes from deps.resolveTrigger(). */
@@ -118,8 +119,9 @@ export type SummaryCommandDeps = {
   ) => Promise<WAMessage | undefined>;
   /** Optional: react to the command message (⏳ working, ✅ done). Best-effort. */
   react?: (jid: string, key: WAMessage["key"], emoji: string) => Promise<void>;
-  /** Per-group in-flight lock, shared across calls, to serialize Ollama runs. */
-  inFlight: Set<number>;
+  /** Per-group serial turn queue, shared across calls, to serialize Ollama runs
+   *  — a concurrent /סיכום waits its turn rather than being dropped. */
+  turns: GroupTurnQueue;
   /** Reconstruct a quotable message from a stored id + text (CollectorSession.quotedFrom). */
   makeQuoted?: (jid: string, waMessageId: string, text: string) => WAMessage;
   /**
@@ -264,13 +266,15 @@ export async function maybeHandleSummaryCommand(
     }
   };
 
-  if (deps.inFlight.has(groupId)) {
-    // ⏸, not ⏳: this request is dropped, not queued. See ask-command.ts.
+  // Wait our turn instead of dropping the request; ⏸ now means only "someone is
+  // already waiting" or "waited past the TTL". See ask-command.ts — the two
+  // surfaces are mirrored on purpose.
+  const outcome = await deps.turns.take(groupId, { onQueued: () => react("⏳") });
+  if (outcome !== "acquired") {
     await react("⏸");
-    deps.log?.info({ groupId }, "summary command: already generating, skipping");
+    deps.log?.info({ groupId, outcome }, "summary command: turn not taken, skipping");
     return false;
   }
-  deps.inFlight.add(groupId);
   try {
     await react("⏳");
 
@@ -369,7 +373,7 @@ export async function maybeHandleSummaryCommand(
     }
     return false;
   } finally {
-    deps.inFlight.delete(groupId);
+    deps.turns.release(groupId);
   }
 }
 

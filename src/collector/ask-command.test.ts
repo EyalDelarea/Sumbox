@@ -5,6 +5,20 @@ import { recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { upsertGroup } from "../db/repositories/groups.js";
 import { createTestDatabase } from "../test/db.js";
 import { type AskCommandDeps, maybeHandleAskCommand } from "./ask-command.js";
+import { GroupTurnQueue } from "./group-turn-queue.js";
+
+/**
+ * Yield until `cond` holds. The handler runs several awaits (mapping, allowlist,
+ * group lookup) before it ever reaches the turn queue, so a fixed number of
+ * microtask ticks can't reliably observe "it is now queued" — poll instead.
+ */
+async function waitUntil(cond: () => boolean, label: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (cond()) return;
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  throw new Error(`waitUntil timed out: ${label}`);
+}
 
 const JID = "120363-ask@g.us";
 
@@ -43,7 +57,7 @@ describe("maybeHandleAskCommand", () => {
       pool,
       resolveEnabledJids: async () => new Set([JID]),
       sendText: vi.fn(async () => ({ key: { id: "s1" } }) as WAMessage),
-      inFlight: new Set<number>(),
+      turns: new GroupTurnQueue(),
       answer: vi.fn(async () => ({ text: "לפי השיחה, נפגשים ב-21:00.", citedIds: [] })),
       ...over,
     };
@@ -273,11 +287,75 @@ describe("maybeHandleAskCommand", () => {
     expect(d.answer).not.toHaveBeenCalled();
   });
 
-  it("skips when already answering the same group (in-flight lock)", async () => {
-    const inFlight = new Set<number>([groupId]);
-    const d = deps({ inFlight });
+  it("waits its turn and answers when the in-flight answer finishes", async () => {
+    // The whole point of the queue: a question asked mid-answer used to be
+    // dropped forever. It must now be answered, just later.
+    const turns = new GroupTurnQueue();
+    expect(await turns.take(groupId)).toBe("acquired"); // someone is answering
+    const react = vi.fn(async () => {});
+    const d = deps({ turns, react });
+
+    const pending = maybeHandleAskCommand(askMsg("@אידה מה?"), d);
+    await waitUntil(() => react.mock.calls.length > 0, "queued ack");
+    expect(d.answer).not.toHaveBeenCalled(); // still waiting, not dropped
+
+    turns.release(groupId);
+    expect(await pending).toBe(true);
+    expect(d.answer).toHaveBeenCalled();
+  });
+
+  it("reacts ⏳ on entering the queue, before the turn comes", async () => {
+    // Silence is what made the group reverse-engineer the rule
+    // ("חכה היא עונה אחד אחד אם לא היא מתעלמת"). ⏳ is now honest for a queued
+    // question, because an answer really is coming.
+    const turns = new GroupTurnQueue();
+    await turns.take(groupId);
+    const react = vi.fn(async () => {});
+    const d = deps({ turns, react });
+
+    const pending = maybeHandleAskCommand(askMsg("@אידה מה?"), d);
+    await waitUntil(() => react.mock.calls.length > 0, "queued ack");
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏳");
+    expect(react).not.toHaveBeenCalledWith(JID, expect.anything(), "⏸");
+
+    turns.release(groupId);
+    await pending;
+  });
+
+  it("drops with ⏸ when someone is already waiting — the queue is one deep", async () => {
+    const turns = new GroupTurnQueue();
+    await turns.take(groupId); // holder
+    const waiter = turns.take(groupId); // the one waiting slot
+    await Promise.resolve();
+
+    const react = vi.fn(async () => {});
+    const d = deps({ turns, react });
     expect(await maybeHandleAskCommand(askMsg("@אידה מה?"), d)).toBe(false);
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏸");
     expect(d.answer).not.toHaveBeenCalled();
+    expect(d.sendText).not.toHaveBeenCalled();
+
+    turns.release(groupId);
+    await waiter;
+  });
+
+  it("walks ⏳ back to ⏸ when the queued turn outlives the TTL", async () => {
+    // The staleness objection that justified dropping in the first place: an
+    // answer that arrives after the thread moved on is worse than none.
+    let clock = 0;
+    const turns = new GroupTurnQueue({ ttlMs: 1000, now: () => clock });
+    await turns.take(groupId);
+    const react = vi.fn(async () => {});
+    const d = deps({ turns, react });
+
+    const pending = maybeHandleAskCommand(askMsg("@אידה מה?"), d);
+    await waitUntil(() => react.mock.calls.length > 0, "queued ack");
+    clock = 5000;
+    turns.release(groupId);
+
+    expect(await pending).toBe(false);
+    expect(d.answer).not.toHaveBeenCalled();
+    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏸");
   });
 
   it("a bare @Aida with no question does not fire", async () => {
@@ -301,38 +379,39 @@ describe("maybeHandleAskCommand", () => {
     expect(d.sendText).toHaveBeenCalledWith(JID, expect.stringMatching(/סליחה/), expect.anything());
   });
 
-  it("does not release another call's in-flight lock when it skips as already-running", async () => {
-    // The finally must only delete the lock THIS call acquired.
-    const inFlight = new Set<number>([groupId]); // another call holds it
-    const d = deps({ inFlight });
-    await maybeHandleAskCommand(askMsg("@אידה מה?"), d);
-    expect(inFlight.has(groupId)).toBe(true); // still held — not stolen
+  it("does not release another call's turn when it drops as busy", async () => {
+    // The finally must only release the turn THIS call acquired.
+    const turns = new GroupTurnQueue();
+    await turns.take(groupId); // another call holds it
+    const waiter = turns.take(groupId); // fill the waiting slot so we drop
+    await Promise.resolve();
+
+    await maybeHandleAskCommand(askMsg("@אידה מה?"), deps({ turns }));
+
+    // The holder's turn was not stolen: the waiter is still waiting on it.
+    let promoted = false;
+    void waiter.then(() => {
+      promoted = true;
+    });
+    await Promise.resolve();
+    expect(promoted).toBe(false);
+
+    turns.release(groupId);
+    await waiter;
   });
 
-  it("acks a question dropped as already-running, instead of dropping it silently", async () => {
-    // The guard used to return BEFORE any reaction, so asking while she was
-    // mid-answer produced no output at all and the group had to infer the rule
-    // ("חכה היא עונה אחד אחד אם לא היא מתעלמת"). ⏸ and not ⏳: the question is
-    // dropped rather than queued, so it must not look like work in progress.
-    const react = vi.fn(async () => {});
-    const d = deps({ inFlight: new Set<number>([groupId]), react });
-    await maybeHandleAskCommand(askMsg("@אידה מה?"), d);
-    expect(react).toHaveBeenCalledWith(JID, expect.anything(), "⏸");
-    expect(react).not.toHaveBeenCalledWith(JID, expect.anything(), "⏳");
-    expect(d.sendText).not.toHaveBeenCalled();
-  });
-
-  it("sends an error reply (not silence) when answering throws, and releases the lock", async () => {
-    const inFlight = new Set<number>();
+  it("sends an error reply (not silence) when answering throws, and releases the turn", async () => {
+    const turns = new GroupTurnQueue();
     const d = deps({
-      inFlight,
+      turns,
       answer: vi.fn(async () => {
         throw new Error("ollama down");
       }),
     });
     expect(await maybeHandleAskCommand(askMsg("@אידה מה?"), d)).toBe(false);
     expect(d.sendText).toHaveBeenCalledWith(JID, expect.stringMatching(/סליחה/), expect.anything());
-    expect(inFlight.has(groupId)).toBe(false); // lock released even on failure
+    // Turn released even on failure — the next caller gets it immediately.
+    expect(await turns.take(groupId)).toBe("acquired");
   });
 
   /** A monotonic fake clock: `sleep` advances it, mirroring real setTimeout. */
@@ -413,7 +492,7 @@ describe("reply-threading", () => {
     pool,
     resolveEnabledJids: async () => new Set([RJID]),
     sendText: vi.fn(async () => ({ key: { id: "sent-1" } }) as WAMessage),
-    inFlight: new Set<number>(),
+    turns: new GroupTurnQueue(),
     answer: vi.fn(async () => ({ text: "תכף תכף... אתמול דיברנו על זה.", citedIds: [] })),
     ...over,
   });

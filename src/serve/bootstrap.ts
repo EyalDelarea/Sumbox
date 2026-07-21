@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backfillGroup } from "../collector/backfill.js";
+import { GroupTurnQueue } from "../collector/group-turn-queue.js";
 import { OnboardingAdapter } from "../collector/onboarding-adapter.js";
 import { recoverOnReconnect } from "../collector/reconnect-recovery.js";
 import { loadConfig } from "../config.js";
@@ -474,7 +475,7 @@ export async function startServe(options: { port?: string; collect?: boolean }):
         // enabled yet).
         summaryCommand: cmdDeps,
         // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
-        askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, inFlight: new Set() },
+        askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, turns: new GroupTurnQueue() },
         telemetry: config.langfuse.enabled
           ? {
               baseUrl: config.langfuse.baseUrl,
