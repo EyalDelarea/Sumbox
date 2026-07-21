@@ -11,6 +11,11 @@
  * generation, so two at once on one machine make both slower rather than either
  * faster. The queue changes WHEN the second answer runs, not how many run.
  *
+ * Scope is one queue per SURFACE, not one per machine: @Aida and /סיכום each get
+ * their own instance, so a question and a summary on the same group still run
+ * concurrently — unchanged from the two separate Sets this replaced. The queue
+ * serializes repeat calls to one feature, which is where the pile-up was.
+ *
  * ── Why one deep ────────────────────────────────────────────────────────────
  * A waiting slot of exactly one bounds the backlog to something the group can
  * predict. Unbounded queueing turns a burst of five questions into five answers
@@ -22,6 +27,12 @@
  * late is worse than no answer, because the thread has moved. A queued turn that
  * waited past `ttlMs` is therefore abandoned and reported as "stale" so the
  * caller can flip its ⏳ back to ⏸ rather than reply into a dead thread.
+ *
+ * The check is LAZY — evaluated when the turn is handed over, not on a timer.
+ * The wait itself is bounded by how long the holder runs, so against a cold
+ * model a waiter can sit on ⏳ past `ttlMs` before the ⏸ arrives. A timer would
+ * buy a prompter ⏸ at the cost of a second thing that can fire mid-answer; the
+ * asker is not blocked either way, so the simpler shape wins.
  *
  * ── Why the turn is handed off, not re-acquired ─────────────────────────────
  * `release` passes the slot DIRECTLY to the waiter instead of clearing it and
