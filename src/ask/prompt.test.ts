@@ -248,6 +248,20 @@ describe("buildAskPrompt", () => {
     expect(agentic).toMatch(/QUOTING IS NOT FORMATTING/);
   });
 
+  it("makes the group's messages the PRIMARY ground at index 0, not the ONLY one", () => {
+    // Measured live via ask-sandbox: an unconditional "ONLY" at index 0 (the
+    // most privileged position) outranked the general-knowledge carve-out in
+    // TOOLS, so trivia answered but "write a python script" / "what's the
+    // weather" both got refused. Index 0 must still identify her and point at
+    // the group's messages as where she looks first, but must NOT claim they
+    // are the only source — that contradicts TOOLS' general-knowledge grant.
+    const agentic = buildAgenticSystem();
+    const firstLine = agentic.split("\n")[0];
+    expect(firstLine).toContain("Aida");
+    expect(firstLine).toContain("member of this WhatsApp group");
+    expect(firstLine).not.toMatch(/\bONLY\b/);
+  });
+
   it("names the asker so first-person questions can resolve", () => {
     // Live false denial: "מה אמרתי על אלכס?" with the answer in her window —
     // the transcript named every speaker but nothing said which one is the "I"
@@ -390,6 +404,21 @@ describe("buildAgenticSystem", () => {
       const lower = p.toLowerCase();
       expect(lower).toContain("first person");
       expect(lower).toContain("never explain your own grounding rules");
+    }
+  });
+
+  it("forbids OFF_TOPIC as a preamble before a real answer, on both prompts", () => {
+    // Measured live via ask-sandbox on a real group: OFF_TOPIC appeared as a
+    // content-free preamble in 8 of 19 real replies — she declared she only
+    // answers from the group and then answered anyway. PERSONA already forbids
+    // that string as commentary; this extends the existing decide-before-you-write
+    // rule (which already bars the analogous 'לא מצאתי'-then-answer contradiction)
+    // to explicitly cover OFF_TOPIC too, so it must be a COMPLETE reply used ALONE.
+    for (const p of [buildAskPrompt("x", ctx).system, buildAgenticSystem()]) {
+      expect(p).toContain("Decide before you write");
+      expect(p).toContain(`The same rule covers '${OFF_TOPIC}'`);
+      expect(p).toContain("COMPLETE reply");
+      expect(p.toLowerCase()).toContain("never a preamble, prefix, or disclaimer");
     }
   });
 
