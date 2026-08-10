@@ -24,6 +24,7 @@ import makeWASocket, {
   type Contact,
   DisconnectReason,
   downloadMediaMessage,
+  fetchLatestBaileysVersion,
   jidNormalizedUser,
   useMultiFileAuthState,
   type WAMessage,
@@ -376,8 +377,21 @@ export class CollectorSession extends EventEmitter {
 
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
 
+    // WhatsApp rejects stale WA-Web client versions with a pre-QR 405, which
+    // presents as a silent disconnect loop that never pairs. Ask WhatsApp's own
+    // update endpoint (web.whatsapp.com — the same host the socket dials, no
+    // chat content involved) for the current version; fall back to Baileys'
+    // baked-in version if the check fails (e.g. offline).
+    let waVersion: [number, number, number] | undefined;
+    try {
+      ({ version: waVersion } = await fetchLatestBaileysVersion());
+    } catch {
+      waVersion = undefined;
+    }
+
     const sock = makeWASocket({
       auth: state,
+      ...(waVersion ? { version: waVersion } : {}),
       // Forward-only by default (research R3). full-sync mode flips this to pull the
       // one-time bulk history WhatsApp pushes on link.
       syncFullHistory: this.syncFullHistory,
@@ -447,6 +461,10 @@ export class CollectorSession extends EventEmitter {
           this.emit("logged-out");
           collectorLog.error("WhatsApp session logged out. Delete data/baileys-auth/ and re-link.");
         } else {
+          collectorLog.warn(
+            { statusCode: statusCode ?? null, reason: lastDisconnect?.error?.message ?? null },
+            "connection closed",
+          );
           // Reconnect after a brief delay
           setTimeout(() => {
             this.connect().catch((err: unknown) => {
