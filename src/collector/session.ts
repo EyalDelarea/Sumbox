@@ -461,6 +461,10 @@ export class CollectorSession extends EventEmitter {
           this.emit("logged-out");
           collectorLog.error("WhatsApp session logged out. Delete data/baileys-auth/ and re-link.");
         } else {
+          collectorLog.warn(
+            { statusCode: statusCode ?? null, reason: lastDisconnect?.error?.message ?? null },
+            "connection closed",
+          );
           // Reconnect after a brief delay
           setTimeout(() => {
             this.connect().catch((err: unknown) => {
