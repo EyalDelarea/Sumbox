@@ -199,7 +199,7 @@ describe("maybeHandleSummaryCommand — dispatch", () => {
 
   it("canonicalizes a 1:1 @lid chat to its phone JID before matching the whitelist", async () => {
     // Live 1:1 messages arrive as @lid; the whitelist/group store @s.whatsapp.net.
-    const PN = "972525201058@s.whatsapp.net";
+    const PN = "972500000043@s.whatsapp.net";
     const resolvePn = vi.fn(async () => PN);
     const send = vi.fn(async () => SENT);
     const deps = baseDeps({

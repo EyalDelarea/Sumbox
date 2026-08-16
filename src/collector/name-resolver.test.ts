@@ -27,7 +27,7 @@ describe("isUsableName / pickContactName", () => {
   it("rejects empty, JID-like, and bare-phone-number names", () => {
     expect(isUsableName("")).toBe(false);
     expect(isUsableName("  ")).toBe(false);
-    expect(isUsableName("972502028299@s.whatsapp.net")).toBe(false);
+    expect(isUsableName("972500000042@s.whatsapp.net")).toBe(false);
     expect(isUsableName("+972 50 202 8299")).toBe(false);
     expect(isUsableName("0525551234")).toBe(false);
   });
@@ -179,7 +179,7 @@ describe("resolveAllGroupNames", () => {
   });
 
   it("resolveContactNames names a 1:1 chat from a saved contact name", async () => {
-    const jid = "972502028299@s.whatsapp.net";
+    const jid = "972500000042@s.whatsapp.net";
     await upsertGroupByWhatsappId(pool, { whatsappId: jid, name: jid, source: "live" });
 
     const result = await resolveContactNames(pool, [{ id: jid, name: "Dana Cohen", notify: "dc" }]);
@@ -228,7 +228,7 @@ describe("resolveAllGroupNames", () => {
 
   it("resolveContactNames bridges an @lid contact name to its @s.whatsapp.net chat", async () => {
     const lid = "177223302647848-bridge@lid";
-    const pn = "972549288606-bridge@s.whatsapp.net";
+    const pn = "972500000045-bridge@s.whatsapp.net";
     await upsertGroupByWhatsappId(pool, { whatsappId: pn, name: pn, source: "live" });
 
     const result = await resolveContactNames(pool, [{ id: lid, notify: "מסי" }], {

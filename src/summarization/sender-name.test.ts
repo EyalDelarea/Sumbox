@@ -16,11 +16,11 @@ describe("humanizeSender", () => {
     // Both the new (120…) and legacy (phone-ts) group-jid formats — a group is
     // never a message's human sender, so it must not show as one.
     expect(humanizeSender("120363403384885252@g.us")).toBe(UNKNOWN_SENDER);
-    expect(humanizeSender("972523893791-1512111801@g.us")).toBe(UNKNOWN_SENDER);
+    expect(humanizeSender("972500000044-1512111801@g.us")).toBe(UNKNOWN_SENDER);
   });
 
   it("shows a real phone for a phone JID (the only identifying info we have)", () => {
-    expect(humanizeSender("972523893791@s.whatsapp.net")).toBe("+972523893791");
+    expect(humanizeSender("972500000044@s.whatsapp.net")).toBe("+972500000044");
   });
 
   it("falls back to unknown for an @lid identity (no phone available)", () => {
@@ -34,9 +34,9 @@ describe("humanizeSender", () => {
   });
 
   it("does NOT extract a phone from a legacy group jid's leading digits", () => {
-    // 972523893791 here is the group CREATOR, not the sender — must stay unknown,
-    // not become "+972523893791".
-    expect(humanizeSender("972523893791-1512111801@g.us")).not.toMatch(/^\+/);
+    // 972500000044 here is the group CREATOR, not the sender — must stay unknown,
+    // not become "+972500000044".
+    expect(humanizeSender("972500000044-1512111801@g.us")).not.toMatch(/^\+/);
   });
 });
 
@@ -72,6 +72,6 @@ describe("resolveSenderName", () => {
 
   it("falls back to humanizeSender when no alias matches", () => {
     expect(resolveSenderName("Noa", aliases)).toBe("Noa");
-    expect(resolveSenderName("972523893791-1512111801@g.us", aliases)).toBe(UNKNOWN_SENDER);
+    expect(resolveSenderName("972500000044-1512111801@g.us", aliases)).toBe(UNKNOWN_SENDER);
   });
 });

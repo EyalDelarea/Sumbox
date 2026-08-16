@@ -97,7 +97,7 @@ describe("participantNamesForBiasing", () => {
     const groupId = await upsertGroup(pool, { name: `bias-${Math.random()}`, source: "import" });
     const bar = await upsertParticipant(pool, `בר-${Math.random()}`);
     const me = await upsertParticipant(pool, `אייל-${Math.random()}`);
-    const jid = await upsertParticipant(pool, `972523893791@s.whatsapp.net`);
+    const jid = await upsertParticipant(pool, `972500000044@s.whatsapp.net`);
     const unknown = await upsertParticipant(pool, "Unknown");
 
     const { ids } = await insertMessages(pool, [
