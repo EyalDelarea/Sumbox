@@ -61,8 +61,9 @@ WhatsApp export (.txt/.zip) ──(importer)───┘                        
   and vision share one Ollama model residency and run serially.
 - **In-chat Q&A (`@Aida`).** Mentioning `@Aida`/`@אידה` in an enabled group
   answers a question from that group's own history — hybrid retrieval
-  (pgvector + full-text search fused via RRF) with citations and a
-  groundedness check, strictly scoped to the asking group. Opt-in agentic
+  (pgvector + full-text search fused via RRF) with citations, refusing
+  rather than guessing when retrieval finds nothing relevant, strictly
+  scoped to the asking group. Opt-in agentic
   tool-loop mode (`ASK_AGENTIC=true`) with fully-local Langfuse tracing.
 
 ---
@@ -106,7 +107,7 @@ WhatsApp export (.txt/.zip) ──(importer)───┘                        
 | `ask-search <group> <query> [--k N]` | Probe: semantic-search a group's history (verifies retrieval + scoping). |
 | `ask-redteam --pii-group N --people-group N` | Adversarial red-team of `@Aida`'s guardrails (read-only). |
 | `ask-sandbox --group N [--questions file]` | Run `@Aida`'s real agentic loop over a real group, traced in local Langfuse, no sends. |
-| `aida-eval [--suite ...] [--run-name ...]` | Run `@Aida`'s eval suites over the local golden set (read-only, no sends). |
+| `aida-eval [--suite ...]` | Run `@Aida`'s eval suites over the local golden set (read-only, no sends). |
 | `doctor` | Verify prerequisites (Docker, compose, Postgres+migrations, RabbitMQ, Ollama+model, faster-whisper, ffmpeg). |
 
 `make dev` is the everyday entry point: brings up the Docker stack, applies

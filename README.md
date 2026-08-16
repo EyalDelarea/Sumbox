@@ -56,7 +56,7 @@ Type `/סיכום` in any WhatsApp group Sumbox is watching to get a summary pos
 Mention **`@Aida`** (or **`@אידה`**) in an enabled group and she answers in-chat, quoting the message her answer is based on — fully local RAG over your own history:
 
 - **Hybrid retrieval.** Questions are answered from that group's messages via `bge-m3` embeddings in Postgres (pgvector, HNSW index) fused with full-text search using Reciprocal Rank Fusion — semantic catches paraphrase, lexical catches the exact name or number semantic ranking buries.
-- **Grounded and cited.** Answers carry a citation back to the source message (she replies quoting it), with a groundedness check before anything is posted.
+- **Cited, and honest about limits.** Answers quote the source message they're based on, and she refuses rather than guesses when nothing relevant is found in the group's history. (A numeral-groundedness guard exists as an eval-only lever, off by default.)
 - **Strictly scoped.** She answers only from the group she was asked in, under the same allowlist as `/סיכום`, and her guardrails are exercised by a committed red-team suite (`ask-redteam`).
 - **Agentic mode (opt-in).** `ASK_AGENTIC=true` switches the single-shot answer to an agentic tool loop (Vercel AI SDK + local Ollama) that searches the chat iteratively — with optional fully-local [Langfuse](https://langfuse.com) tracing of every step (`make langfuse-up`).
 
@@ -319,10 +319,10 @@ Manually triggers one operational sweep: re-drives dead/stuck jobs and records a
 
 ```bash
 npx tsx src/cli.ts ask-embed-backfill                        # embed history (bge-m3) so @Aida can search it
-npx tsx src/cli.ts ask-search "Family" "מתי הטיול?"          # probe: hybrid retrieval, no LLM
+npx tsx src/cli.ts ask-search "Family" "מתי הטיול?"          # probe: semantic retrieval, no LLM
 npx tsx src/cli.ts ask-redteam --pii-group 3 --people-group 7  # adversarial guardrail probes
 npx tsx src/cli.ts ask-sandbox --group 7 --questions q.txt   # run the real agentic loop, traced, no sends
-npx tsx src/cli.ts aida-eval --suite all --run-name baseline # eval suites over the (gitignored) golden set
+npx tsx src/cli.ts aida-eval --suite all                     # eval suites over the (gitignored) golden set
 ```
 
 - **`ask-embed-backfill`** — embed all un-embedded messages now, so answers cover history from before embeddings were enabled.
