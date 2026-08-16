@@ -1,9 +1,8 @@
 /**
  * VisionAnalyzer — interface for visual media description engines.
  *
- * Implementations call an actual vision model (e.g. Ollama with llama3.2-vision).
- * FakeVisionAnalyzer is provided for use in tests and as a placeholder until a
- * real implementation is wired in a later task.
+ * The production implementation is OllamaVisionAnalyzer (ollama-analyzer.ts),
+ * which calls a local Ollama vision model. FakeVisionAnalyzer exists for tests.
  */
 
 export interface VisionAnalyzer {
