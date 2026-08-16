@@ -19,8 +19,7 @@
     "worker": "tsx src/workers/worker.ts",
     "lint": "biome lint src",
     "format": "biome format --write src",
-    "check": "biome check src",
-    "eval:people-intent": "vitest run --config vitest.eval.config.ts"
+    "check": "biome check src"
   },
   "dependencies": {
     "@langfuse/client": "^5.10.0",
