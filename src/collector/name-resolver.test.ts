@@ -28,7 +28,7 @@ describe("isUsableName / pickContactName", () => {
     expect(isUsableName("")).toBe(false);
     expect(isUsableName("  ")).toBe(false);
     expect(isUsableName("972500000042@s.whatsapp.net")).toBe(false);
-    expect(isUsableName("+972 50 202 8299")).toBe(false);
+    expect(isUsableName("+972 50 000 0042")).toBe(false);
     expect(isUsableName("0525551234")).toBe(false);
   });
 
