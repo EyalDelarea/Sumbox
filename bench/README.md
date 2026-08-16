@@ -1,8 +1,8 @@
 # Inference benchmark harness
 
 Reproducible before/after measurement of the local-LLM pipeline (vision + summarization),
-so model/engine/config changes can be proven — not guessed. Design rationale and the
-research behind it: `docs/superpowers/specs/2026-06-07-inference-perf-design.md` (local-only).
+so model/engine/config changes can be proven — not guessed. The methodology below is
+self-contained; the original design/research notes are local-only and not in this repo.
 
 ## What it measures
 
