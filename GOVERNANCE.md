@@ -54,8 +54,9 @@ no blind guessing.
    CI collapses these into the single required `ci-ok` check.
 2. **Observed behavior.** Verify the change does what it claims by actually
    running it — not by reasoning about the code.
-3. **Critic pass.** Run an adversarial read over the diff (`code-reviewer`,
-   `silent-failure-hunter`, `type-design-analyzer`, or a second-model pass) and
+3. **Critic pass.** Run an adversarial read over the diff (local review agents
+   such as `code-reviewer`, `silent-failure-hunter`, `type-design-analyzer` —
+   personal tooling, not tracked in this repo — or a second-model pass) and
    **resolve** the findings before handoff.
 
 **UI work — additional visual gates (all hard):**

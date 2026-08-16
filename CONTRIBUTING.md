@@ -8,12 +8,12 @@ contributions will be licensed under the same license.
 ## Getting started
 
 1. Create a feature branch off `main` (`feat/…` · `fix/…` · `docs/…` · `chore/…`).
-2. Follow the [Quick Start](README.md#quick-start) to get the stack running locally.
+2. Follow the [Quick Start](README.md#-quick-start) to get the stack running locally.
 3. Make your changes.
 
 ## Before opening a PR
 
-Run the full local CI gate (the same one CI enforces as `ci-ok`) — or just run `/preflight`:
+Run the full local CI gate (the same one CI enforces as `ci-ok`):
 
 ```bash
 npm run check         # biome lint/format — autofix with `npm run check -- --write`
