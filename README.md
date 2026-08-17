@@ -51,6 +51,17 @@ In addition to per-chat summaries, Sumbox can produce a single digest across **a
 
 Type `/סיכום` in any WhatsApp group Sumbox is watching to get a summary posted back into that chat. The **פקודות** (commands) tab in the web UI controls which groups the command is enabled for and lets you change the trigger word.
 
+### 🤖 `@Aida` — ask your chats anything
+
+Mention **`@Aida`** (or **`@אידה`**) in an enabled group and she answers in-chat, quoting the message her answer is based on — fully local RAG over your own history:
+
+- **Hybrid retrieval.** Questions are answered from that group's messages via `bge-m3` embeddings in Postgres (pgvector, HNSW index) fused with full-text search using Reciprocal Rank Fusion — semantic catches paraphrase, lexical catches the exact name or number semantic ranking buries.
+- **Cited, and honest about limits.** Answers quote the source message they're based on, and she refuses rather than guesses when nothing relevant is found in the group's history. (A numeral-groundedness guard exists as an eval-only lever, off by default.)
+- **Strictly scoped.** She answers only from the group she was asked in, under the same allowlist as `/סיכום`, and her guardrails are exercised by a committed red-team suite (`ask-redteam`).
+- **Agentic mode (opt-in).** `ASK_AGENTIC=true` switches the single-shot answer to an agentic tool loop (Vercel AI SDK + local Ollama) that searches the chat iteratively — with optional fully-local [Langfuse](https://langfuse.com) tracing of every step (`make langfuse-up`).
+
+See the `ask-*` commands in the [CLI reference](#️-cli-commands) for the embedding backfill, retrieval probe, red-team, sandbox, and eval tooling behind her.
+
 ---
 
 ## ⚠️ Disclaimer
@@ -176,7 +187,7 @@ rm -rf data/baileys-auth/
 ## 🛠️ CLI commands
 
 <details>
-<summary><strong>Expand the full command reference</strong> — serve, collect, summarize, groups, transcribe, analyze-backlog, digest-run, import, doctor</summary>
+<summary><strong>Expand the full command reference</strong> — serve, collect, summarize, groups, transcribe, analyze-backlog, digest-run, import, media-backfill, full-sync, merge-duplicate-chats, ops-sweep, ask-*, aida-eval, doctor</summary>
 
 <br/>
 
@@ -304,6 +315,22 @@ npx tsx src/cli.ts ops-sweep
 
 Manually triggers one operational sweep: re-drives dead/stuck jobs and records a status snapshot. Runs automatically on a schedule (`OPS_SWEEP_ENABLED`); this forces one now.
 
+### `ask-*` / `aida-eval` — @Aida tooling
+
+```bash
+npx tsx src/cli.ts ask-embed-backfill                        # embed history (bge-m3) so @Aida can search it
+npx tsx src/cli.ts ask-search "Family" "מתי הטיול?"          # probe: semantic retrieval, no LLM
+npx tsx src/cli.ts ask-redteam --pii-group 3 --people-group 7  # adversarial guardrail probes
+npx tsx src/cli.ts ask-sandbox --group 7 --questions q.txt   # run the real agentic loop, traced, no sends
+npx tsx src/cli.ts aida-eval --suite all                     # eval suites over the (gitignored) golden set
+```
+
+- **`ask-embed-backfill`** — embed all un-embedded messages now, so answers cover history from before embeddings were enabled.
+- **`ask-search <group> <query> [--k N]`** — retrieval probe: verifies semantic search and group scoping without invoking the LLM.
+- **`ask-redteam`** — runs committed adversarial probes (PII fishing, prompt injection, people questions) against the live answer path; read-only.
+- **`ask-sandbox --group <id> [--questions file]`** — runs @Aida's real agentic loop over a real group with local Langfuse tracing, without sending anything to WhatsApp.
+- **`aida-eval [--suite retrieval|e2e|all]`** — scores retrieval and end-to-end answers against a local golden set (gitignored — it quotes real messages, so a fresh clone has none).
+
 ### `doctor` — verify prerequisites
 
 ```bash
@@ -356,6 +383,15 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 | `OPS_SWEEP_ENABLED` | `true` | Enable the scheduled ops sweep (re-drive dead jobs + snapshot status). Set `false` to disable. |
 | `OPS_SWEEP_TIMES` | `08:00,18:00` | Comma-separated HH:MM times for the ops sweep |
 | `OPS_REDRIVE_CAP` | `2` | Max auto re-drives of a stuck work-item before it's flagged instead |
+| `ASK_AGENTIC` | `false` | Answer `@Aida` questions with the agentic tool loop instead of single-shot RAG |
+| `EMBEDDING_MODEL` | `bge-m3` | Ollama embedding model for `@Aida` retrieval |
+| `EMBEDDING_DIM` | `1024` | Embedding vector dimension (must match the pgvector column) |
+| `MEDIA_PURGE_UNSELECTED_DAYS` | `30` | Days a downloaded-but-unselected media file is kept before the purge sweep deletes it |
+| `MEDIA_PURGE_INTERVAL_MS` | `21600000` | How often the media purge sweep runs (default 6 h) |
+| `RETENTION_DAYS` | *(unset)* | Auto-purge dormant unselected chats older than this many days. Unset or `0` = off (nothing is ever auto-deleted) |
+| `LANGFUSE_ENABLED` | `false` | Opt-in local Langfuse tracing of the agentic `@Aida` path (see `make langfuse-up`) |
+| `LANGFUSE_BASEURL` | `http://localhost:3000` | Local Langfuse base URL — the exporter refuses non-local URLs by design |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | turnkey local values | Match the keys provisioned by `docker-compose.langfuse.yml`; no UI setup needed |
 | `SUMBOX_DIAG_NAMES` | *(unset)* | Set to `1` to log extra name-resolution diagnostics from the collector. Diagnostic only. |
 
 </details>
@@ -462,7 +498,7 @@ npm run build         # Compile TypeScript to dist/
 npm run migrate       # Apply database migrations
 ```
 
-`npm run check → typecheck → build → test` is the full local CI gate — run `/preflight` to do all four and get the branch review-ready before a PR.
+`npm run check → typecheck → build → test` is the full local CI gate — run all four and get the branch review-ready before a PR. (CI enforces the same sequence as the single required `ci-ok` check.)
 
 **Make targets** wrap the everyday flows:
 

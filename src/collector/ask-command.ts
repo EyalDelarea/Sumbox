@@ -310,7 +310,7 @@ export async function maybeHandleAskCommand(
      * reconnect, not to expire a conversation.
      *
      * Only her OWN messages count. from_me is true for the owner's messages too,
-     * so without the marker a reply to Eyal's own message would wake her.
+     * so without the marker a reply to the owner's own message would wake her.
      */
     let question = match?.question ?? "";
     if (!match || question.length === 0) {

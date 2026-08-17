@@ -59,6 +59,12 @@ WhatsApp export (.txt/.zip) ──(importer)───┘                        
   an explicit documented contract (exports lack stable IDs).
 - **Single-threaded worker by default** (`WORKER_CONCURRENCY=1`): summaries
   and vision share one Ollama model residency and run serially.
+- **In-chat Q&A (`@Aida`).** Mentioning `@Aida`/`@אידה` in an enabled group
+  answers a question from that group's own history — hybrid retrieval
+  (pgvector + full-text search fused via RRF) with citations, refusing
+  rather than guessing when retrieval finds nothing relevant, strictly
+  scoped to the asking group. Opt-in agentic
+  tool-loop mode (`ASK_AGENTIC=true`) with fully-local Langfuse tracing.
 
 ---
 
@@ -97,6 +103,11 @@ WhatsApp export (.txt/.zip) ──(importer)───┘                        
 | `media-backfill [--limit N]` | Download + analyze media descriptors stored at ingest but not yet fetched. |
 | `full-sync` | Pull deep WhatsApp history on a freshly-linked session (onboarding push sync). |
 | `merge-duplicate-chats` | Merge duplicate group rows (e.g. LID/PN identity splits) into one. |
+| `ask-embed-backfill [--batch N]` | Embed all un-embedded messages (bge-m3) so `@Aida` can search history. |
+| `ask-search <group> <query> [--k N]` | Probe: semantic-search a group's history (verifies retrieval + scoping). |
+| `ask-redteam --pii-group N --people-group N` | Adversarial red-team of `@Aida`'s guardrails (read-only). |
+| `ask-sandbox --group N [--questions file]` | Run `@Aida`'s real agentic loop over a real group, traced in local Langfuse, no sends. |
+| `aida-eval [--suite ...]` | Run `@Aida`'s eval suites over the local golden set (read-only, no sends). |
 | `doctor` | Verify prerequisites (Docker, compose, Postgres+migrations, RabbitMQ, Ollama+model, faster-whisper, ffmpeg). |
 
 `make dev` is the everyday entry point: brings up the Docker stack, applies
@@ -130,6 +141,9 @@ The web app (`src/web/public/`) has three surfaces:
 | `transcription/` | Python `faster-whisper` worker (`worker.py`), Node wrapper, ivrit-whisper integration. |
 | `vision/` | Ollama image/video analyzer, media-kind detection, multi-frame video analysis. |
 | `summarization/` | Selection, catch-up prep, prompt assembly, Ollama summarizer, rendering. |
+| `ask/` | `@Aida` in-group Q&A: hybrid retrieval (pgvector semantic + Postgres FTS fused via RRF), bge-m3 embedder + embedding sweep, citations, attribution, groundedness, single-shot and agentic (AI SDK tool-loop) answer paths. |
+| `eval/` | `@Aida` eval harness — golden-set loader for the retrieval/e2e suites (`aida-eval`). |
+| `observability/` | Opt-in, fully-local Langfuse (OpenTelemetry) tracing for the agentic `@Aida` path; refuses non-local endpoints. |
 | `scheduler/` | Twice-daily digest scheduler (pre-summaries), enqueue-run, runner, schedule logic. |
 | `service/` | Always-on service: heartbeat, liveness, status. |
 | `ops/` | Operational tooling: `sweep` (self-heal dead jobs), `redrive` (re-queue failures). |

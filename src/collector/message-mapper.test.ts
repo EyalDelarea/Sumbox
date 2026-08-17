@@ -116,14 +116,14 @@ describe("mapWaMessage()", () => {
     const wa = makeTextMessage({
       key: {
         id: "ALT001",
-        remoteJid: "972542795343@s.whatsapp.net",
+        remoteJid: "972500000041@s.whatsapp.net",
         remoteJidAlt: "4578552635558@lid",
         fromMe: false,
       },
     });
     const result = mapWaMessage(wa as any);
     expect(result).not.toBeNull();
-    expect(result!.remoteJid).toBe("972542795343@s.whatsapp.net");
+    expect(result!.remoteJid).toBe("972500000041@s.whatsapp.net");
     expect(result!.remoteJidAlt).toBe("4578552635558@lid");
   });
 

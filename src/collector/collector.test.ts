@@ -855,7 +855,7 @@ describe("collector identity-canonicalization (#17)", () => {
 
   it("routes a phone-JID message into the existing @lid chat via lidForPn (no duplicate group)", async () => {
     const lid = "4578552635558@lid";
-    const pn = "972542795343@s.whatsapp.net";
+    const pn = "972500000041@s.whatsapp.net";
     // The named survivor already exists under @lid.
     await pool.query(`INSERT INTO groups (whatsapp_id, name, source) VALUES ($1, $2, 'live')`, [
       lid,

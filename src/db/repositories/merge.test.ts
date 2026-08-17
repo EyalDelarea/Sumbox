@@ -32,7 +32,7 @@ describe("mergeGroups", () => {
   }
 
   it("moves non-colliding messages, drops collisions, deletes dup, names survivor", async () => {
-    const survivorJid = "972502028299-merge@s.whatsapp.net";
+    const survivorJid = "972500000042-merge@s.whatsapp.net";
     const dupJid = "70390252580989-merge@lid";
     const survivorId = await upsertGroupByWhatsappId(pool, {
       whatsappId: survivorJid,

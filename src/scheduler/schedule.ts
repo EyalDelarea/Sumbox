@@ -116,7 +116,7 @@ export function dueSumbox(now: Date, lastRun: Date | null, times: TimeSlot[]): b
 }
 
 /**
- * Resolve the digest time slots for a tenant: the stored per-tenant `digest_times`
+ * Resolve the digest time slots: the stored `digest_times` preference
  * (CSV HH:MM) when present and valid, otherwise the env default (`DIGEST_TIMES`).
  * A null/empty/malformed stored value falls back to the env default — the
  * single-user zero-config guardrail. Pure.
