@@ -111,6 +111,34 @@ describe("answerAgentic", () => {
     expect(prompt).toContain("מה קורה?");
   });
 
+  it("puts the roster in the prompt the agentic path actually sends", async () => {
+    // The agentic path assembles its own user prompt rather than going through
+    // buildAskPrompt, so prompt.ts's roster test does NOT cover it — this is the
+    // path that ships (ASK_AGENTIC=true), and the identical omission on this side
+    // is how the anti-format-injection clause went missing for a whole release.
+    const generate = vi.fn(async () => ({ text: "תכף תכף... ok", steps: [] }));
+    const onPrompt = vi.fn();
+    await answerAgentic(
+      { pool: noMessagesPool, embedder, model, generate: generate as never, onPrompt },
+      { groupId: 7, question: "מה דעתך על רועי?", roster: ["Royi", "Eyal Delarea"] },
+    );
+    const prompt = onPrompt.mock.calls[0][0] as string;
+    expect(prompt).toContain("The people in this group are: Royi, Eyal Delarea");
+  });
+
+  it("omits the roster line entirely when no roster is supplied", async () => {
+    const generate = vi.fn(async () => ({ text: "תכף תכף... ok", steps: [] }));
+    const onPrompt = vi.fn();
+    await answerAgentic(
+      { pool: noMessagesPool, embedder, model, generate: generate as never, onPrompt },
+      { groupId: 7, question: "מה קורה?" },
+    );
+    // Matched on the roster line's own marker, not the bare phrase: PEOPLE-SAFETY
+    // legitimately says "The people in this group are listed for you below", so a
+    // looser assertion passes only by accident and fails once that clause is read.
+    expect(onPrompt.mock.calls[0][0] as string).not.toContain("IS a member of this group");
+  });
+
   describe("groundednessGuard", () => {
     it("retries once when the first draft asserts a numeral absent from the prompt, then returns the clean retry", async () => {
       const generate = vi

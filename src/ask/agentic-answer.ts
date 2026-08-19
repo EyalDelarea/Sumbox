@@ -15,6 +15,7 @@ import {
   Q_OPEN,
   renderLine,
   renderWindow,
+  rosterLine,
 } from "./prompt.js";
 import { selectRecentMessages } from "./recent-window.js";
 import { searchMessagesHybrid } from "./retrieval.js";
@@ -126,6 +127,10 @@ export async function answerAgentic(
     asOf?: Date;
     excludeExternalId?: string;
     askerName?: string;
+    /** Who is in this group — see prompt.ts rosterLine(). Loaded by the caller
+     *  (the composition root) so this function stays DB-free beyond retrieval
+     *  and the eval harness can pin a fixed roster. */
+    roster?: string[];
   },
 ): Promise<CitedAnswer> {
   const generate = deps.generate ?? (sdkGenerateText as unknown as GenerateFn);
@@ -200,6 +205,7 @@ export async function answerAgentic(
   const prompt = [
     ...renderWindow(window),
     ...searchSection,
+    ...rosterLine(input.roster),
     ...askerLine(input.askerName),
     // Fenced exactly like the single-shot path (buildAskPrompt). Neutralizing alone
     // already made a forged ⟦…⟧ marker impossible, but the question still arrived as
