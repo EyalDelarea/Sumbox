@@ -132,6 +132,15 @@ export const UNSELECTED_PURGE_GROUP_TABLES = [
   // group row SURVIVES the unselected purge, so its ON DELETE CASCADE would
   // never fire and these would outlive the conversation they belong to.
   "aida_messages",
+  // What she LEARNED from this chat. Memory is per-group by design, so when a
+  // chat's content goes, her beliefs derived from it must go with it — otherwise
+  // the group is "deleted" while she can still tell you what someone in it said.
+  // Same cascade caveat as aida_messages: the group row survives the unselected
+  // purge, so ON DELETE CASCADE never fires and these must be listed explicitly.
+  // (aida_observations also FKs messages, which ARE deleted here — belt and
+  // braces, and it keeps the intent legible rather than incidental.)
+  "aida_observations",
+  "aida_directives",
   "summaries",
   "read_watermarks",
   // The group's shared /סיכום cursor. The group row SURVIVES the unselected

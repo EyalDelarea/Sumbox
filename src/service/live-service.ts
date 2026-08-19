@@ -273,6 +273,12 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
         return maybeHandleSummaryCommand(msg, {
           pool: p,
           resolveEnabledJids: sc.resolveEnabledJids,
+          // Summary posts are hers too — see summary-command.ts. Without this the
+          // memory extractor would treat her own summaries as group conversation.
+          recordSelfMessage: async (groupId, externalId) => {
+            const { recordAidaMessage } = await import("../db/repositories/aida-messages.js");
+            await recordAidaMessage(pool as pg.Pool, { groupId, externalId });
+          },
           resolveTrigger: sc.resolveTrigger,
           sendText: (jid, text, opts) => session.sendText(jid, text, opts),
           react: (jid, key, emoji) => session.react(jid, key, emoji),
