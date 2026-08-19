@@ -143,7 +143,22 @@ export function parseCandidates(text: string): unknown[] {
   }
 }
 
-/** The extraction prompt. Kept here so it versions alongside the validator. */
+/**
+ * The extraction prompt. Lives beside the validator so the two version together.
+ *
+ * Every rule below is here because the previous version got it wrong on the real
+ * group-70 corpus (986 messages, 20 accepted), not because it seemed prudent:
+ *
+ * - It answered in ENGLISH about a Hebrew corpus. A translated memory does not
+ *   match the language she speaks or the words the group used, and this project
+ *   copies names and places verbatim everywhere else.
+ * - 14 of 20 were ephemeral — "I am at gate 11", "taxi is on the way", "I am not
+ *   at home". "Still true later" was too abstract to bite, so the rule is now
+ *   stated as a concrete test with the actual failures as counter-examples.
+ * - One row was third-person about someone else's interaction with her, which the
+ *   "about THEMSELVES" rule already forbade in the abstract. Naming the failure
+ *   shape works better than restating the principle.
+ */
 export function buildExtractionPrompt(messages: CandidateMessage[]): string {
   const lines = messages
     .map((m) => `[${m.messageId}] ${m.sender}: ${m.content.replace(/\s+/g, " ").slice(0, 300)}`)
@@ -151,15 +166,26 @@ export function buildExtractionPrompt(messages: CandidateMessage[]): string {
   return [
     "Below are messages from a group chat, each prefixed with its id in [brackets].",
     "",
-    "Extract durable facts that a person STATED ABOUT THEMSELVES — their job, where",
-    "they live, what they own, a plan they have, something they like or dislike.",
+    "Extract only DURABLE facts a person stated ABOUT THEMSELVES — things that will",
+    "still be true in six months.",
     "",
-    "Rules:",
-    "- Only what the speaker said about THEMSELVES. Never about another person.",
+    "THE TEST: would this still be true in six months? If not, skip it.",
+    "  KEEP:  a job, where they live, a relationship, something they own, a",
+    "         long-running hobby, a recurring commitment.",
+    "  SKIP:  where they are right now, what they are doing today, travel in",
+    "         progress, an errand, a plan for this week, a mood, a joke.",
+    "  Examples of what to SKIP: 'I am at gate 11', 'taxi is on the way',",
+    "  'I am not at home', 'arriving at 13:00', 'I am returning soon'.",
+    "",
+    "HARD RULES:",
+    "- Write the fact in the SAME LANGUAGE as the message. Never translate.",
+    "  Copy names, places and numbers exactly as written.",
+    "- Only what the speaker said about THEMSELVES. If it is about another person,",
+    "  or about this bot, skip it entirely — no exceptions.",
     "- Never an opinion, a judgement, an insult, or a guess about anyone.",
-    "- Only if it is still true later. Skip one-off chatter and jokes.",
     "- Every item MUST cite the id of the single message it came from.",
-    "- If nothing qualifies, return [].",
+    "- Most windows contain NOTHING durable. Returning [] is the normal, correct",
+    "  answer — do not pad.",
     "",
     'Reply with ONLY a JSON array: [{"sourceMessageId": 123, "content": "..."}]',
     "",

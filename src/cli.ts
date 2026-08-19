@@ -691,6 +691,108 @@ program
   });
 
 program
+  .command("aida-memory")
+  .description("Review @Aida's shadow memory for a group (and optionally extract now)")
+  .requiredOption("--group <id>", "Group id")
+  .option("--extract", "Run extraction over the window NOW instead of waiting for the digest")
+  .option("--hours <n>", "Window size for --extract, in hours", "24")
+  .option("--revoke <id>", "Tombstone one observation by id")
+  .option("--limit <n>", "How many observations to list", "50")
+  .action(
+    async (options: {
+      group: string;
+      extract?: boolean;
+      hours?: string;
+      revoke?: string;
+      limit?: string;
+    }) => {
+      const { createDbClient } = await import("./db/client.js");
+      const { listObservations, recordObservation, revokeObservation } = await import(
+        "./db/repositories/aida-memory.js"
+      );
+      const groupId = Number(options.group);
+      const pool = createDbClient();
+      try {
+        if (options.revoke) {
+          const ok = await revokeObservation(pool, Number(options.revoke));
+          process.stdout.write(ok ? "revoked\n" : "not found (or already revoked)\n");
+          return;
+        }
+
+        if (options.extract) {
+          // The same code the job runs, on demand — so the shadow phase can be
+          // inspected immediately instead of waiting for the next digest.
+          const { selectCandidates } = await import("./ask/memory-extract.js");
+          const { makeMemoryExtractHandler } = await import(
+            "./workers/handlers/memory-extract.js"
+          );
+          const { OllamaSummarizer } = await import("./summarization/summarizer.js");
+          const config = loadConfig();
+          const extractor = new OllamaSummarizer({
+            host: config.summarization.ollamaHost,
+            model: config.summarization.model,
+            numCtx: config.summarization.numCtx,
+            temperature: 0,
+            repeatPenalty: config.summarization.repeatPenalty,
+            numPredict: config.summarization.numPredict,
+          });
+          const until = new Date();
+          const since = new Date(until.getTime() - Number(options.hours ?? 24) * 3600_000);
+          const run = makeMemoryExtractHandler({
+            selectCandidates: (g, a, b) => selectCandidates(pool, g, a, b),
+            generate: async (prompt) =>
+              (
+                await extractor.summarize({
+                  system:
+                    "You extract structured facts from chat logs. You reply with JSON only, never prose.",
+                  user: prompt,
+                })
+              ).overview,
+            recordObservation: (input) => recordObservation(pool, input),
+          });
+          const r = await run({
+            id: "cli",
+            type: "memory.extract",
+            payload: {
+              groupId: String(groupId),
+              since: since.toISOString(),
+              until: until.toISOString(),
+            },
+            attempts: 1,
+            maxAttempts: 1,
+          });
+          process.stdout.write(
+            `considered ${r.considered} · proposed ${r.proposed} · accepted ${r.accepted}\n` +
+              `rejected: ${JSON.stringify(r.rejected)}\n\n`,
+          );
+        }
+
+        const rows = await listObservations(pool, groupId, Number(options.limit ?? 50));
+        if (rows.length === 0) {
+          process.stdout.write("No observations for this group.\n");
+          return;
+        }
+        process.stdout.write(`${rows.length} observation(s) — nothing reads these yet:\n\n`);
+        for (const o of rows) {
+          const when = o.observedAt.toISOString().slice(0, 16).replace("T", " ");
+          // The citation is printed with every row on purpose: an observation you
+          // cannot trace back to a message is exactly what this design forbids,
+          // so the review surface should make the source impossible to overlook.
+          process.stdout.write(
+            `  #${o.id}  [${when}] ${o.speaker}: ${o.content}   (msg:${o.sourceMessageId})\n`,
+          );
+        }
+        process.stdout.write("\nRevoke one with: --revoke <id>\n");
+      } catch (err) {
+        process.stderr.write(`Error: aida-memory failed: ${(err as Error).message}\n`);
+        process.exit(1);
+      } finally {
+        await pool.end();
+      }
+    },
+  );
+
+program
   .command("ask-search")
   .description("Probe: semantic-search a group's history (verifies retrieval + scoping)")
   .argument("<group>", "Group display name")
