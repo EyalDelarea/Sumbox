@@ -98,10 +98,13 @@ describe("buildAskPrompt", () => {
     // "אשתו של רועי" (Royi's wife), a non-member the bot fabricated a marital
     // breakdown about. Without this default-deny sentence, an ambiguous person
     // could silently fall through the floor entirely.
+    //
+    // The roster narrowed WHEN this fires — being on the supplied member list now
+    // settles the question — but it did NOT remove the fallback: someone absent
+    // from the list is still default-denied. Asserted on intent rather than the
+    // old exact sentence, because the sentence now names the list.
     for (const p of [buildAskPrompt("x", ctx).system, buildAgenticSystem()]) {
-      expect(p).toContain(
-        "If you are not sure whether someone is in this group, treat them as NOT in it.",
-      );
+      expect(p).toContain("not on that list and you are not sure, treat them as NOT in it");
     }
   });
 
@@ -246,6 +249,32 @@ describe("buildAskPrompt", () => {
     // ...and the counterweight, so covering it didn't turn into refusing to quote a
     // link or a number that happens to be Latin-script. Both were measured on g70.
     expect(agentic).toMatch(/QUOTING IS NOT FORMATTING/);
+  });
+
+  it("points the member branch at the roster without moving any clause", () => {
+    // The roster is only useful if PEOPLE-SAFETY actually refers to it — but the
+    // edit must stay INSIDE the existing clause string. Adding an array element
+    // would shift every index below it and break the securityAt <= 2 guarantee
+    // that PR #62 measured into existence, so the clause COUNT is asserted here
+    // as well as the position: this is the exact regression that edit risks.
+    for (const prompt of [buildAskPrompt("x", ctx).system, buildAgenticSystem()]) {
+      const lines = prompt.split("\n").filter((l) => l.length > 0);
+      const peopleSafetyAt = lines.findIndex((l) => l.startsWith("PEOPLE-SAFETY"));
+      expect(peopleSafetyAt).toBeGreaterThanOrEqual(0);
+      // Refers to the list...
+      expect(lines[peopleSafetyAt]).toMatch(/listed for you below/);
+      // ...but the default-deny for anyone NOT on it is untouched. Floor (a) is
+      // the one thing this whole change must not weaken.
+      expect(lines[peopleSafetyAt]).toMatch(/treat them as NOT in it/);
+      expect(lines[peopleSafetyAt]).toMatch(/never render a verdict/);
+    }
+    // Clause count is pinned: 14 in the agentic prompt, as measured before this
+    // change. A new element here is how the security guard silently loses its seat.
+    expect(buildAgenticSystem().split("\n").length).toBe(14);
+    const securityAt = buildAgenticSystem()
+      .split("\n")
+      .findIndex((l) => l.includes("SECURITY — READ FIRST"));
+    expect(securityAt).toBeLessThanOrEqual(2);
   });
 
   it("makes the group's messages the PRIMARY ground at index 0, not the ONLY one", () => {
