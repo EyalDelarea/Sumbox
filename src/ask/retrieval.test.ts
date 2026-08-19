@@ -170,7 +170,15 @@ describe("retrieval excludes @Aida's OWN replies", () => {
     const g = await upsertGroup(pool, { name: "HYB-selfecho", source: "import" });
     // Her fabrication shares the query's keyword AND vector, so it would rank
     // first — which is exactly what happened in the field.
-    await seed(pool, g, "תכף תכף... נראה שהיה עימות בין בר לאייל", "hyb-hers", 2, undefined, "ext-aida-1");
+    await seed(
+      pool,
+      g,
+      "תכף תכף... נראה שהיה עימות בין בר לאייל",
+      "hyb-hers",
+      2,
+      undefined,
+      "ext-aida-1",
+    );
     const human = await seed(pool, g, "מחר אנחנו נפגשים בערב", "hyb-human", 2);
     await pool.query(
       `INSERT INTO aida_messages (group_id, external_id) VALUES ($1, 'ext-aida-1')`,
