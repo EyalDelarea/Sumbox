@@ -41,14 +41,17 @@ describe("runSandbox", () => {
       group: 42,
       items,
       answer: answer as never,
+      // Explicit: the real default queries the DB for the group's roster, and
+      // these fakes carry no pool. Injecting keeps them DB-free on purpose.
+      roster: [],
       now: () => (t += 5),
     });
 
     // one call per item, in order, bound to the real group
     expect(answer).toHaveBeenCalledTimes(2);
     expect(seen.map((s) => s.input)).toEqual([
-      { groupId: 42, question: "q1" },
-      { groupId: 42, question: "q2" },
+      { groupId: 42, question: "q1", roster: [] },
+      { groupId: 42, question: "q2", roster: [] },
     ]);
     // telemetry on + sandbox-scoped trace attrs per item
     expect(seen[0].deps.telemetry).toBe(true);
@@ -73,6 +76,7 @@ describe("runSandbox", () => {
       group: 7,
       items,
       answer: answer as never,
+      roster: [],
     });
     expect(results[0].answer).toContain("<<ERROR: boom>>");
     expect(results[1].answer).toBe("ok");
