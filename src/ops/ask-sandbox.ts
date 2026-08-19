@@ -18,8 +18,8 @@
 import type { LanguageModel } from "ai";
 import type pg from "pg";
 import { answerAgentic } from "../ask/agentic-answer.js";
-import { buildGroupRoster } from "../ask/roster.js";
 import type { Embedder } from "../ask/embedder.js";
+import { buildGroupRoster } from "../ask/roster.js";
 import { PROBES, type Probe } from "./ask-redteam.js";
 
 /** One thing to ask @Aida. `id` → trace userId; `kind` → the 3rd trace tag
