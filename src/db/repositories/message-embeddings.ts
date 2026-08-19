@@ -60,6 +60,31 @@ export const CONTENT_JOINS = `
  */
 const EXCLUDE_ASK_MENTION = `AND coalesce(m.text_content, '') !~* '@(אידה|aida)'`;
 
+/**
+ * Exclude @Aida's OWN replies from RETRIEVAL.
+ *
+ * Measured, not theoretical. On 2026-08-19 she invented a confrontation between
+ * two people under a leading question. That reply was ingested as an ordinary
+ * group message, so search began returning it as evidence — and she repeated the
+ * claim unprompted, on neutral questions, days later. An agent that retrieves its
+ * own past output as "what the group said" launders a guess into a source, and
+ * each repetition makes the next one better-supported.
+ *
+ * RETRIEVAL only. The recency window still shows her turns (labelled as hers via
+ * the same table), so follow-ups and "what did you just say" keep working. The
+ * rule is not "she may not remember what she said" — it is "she may not cite
+ * herself as proof".
+ *
+ * Keyed on `aida_messages`, never on her catchphrase: a member quoting or mocking
+ * her is real conversation and must stay searchable. `from_me` would be wrong for
+ * the same reason in reverse — it also covers the device owner's own messages
+ * (measured on group 70: 3405 owner messages vs 185 bot replies).
+ */
+const EXCLUDE_AIDA_OWN = `AND NOT EXISTS (
+        SELECT 1 FROM aida_messages a
+        WHERE a.group_id = m.group_id AND a.external_id = m.external_id
+      )`;
+
 export type PendingEmbedding = { id: number; content: string; contentHash: string };
 
 /**
@@ -195,6 +220,7 @@ export async function searchMessagesByEmbedding(
       WHERE m.group_id = $1
         AND m.message_type <> 'system'
         ${EXCLUDE_ASK_MENTION}
+        ${EXCLUDE_AIDA_OWN}
         AND ${CONTENT_EXPR} <> ''
       ORDER BY e.embedding <=> $2::vector
       LIMIT $3`,
@@ -340,6 +366,7 @@ export async function searchMessagesLexical(
       WHERE m.group_id = $1
         AND m.message_type <> 'system'
         ${EXCLUDE_ASK_MENTION}
+        ${EXCLUDE_AIDA_OWN}
         AND to_tsvector('simple', coalesce(m.text_content, '')) @@ q
         AND ${CONTENT_EXPR} <> ''
       ORDER BY (SELECT coalesce(sum(tw.w), 0)

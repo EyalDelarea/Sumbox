@@ -20,6 +20,7 @@ async function seed(
   key: string,
   axis: number,
   sentAt = "2026-07-10T18:00:00Z",
+  externalId: string | null = null,
 ): Promise<number> {
   const row: NormalizedMessage & { participantId: number | null } = {
     groupId,
@@ -31,7 +32,7 @@ async function seed(
     mediaFilename: null,
     mediaPath: null,
     mediaStatus: null,
-    externalId: null,
+    externalId,
     participantId: null,
     sentAt: new Date(sentAt),
     dedupeKey: key,
@@ -140,5 +141,53 @@ describe("retrieval excludes @Aida command messages", () => {
     );
     expect(hits.some((h) => h.content.includes("@אידה"))).toBe(false); // command excluded
     expect(hits.map((h) => h.messageId)).toContain(real); // real content still there
+  });
+});
+
+describe("retrieval excludes @Aida's OWN replies", () => {
+  let pool: pg.Pool;
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  /**
+   * The 2026-08-19 incident, as a regression test.
+   *
+   * Under a leading question she invented a confrontation between two people.
+   * That reply was then ingested as an ordinary group message, so SEARCH began
+   * returning it as evidence — and she repeated the claim unprompted, on neutral
+   * questions, days later. An agent that retrieves its own past output as "what
+   * the group said" launders a guess into a source.
+   *
+   * Excluding her replies from RETRIEVAL only. The recency window still shows
+   * them (labelled as hers), so follow-ups and "what did you just say" keep
+   * working — she may remember what she said, she may not cite herself as proof.
+   */
+  it("never returns her own reply as evidence, even when it ranks top", async () => {
+    const g = await upsertGroup(pool, { name: "HYB-selfecho", source: "import" });
+    // Her fabrication shares the query's keyword AND vector, so it would rank
+    // first — which is exactly what happened in the field.
+    await seed(pool, g, "תכף תכף... נראה שהיה עימות בין בר לאייל", "hyb-hers", 2, undefined, "ext-aida-1");
+    const human = await seed(pool, g, "מחר אנחנו נפגשים בערב", "hyb-human", 2);
+    await pool.query(
+      `INSERT INTO aida_messages (group_id, external_id) VALUES ($1, 'ext-aida-1')`,
+      [g],
+    );
+
+    const hits = await searchMessagesHybrid(pool, g, { embedding: vec(2), text: "עימות" }, 10);
+    expect(hits.some((h) => h.content.includes("עימות"))).toBe(false);
+    expect(hits.map((h) => h.messageId)).toContain(human);
+  });
+
+  it("still returns a human message that merely quotes her", async () => {
+    // The exclusion keys on aida_messages, not on her catchphrase — a member
+    // quoting or mocking her is real conversation and must stay searchable.
+    const g = await upsertGroup(pool, { name: "HYB-quoteher", source: "import" });
+    const quoted = await seed(pool, g, 'רועי אמר "תכף תכף" בצחוק', "hyb-quote", 3);
+    const hits = await searchMessagesHybrid(pool, g, { embedding: vec(3), text: "תכף" }, 10);
+    expect(hits.map((h) => h.messageId)).toContain(quoted);
   });
 });
