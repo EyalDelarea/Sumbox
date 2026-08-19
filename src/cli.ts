@@ -714,7 +714,7 @@ program
       const pool = createDbClient();
       try {
         if (options.revoke) {
-          const ok = await revokeObservation(pool, Number(options.revoke));
+          const ok = await revokeObservation(pool, Number(options.revoke), { groupId });
           process.stdout.write(ok ? "revoked\n" : "not found (or already revoked)\n");
           return;
         }
@@ -723,9 +723,7 @@ program
           // The same code the job runs, on demand — so the shadow phase can be
           // inspected immediately instead of waiting for the next digest.
           const { selectCandidates } = await import("./ask/memory-extract.js");
-          const { makeMemoryExtractHandler } = await import(
-            "./workers/handlers/memory-extract.js"
-          );
+          const { makeMemoryExtractHandler } = await import("./workers/handlers/memory-extract.js");
           const { OllamaSummarizer } = await import("./summarization/summarizer.js");
           const config = loadConfig();
           const extractor = new OllamaSummarizer({

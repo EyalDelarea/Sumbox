@@ -130,7 +130,7 @@ describe("aida memory (shadow write)", () => {
     const mid = await seedMessage(pool, g, p);
     const id = (await recordObservation(pool, { groupId: g, sourceMessageId: mid, content: "z" }))!;
 
-    expect(await revokeObservation(pool, id, p)).toBe(true);
+    expect(await revokeObservation(pool, id, { groupId: g, byParticipantId: p })).toBe(true);
     expect(await listObservations(pool, g)).toHaveLength(0);
     // Still there, with who revoked it — a revocation is auditable.
     const { rows } = await pool.query(
@@ -141,6 +141,22 @@ describe("aida memory (shadow write)", () => {
     expect(Number(rows[0].revoked_by_participant_id)).toBe(p);
     // Revoking twice is a no-op, so a repeated chat command can't rewrite history.
     expect(await revokeObservation(pool, id)).toBe(false);
+  });
+
+  it("will not revoke an observation belonging to another group", async () => {
+    // Every other query in this module carries the group boundary; a revoke that
+    // did not would be the one place an id from another chat could take effect.
+    const a = await upsertGroup(pool, { name: `rv1-${Math.random()}`, source: "import" });
+    const b = await upsertGroup(pool, { name: `rv2-${Math.random()}`, source: "import" });
+    const p = await upsertParticipant(pool, `P7-${Math.random()}`);
+    const id = (await recordObservation(pool, {
+      groupId: a,
+      sourceMessageId: await seedMessage(pool, a, p),
+      content: "in A",
+    }))!;
+    expect(await revokeObservation(pool, id, { groupId: b })).toBe(false);
+    expect(await listObservations(pool, a)).toHaveLength(1);
+    expect(await revokeObservation(pool, id, { groupId: a })).toBe(true);
   });
 
   it("keeps memory group-scoped on read", async () => {

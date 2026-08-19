@@ -7,6 +7,11 @@
  *
  *   group_id, speaker_participant_id, observed_at  ←  messages.<row>
  *
+ * NOTE on how strong that is: the NOT NULL columns are structural — no writer can
+ * evade them. The speaker-equals-sender rule is NOT; it holds because this is the
+ * only writer, and a future backfill script issuing its own INSERT could break it.
+ * If a second writer ever appears, this belongs in a trigger.
+ *
  * A caller therefore cannot say "Alex said X" about a message Royi wrote, cannot
  * attach a memory to a different group, and cannot invent a timestamp. The only
  * thing it supplies is the content and which message it came from — and if that
@@ -119,17 +124,23 @@ export async function listObservations(
  * Tombstone an observation. Append-only: the row and its citation survive, so a
  * revocation is auditable and a bad extraction run can be undone wholesale
  * without losing the record that it happened.
+ *
+ * `groupId` is optional but should be passed by anything acting on behalf of a
+ * group (the chat-revoke path in slice 2, above all): every other query in this
+ * module carries the group boundary, and a revoke that does not is the one place
+ * an id from another chat could take effect.
  */
 export async function revokeObservation(
   client: pg.Pool | pg.PoolClient,
   id: number,
-  byParticipantId?: number,
+  opts: { groupId?: number; byParticipantId?: number } = {},
 ): Promise<boolean> {
   const { rowCount } = await client.query(
     `UPDATE aida_observations
         SET revoked_at = now(), revoked_by_participant_id = $2
-      WHERE id = $1 AND revoked_at IS NULL`,
-    [id, byParticipantId ?? null],
+      WHERE id = $1 AND revoked_at IS NULL
+        AND ($3::bigint IS NULL OR group_id = $3)`,
+    [id, opts.byParticipantId ?? null, opts.groupId ?? null],
   );
   return (rowCount ?? 0) > 0;
 }

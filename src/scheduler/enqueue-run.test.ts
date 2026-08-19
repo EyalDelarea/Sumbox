@@ -266,3 +266,37 @@ describe("enqueueScheduledRun", () => {
     expect(result.enqueued).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("memory.extract enqueue", () => {
+  let pool: pg.Pool;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  it("enqueues extraction only when extractMemory is set", async () => {
+    // The flag exists because nothing reads memory yet and extraction costs a GPU
+    // pass per group per digest. But it has to be REACHABLE: the job type,
+    // handler, migration and worker wiring all shipped before anything set it,
+    // which is the "ships inert" failure this repo has already hit twice.
+    await seedGroup(pool, `mem-${Math.random()}`);
+    const bus = makeFakeBus();
+
+    await enqueueScheduledRun(pool, bus, { all: true });
+    expect(bus.calls.filter((c) => c.type === "memory.extract")).toHaveLength(0);
+
+    bus.calls.length = 0;
+    await enqueueScheduledRun(pool, bus, { all: true, extractMemory: true });
+    const mem = bus.calls.filter((c) => c.type === "memory.extract");
+    expect(mem.length).toBeGreaterThan(0);
+
+    // An explicit window, so a re-run over the same span converges instead of
+    // duplicating — the observation dedupe key makes extraction idempotent.
+    const payload = mem[0]!.payload as { since: string; until: string };
+    expect(new Date(payload.until).getTime()).toBeGreaterThan(new Date(payload.since).getTime());
+  });
+});

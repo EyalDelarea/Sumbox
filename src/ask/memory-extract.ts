@@ -25,6 +25,19 @@
 import type pg from "pg";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
 
+/**
+ * Most messages handed to the extractor in one pass.
+ *
+ * A context-window bound, not a preference. Measured on group 70: 1077 messages
+ * over 30 days is 42k characters of Hebrew, and with the `[id] sender: ` prefixes
+ * the prompt reaches roughly 28k tokens against a numCtx of 32768. An unbounded
+ * window would silently truncate on a busier group — and a truncated prompt fails
+ * INVISIBLY, producing fewer observations rather than an error.
+ *
+ * Trimming also bounds the GPU cost of a job that runs on every digest.
+ */
+export const MAX_CANDIDATES = 300;
+
 /** One message the extractor may read. */
 export type CandidateMessage = {
   messageId: number;
@@ -53,6 +66,7 @@ export async function selectCandidates(
   groupId: number,
   since: Date,
   until: Date,
+  limit = MAX_CANDIDATES,
 ): Promise<CandidateMessage[]> {
   const { rows } = await client.query<{
     id: string;
@@ -61,6 +75,7 @@ export async function selectCandidates(
     sent_at: Date;
   }>(
     `
+    SELECT * FROM (
     SELECT m.id, p.display_name AS sender, m.text_content AS content, m.sent_at
     FROM messages m
     LEFT JOIN participants p ON p.id = m.participant_id
@@ -73,9 +88,13 @@ export async function selectCandidates(
       AND a.external_id IS NULL              -- not hers
       AND m.text_content !~* '@(אידה|aida)'  -- not addressed to her
       AND m.participant_id IS NOT NULL
-    ORDER BY m.sent_at
+    -- Newest first for the cap, then flipped back to chronological below: if a
+    -- window has to be trimmed, losing the OLDEST messages is the right loss.
+    ORDER BY m.sent_at DESC
+    LIMIT $4
+    ) w ORDER BY w.sent_at
     `,
-    [groupId, since, until],
+    [groupId, since, until, limit],
   );
   return (
     rows

@@ -66,9 +66,23 @@ export async function withTurnTrace<T>(spec: TurnSpec, fn: () => Promise<T>): Pr
       ...(spec.input !== undefined ? { input: spec.input } : {}),
       ...(spec.metadata ? { metadata: spec.metadata } : {}),
     });
-    const out = await propagateAttributes(spec.attrs, fn);
-    span.update({ output: out });
-    return out;
+    try {
+      const out = await propagateAttributes(spec.attrs, fn);
+      span.update({ output: out });
+      return out;
+    } catch (err) {
+      // A turn that THREW must still say so. answerAida catches an agentic
+      // failure and silently falls back to single-shot, so without this the
+      // trace would show a turn with no output and no error, followed by an
+      // untraced answer appearing from nowhere — which is the same
+      // "two traces, can't tell what happened" problem this function exists to
+      // fix, just relocated to the failure path.
+      span.update({
+        level: "ERROR",
+        statusMessage: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
   });
 }
 

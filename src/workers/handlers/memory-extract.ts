@@ -90,7 +90,8 @@ export function makeMemoryExtractHandler(deps: MemoryExtractHandlerDeps) {
         sourceMessageId: ok.sourceMessageId,
         content: ok.content,
       });
-      if (id === null) result.rejected["deduped-or-rejected"] = (result.rejected["deduped-or-rejected"] ?? 0) + 1;
+      if (id === null)
+        result.rejected["deduped-or-rejected"] = (result.rejected["deduped-or-rejected"] ?? 0) + 1;
       else result.accepted += 1;
     }
 
