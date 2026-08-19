@@ -331,7 +331,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           turns: ac.turns,
           resolvePn: (lid) => session.pnForLid(lid),
           makeQuoted: (jid, waId, text, author) => session.quotedFrom(jid, waId, text, author),
-          answer: ({ groupId, question }) =>
+          answer: ({ groupId, question, askerName }) =>
             answerAida(
               {
                 agentic: cfg.ask.agentic,
@@ -369,7 +369,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
                   ),
                 log,
               },
-              { groupId, question },
+              { groupId, question, askerName },
             ),
           log,
         });
