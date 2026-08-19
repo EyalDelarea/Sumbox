@@ -18,9 +18,8 @@
 import type { LanguageModel } from "ai";
 import type pg from "pg";
 import { answerAgentic } from "../ask/agentic-answer.js";
+import { buildGroupRoster } from "../ask/roster.js";
 import type { Embedder } from "../ask/embedder.js";
-import { listGroupParticipants } from "../db/repositories/participants.js";
-import { resolveSenderName } from "../summarization/sender-name.js";
 import { PROBES, type Probe } from "./ask-redteam.js";
 
 /** One thing to ask @Aida. `id` → trace userId; `kind` → the 3rd trace tag
@@ -82,11 +81,7 @@ export async function runSandbox(deps: SandboxDeps): Promise<SandboxResult[]> {
    * (#67); a verifier that tests a different prompt than production is not a
    * verifier. Injectable so tests need no DB.
    */
-  const roster =
-    deps.roster ??
-    (await listGroupParticipants(deps.pool, deps.group, 25, { includeOwner: true })).map((x) =>
-      resolveSenderName(x.name),
-    );
+  const roster = deps.roster ?? (await buildGroupRoster(deps.pool, deps.group));
   const results: SandboxResult[] = [];
   for (const item of items) {
     const t = now();

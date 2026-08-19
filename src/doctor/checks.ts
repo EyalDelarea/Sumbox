@@ -232,6 +232,38 @@ async function realEmbeddingFreshnessProbe(databaseUrl: string): Promise<boolean
   }
 }
 
+/**
+ * Can @Aida still learn who is in a group?
+ *
+ * The roster is the input that makes PEOPLE-SAFETY's member branch reachable, and
+ * a broken one has NO user-visible symptom: she keeps answering every question,
+ * just never as though anyone were a member. The live path degrades to an empty
+ * roster on purpose (answering beats erroring), so without this check a permanent
+ * breakage — a schema change, a bad filter — would live forever behind one
+ * warn-level log line. This repo has shipped features inert twice for exactly
+ * that reason.
+ *
+ * Passes when the busiest group yields at least one name. No groups yet (fresh
+ * install) is a pass, not a failure — there is nothing to be wrong about.
+ */
+async function realAidaRosterProbe(databaseUrl: string): Promise<boolean> {
+  const [{ default: pg }, { buildGroupRoster }] = await Promise.all([
+    import("pg"),
+    import("../ask/roster.js"),
+  ]);
+  const pool = new pg.Pool({ connectionString: databaseUrl });
+  try {
+    const { rows } = await pool.query<{ group_id: string }>(
+      `SELECT group_id FROM messages GROUP BY group_id ORDER BY COUNT(*) DESC LIMIT 1`,
+    );
+    const groupId = rows[0]?.group_id;
+    if (groupId === undefined) return true;
+    return (await buildGroupRoster(pool, Number(groupId))).length > 0;
+  } finally {
+    await pool.end();
+  }
+}
+
 export function checkEntries(config: AppConfig): CheckEntry[] {
   return [
     { name: "Docker running", fix: "start Docker Desktop", probe: realDockerProbe },
@@ -270,6 +302,15 @@ export function checkEntries(config: AppConfig): CheckEntry[] {
       probe: () => realFfmpegProbe(config.transcription.ffmpegPath),
     },
     // App health last — everything above is a prerequisite for it.
+    {
+      name: "@Aida roster resolvable",
+      level: "warn",
+      fix: "check that messages have participant rows with real display names (not raw JIDs); see src/ask/roster.ts",
+      probe: () => realAidaRosterProbe(config.databaseUrl),
+      // A throw here means the DB is unreachable, which the Postgres check
+      // already reports — same reasoning as the freshness check below.
+      onProbeError: "pass",
+    },
     {
       name: "@Aida embeddings current",
       level: "warn",

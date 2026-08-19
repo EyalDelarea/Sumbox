@@ -306,8 +306,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
         const { makeAgenticModel } = await import("../ask/ai-model.js");
         const { OllamaEmbedder } = await import("../ask/embedder.js");
         const { OllamaSummarizer } = await import("../summarization/summarizer.js");
-        const { listGroupParticipants } = await import("../db/repositories/participants.js");
-        const { resolveSenderName } = await import("../summarization/sender-name.js");
+        const { buildGroupRoster } = await import("../ask/roster.js");
         const { loadConfig } = await import("../config.js");
         const cfg = loadConfig();
         const p = pool as pg.Pool;
@@ -349,9 +348,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
             // exactly today's behaviour, which is the safe direction.
             let roster: string[] = [];
             try {
-              roster = (await listGroupParticipants(p, groupId, 25, { includeOwner: true })).map(
-                (x) => resolveSenderName(x.name),
-              );
+              roster = await buildGroupRoster(p, groupId);
             } catch (err) {
               log?.warn({ err, groupId }, "@Aida roster lookup failed; answering without it");
             }
