@@ -196,7 +196,7 @@ export function buildAskPrompt(
   question: string,
   context: AskContextMessage[],
   window: AskWindowMessage[] = [],
-  opts: { askerName?: string } = {},
+  opts: { askerName?: string; roster?: string[] } = {},
 ): AskPrompt {
   const transcript = context.map((m) => renderLine(m)).join("\n");
   const q = neutralizeFence(question.trim());
@@ -209,6 +209,7 @@ export function buildAskPrompt(
       transcript,
       FENCE_CLOSE,
       "",
+      ...rosterLine(opts.roster),
       ...askerLine(opts.askerName),
       "The question to answer:",
       Q_OPEN,
@@ -216,6 +217,37 @@ export function buildAskPrompt(
       Q_CLOSE,
     ].join("\n"),
   };
+}
+
+/**
+ * Who is IN this group — so PEOPLE-SAFETY's member branch can actually resolve.
+ *
+ * That clause grants opinions, teasing, side-taking and ranking about people who
+ * ARE in the group, then closes with a default-deny for anyone whose membership
+ * is uncertain. Nothing ever supplied a membership list, so every person resolved
+ * to "not a member" and the permissive branch could never fire — which is why
+ * loosening the prose in #59 did not produce the behaviour it describes. This
+ * line is the missing input, not a new permission.
+ *
+ * It lives in the USER prompt rather than the system prompt on purpose: the
+ * system prompt's clause ORDER is load-bearing (prompt.test.ts pins SECURITY to
+ * index <= 2, after PR #62 measured the identical clause failing at position 8),
+ * and adding an element there would shift every index below it. Sitting beside
+ * askerLine() also puts the two identity facts — who is here, and which of them
+ * is "I" — in one place.
+ *
+ * Names are fence-neutralized like every other chat-derived string: display_name
+ * is pushName, which the sender chooses. Absent or empty the prompt is
+ * byte-identical to before this existed — an empty roster must NOT render, since
+ * "The people in this group are: ." asserts the group has no members and would
+ * harden the floor rather than relax it.
+ */
+export function rosterLine(roster?: string[]): string[] {
+  const names = (roster ?? []).map((n) => neutralizeFence(n).trim()).filter((n) => n.length > 0);
+  if (names.length === 0) return [];
+  return [
+    `The people in this group are: ${names.join(", ")}. Anyone named here IS a member of this group; treat them as such.`,
+  ];
 }
 
 /**
