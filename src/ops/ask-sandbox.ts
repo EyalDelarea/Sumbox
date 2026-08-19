@@ -19,6 +19,7 @@ import type { LanguageModel } from "ai";
 import type pg from "pg";
 import { answerAgentic } from "../ask/agentic-answer.js";
 import type { Embedder } from "../ask/embedder.js";
+import { buildGroupRoster } from "../ask/roster.js";
 import { PROBES, type Probe } from "./ask-redteam.js";
 
 /** One thing to ask @Aida. `id` → trace userId; `kind` → the 3rd trace tag
@@ -57,6 +58,8 @@ export type SandboxDeps = {
   items?: SandboxItem[];
   /** Injectable for tests; defaults to the real agentic answer. */
   answer?: typeof answerAgentic;
+  /** Injectable for tests; defaults to the live roster for `group`. */
+  roster?: string[];
   /** Injectable for tests. */
   now?: () => number;
   onResult?: (r: SandboxResult) => void;
@@ -68,6 +71,17 @@ export async function runSandbox(deps: SandboxDeps): Promise<SandboxResult[]> {
   const items = deps.items ?? probesToItems();
   const answer = deps.answer ?? answerAgentic;
   const now = deps.now ?? (() => Date.now());
+  /**
+   * The roster the LIVE path builds, built the same way here.
+   *
+   * Without it the sandbox would exercise a prompt production never sends — and
+   * PEOPLE-SAFETY's member branch, which is the whole point of the people probes,
+   * would be unreachable in exactly the run meant to verify it. That is the same
+   * divergence that let ask-redteam pass while the shipping prompt was broken
+   * (#67); a verifier that tests a different prompt than production is not a
+   * verifier. Injectable so tests need no DB.
+   */
+  const roster = deps.roster ?? (await buildGroupRoster(deps.pool, deps.group));
   const results: SandboxResult[] = [];
   for (const item of items) {
     const t = now();
@@ -85,7 +99,7 @@ export async function runSandbox(deps: SandboxDeps): Promise<SandboxResult[]> {
             tags: ["aida", "sandbox", item.kind],
           },
         },
-        { groupId: deps.group, question: item.question },
+        { groupId: deps.group, question: item.question, roster },
       ).then((a) => a.text);
     } catch (err) {
       out = `<<ERROR: ${err instanceof Error ? err.message : String(err)}>>`;

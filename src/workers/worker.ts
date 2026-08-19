@@ -354,6 +354,46 @@ async function main(): Promise<void> {
     });
   }
 
+  // Kept minimal on purpose: the real instructions are in the user prompt
+  // (buildExtractionPrompt), so prompt and validator version together.
+  const EXTRACTOR_SYSTEM =
+    "You extract structured facts from chat logs. You reply with JSON only, never prose.";
+
+  // memory.extract — @Aida's shadow-phase memory. Reads a window of ordinary
+  // conversation and writes attributed observations; NOTHING reads them yet.
+  // Deliberately its own job rather than a step inside summarize.group: a bad
+  // extractor must never be able to fail, slow, or retry a summary someone asked
+  // for, and keeping it separate means it can be re-run over a window on its own.
+  if (requestedTypes.includes("memory.extract")) {
+    const { makeMemoryExtractHandler } = await import("./handlers/memory-extract.js");
+    const { selectCandidates } = await import("../ask/memory-extract.js");
+    const { recordObservation } = await import("../db/repositories/aida-memory.js");
+    const { OllamaSummarizer } = await import("../summarization/summarizer.js");
+    // Reuses the summarizer as the generic prompt→text LLM, exactly as the ask
+    // fallback path does — extraction needs no tools and no structured output.
+    const extractor = new OllamaSummarizer({
+      host: config.summarization.ollamaHost,
+      model: config.summarization.model,
+      numCtx: config.summarization.numCtx,
+      // Pinned to 0: extraction is a parsing task, not a writing one, and the
+      // summarizer's default warmth costs accuracy here for nothing.
+      temperature: 0,
+      repeatPenalty: config.summarization.repeatPenalty,
+      numPredict: config.summarization.numPredict,
+    });
+    const runExtract = makeMemoryExtractHandler({
+      selectCandidates: (groupId, since, until) => selectCandidates(pool, groupId, since, until),
+      generate: async (prompt) =>
+        (await extractor.summarize({ system: EXTRACTOR_SYSTEM, user: prompt })).overview,
+      recordObservation: (input) => recordObservation(pool, input),
+    });
+    // The bus only cares that it resolved; the counts are the shadow-phase
+    // signal and go to the log, not to the queue.
+    handlers["memory.extract"] = async (job) => {
+      await runExtract(job);
+    };
+  }
+
   if (requestedTypes.includes("summarize.total")) {
     const { makeSummarizeTotalHandler } = await import("./handlers/summarize-total.js");
     const { generateTotalSummary } = await import("../summarization/total-summary.js");

@@ -111,6 +111,13 @@ export type SummaryCommandDeps = {
    * resolveEnabledJids.
    */
   resolveTrigger: () => Promise<string>;
+  /**
+   * Record a message this bot sent as HERS (see aida_messages). Optional so
+   * existing callers/tests are unaffected; the composition root supplies it.
+   * Memory extraction uses it to exclude her own output, which `from_me` cannot
+   * do because it also covers the device owner's own messages.
+   */
+  recordSelfMessage?: (groupId: number, externalId: string) => Promise<void>;
   /** Sends the reply back into the group; returns the sent message so it can be quoted next time. */
   sendText: (
     jid: string,
@@ -318,6 +325,24 @@ export async function maybeHandleSummaryCommand(
     }
 
     const sent = await deps.sendText(jid, text, { quoted: quoted ?? msg });
+
+    // Mark this as HERS, exactly as ask-command does for @Aida replies.
+    //
+    // Not cosmetic: `from_me` conflates the bot with the device owner (measured on
+    // group 70: 3405 of the owner's own messages vs 185 tracked bot replies), so
+    // `aida_messages` is the only thing that can tell them apart. Memory
+    // extraction excludes her own output — an agent that learns from its own
+    // summaries reinforces whatever it already said — and without this row a
+    // summary post looks like ordinary group conversation to that filter.
+    // Best-effort, like the ask path: a failure here costs a filter hint, never
+    // a delivered summary.
+    if (sent?.key?.id) {
+      try {
+        await deps.recordSelfMessage?.(groupId, sent.key.id);
+      } catch (err) {
+        deps.log?.warn({ err, groupId }, "summary command: self-message record failed");
+      }
+    }
 
     // Only a real summary advances the shared cursor / thread (an empty "nothing
     // new" reply is not a thread anchor and has no summary row to point at).

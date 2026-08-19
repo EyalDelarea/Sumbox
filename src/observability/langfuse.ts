@@ -16,6 +16,7 @@
  */
 import { propagateAttributes } from "@langfuse/core";
 import { LangfuseSpanProcessor } from "@langfuse/otel";
+import { startActiveObservation } from "@langfuse/tracing";
 import { LangfuseVercelAiSdkIntegration } from "@langfuse/vercel-ai-sdk";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { registerTelemetry } from "ai";
@@ -32,6 +33,57 @@ export type TraceAttributes = { sessionId?: string; userId?: string; tags?: stri
  */
 export function withTraceAttributes<T>(attrs: TraceAttributes, fn: () => Promise<T>): Promise<T> {
   return propagateAttributes(attrs, fn);
+}
+
+/** One @Aida turn, as a single trace. */
+export type TurnSpec = {
+  /** Trace name. Every trace used to be `invoke_agent gemma4:26b`. */
+  name: string;
+  attrs: TraceAttributes;
+  /** Trace-level input — the question, so the trace list is readable. */
+  input?: unknown;
+  /** The evidence: retrieved ids, window ids, roster, path. */
+  metadata?: Record<string, unknown>;
+};
+
+/**
+ * Run one turn inside a single root observation.
+ *
+ * Without this, a turn emitted TWO sibling traces — the answer and the
+ * post-hoc attribution call — both named `invoke_agent gemma4:26b` and
+ * indistinguishable in the list. There was no object representing "a turn", so
+ * nothing could be scored, annotated, or added to a dataset, and opening a trace
+ * at random was as likely to show the citation matcher as the answer.
+ *
+ * `output` is set from the returned value, so the trace carries the answer
+ * without the caller threading a setter through. propagateAttributes still runs
+ * INSIDE, so session/user/tags reach every child span (v5 puts correlating
+ * attributes on observations, not just the root).
+ */
+export async function withTurnTrace<T>(spec: TurnSpec, fn: () => Promise<T>): Promise<T> {
+  return startActiveObservation(spec.name, async (span) => {
+    span.update({
+      ...(spec.input !== undefined ? { input: spec.input } : {}),
+      ...(spec.metadata ? { metadata: spec.metadata } : {}),
+    });
+    try {
+      const out = await propagateAttributes(spec.attrs, fn);
+      span.update({ output: out });
+      return out;
+    } catch (err) {
+      // A turn that THREW must still say so. answerAida catches an agentic
+      // failure and silently falls back to single-shot, so without this the
+      // trace would show a turn with no output and no error, followed by an
+      // untraced answer appearing from nowhere — which is the same
+      // "two traces, can't tell what happened" problem this function exists to
+      // fix, just relocated to the failure path.
+      span.update({
+        level: "ERROR",
+        statusMessage: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  });
 }
 
 /** The slice of the OTel NodeSDK we use — narrowed so tests can inject a fake. */

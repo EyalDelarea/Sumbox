@@ -273,6 +273,12 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
         return maybeHandleSummaryCommand(msg, {
           pool: p,
           resolveEnabledJids: sc.resolveEnabledJids,
+          // Summary posts are hers too — see summary-command.ts. Without this the
+          // memory extractor would treat her own summaries as group conversation.
+          recordSelfMessage: async (groupId, externalId) => {
+            const { recordAidaMessage } = await import("../db/repositories/aida-messages.js");
+            await recordAidaMessage(pool as pg.Pool, { groupId, externalId });
+          },
           resolveTrigger: sc.resolveTrigger,
           sendText: (jid, text, opts) => session.sendText(jid, text, opts),
           react: (jid, key, emoji) => session.react(jid, key, emoji),
@@ -306,6 +312,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
         const { makeAgenticModel } = await import("../ask/ai-model.js");
         const { OllamaEmbedder } = await import("../ask/embedder.js");
         const { OllamaSummarizer } = await import("../summarization/summarizer.js");
+        const { buildGroupRoster } = await import("../ask/roster.js");
         const { loadConfig } = await import("../config.js");
         const cfg = loadConfig();
         const p = pool as pg.Pool;
@@ -331,8 +338,27 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
           turns: ac.turns,
           resolvePn: (lid) => session.pnForLid(lid),
           makeQuoted: (jid, waId, text, author) => session.quotedFrom(jid, waId, text, author),
-          answer: ({ groupId, question }) =>
-            answerAida(
+          answer: async ({ groupId, question, askerName }) => {
+            // Who is in this group, so PEOPLE-SAFETY's member branch can resolve.
+            // Loaded HERE rather than inside the answer functions: the composition
+            // root already owns the pool, and keeping the roster an input keeps
+            // those functions injectable for the eval harness.
+            //
+            // includeOwner: the device owner is a member and the most-asked-about
+            // person in the corpus; omitting him routes every question about him
+            // to the non-member floor. Limit 25 is headroom — measured, the widest
+            // group @Aida serves has 6 real-named participants.
+            //
+            // Failure is non-fatal: a roster query that throws must not turn a
+            // answerable question into an error reply. Degrading to no roster is
+            // exactly today's behaviour, which is the safe direction.
+            let roster: string[] = [];
+            try {
+              roster = await buildGroupRoster(p, groupId);
+            } catch (err) {
+              log?.warn({ err, groupId }, "@Aida roster lookup failed; answering without it");
+            }
+            return answerAida(
               {
                 agentic: cfg.ask.agentic,
                 runAgentic: (i) =>
@@ -346,7 +372,13 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
                       }),
                       telemetry: cfg.langfuse.enabled,
                       // Group a chat's @Aida turns; tag as live vs sandbox runs.
-                      trace: { sessionId: `group:${i.groupId}`, tags: ["aida", "live"] },
+                      trace: {
+                        sessionId: `group:${i.groupId}`,
+                        // Who asked. Without it every live trace was anonymous, so
+                        // "show me everything Royi asked her" was not expressible.
+                        ...(i.askerName ? { userId: i.askerName } : {}),
+                        tags: ["aida", "live"],
+                      },
                     },
                     i,
                   ),
@@ -369,8 +401,9 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
                   ),
                 log,
               },
-              { groupId, question },
-            ),
+              { groupId, question, askerName, roster },
+            );
+          },
           log,
         });
       })().catch((err: unknown) => onError(err));
@@ -390,6 +423,11 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
   let telemetry: { shutdown: () => Promise<void> } | null = null;
   const telemetryEndpoint = deps.telemetry;
   if (telemetryEndpoint) {
+    // Live traffic used to land in Langfuse's `default` environment, mixed in with
+    // everything else — only ask-sandbox and aida-eval ever set one. Naming it
+    // makes "what did she actually do in the group" a filter rather than a hunt.
+    // Set BEFORE the exporter starts: the Langfuse SDK reads this at init.
+    process.env.LANGFUSE_TRACING_ENVIRONMENT ??= "live";
     void (async () => {
       const { createLangfuseTelemetry, defaultLangfuseDeps } = await import(
         "../observability/langfuse.js"

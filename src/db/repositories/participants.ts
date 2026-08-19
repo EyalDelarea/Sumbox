@@ -42,24 +42,44 @@ export interface GroupParticipant {
 /**
  * The people active in a group, by message volume (most active first). Derived
  * from who actually sent messages — we don't store an explicit membership list.
- * Used to orient the agent ("who's in this chat"). Excludes the device owner.
+ * Used to orient the agent ("who's in this chat").
+ *
+ * `includeOwner` (default false, preserving the original device-owner-excluded
+ * semantics) is what @Aida's roster passes. She needs the owner because
+ * PEOPLE-SAFETY's permissive branch is scoped to people who ARE in the group,
+ * and the owner is both a member and the most-asked-about person in the corpus —
+ * omitting him would route every question about him to the non-member floor,
+ * which is the exact bug the roster exists to fix. Measured on the real DB, the
+ * owner stores as an ordinary display_name, so he needs no special labelling.
+ *
+ * Raw JIDs (`…@…`) and the `Unknown` placeholder are excluded, mirroring
+ * {@link participantNamesForBiasing}. This is not cosmetic: measured on the live
+ * DB, every group @Aida serves carries exactly one JID-shaped display_name, and
+ * in group 70 that row (the group's own `@g.us` jid) has 5855 messages — more
+ * than any real person. Unfiltered it would head the roster and read to the model
+ * as the chat's most active member.
  */
 export async function listGroupParticipants(
   client: pg.Pool | pg.PoolClient,
   groupId: number,
   limit = 15,
+  opts: { includeOwner?: boolean } = {},
 ): Promise<GroupParticipant[]> {
   const { rows } = await client.query<{ name: string; count: string }>(
     `
     SELECT p.display_name AS name, COUNT(*) AS count
     FROM messages m
     JOIN participants p ON p.id = m.participant_id
-    WHERE m.group_id = $1 AND m.from_me IS NOT TRUE
+    WHERE m.group_id = $1
+      AND ($2::boolean OR m.from_me IS NOT TRUE)
+      AND btrim(coalesce(p.display_name, '')) <> ''
+      AND p.display_name NOT LIKE '%@%'
+      AND p.display_name <> 'Unknown'
     GROUP BY p.display_name
     ORDER BY COUNT(*) DESC, p.display_name
-    LIMIT $2
+    LIMIT $3
     `,
-    [groupId, limit],
+    [groupId, opts.includeOwner === true, limit],
   );
   return rows.map((r) => ({ name: r.name, messageCount: Number(r.count) }));
 }

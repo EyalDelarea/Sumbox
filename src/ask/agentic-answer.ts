@@ -15,6 +15,7 @@ import {
   Q_OPEN,
   renderLine,
   renderWindow,
+  rosterLine,
 } from "./prompt.js";
 import { selectRecentMessages } from "./recent-window.js";
 import { searchMessagesHybrid } from "./retrieval.js";
@@ -28,10 +29,19 @@ type GenerateFn = (
  *  so this module carries no static Langfuse dependency. */
 export type AgenticTrace = { sessionId?: string; userId?: string; tags?: string[] };
 
-/** Wrap a call so trace attributes propagate onto the spans it creates.
- *  Injected (default lazily loads observability/langfuse.ts) so @langfuse/core
- *  never loads unless telemetry + trace are both set. */
-type PropagateFn = <T>(attrs: AgenticTrace, fn: () => Promise<T>) => Promise<T>;
+/** Wrap a whole turn in one root observation, carrying the question, the answer,
+ *  and the evidence she was shown. Injected (default lazily loads
+ *  observability/langfuse.ts) so the OTel tree never loads unless telemetry +
+ *  trace are both set. */
+type TraceTurnFn = <T>(
+  spec: {
+    name: string;
+    attrs: AgenticTrace;
+    input?: unknown;
+    metadata?: Record<string, unknown>;
+  },
+  fn: () => Promise<T>,
+) => Promise<T>;
 
 /**
  * The groundedness guard's view of a tool step: only the RESULT — something
@@ -112,8 +122,8 @@ export type AgenticDeps = {
   groundednessGuard?: boolean;
   /** Injectable for tests; defaults to the AI SDK. */
   generate?: GenerateFn;
-  /** Injectable for tests; defaults to observability/langfuse.ts withTraceAttributes. */
-  propagate?: PropagateFn;
+  /** Injectable for tests; defaults to observability/langfuse.ts withTurnTrace. */
+  propagate?: TraceTurnFn;
 };
 
 /** Answer via a bounded agentic loop on gemma4. groupId is the privacy boundary
@@ -126,6 +136,10 @@ export async function answerAgentic(
     asOf?: Date;
     excludeExternalId?: string;
     askerName?: string;
+    /** Who is in this group — see prompt.ts rosterLine(). Loaded by the caller
+     *  (the composition root) so this function stays DB-free beyond retrieval
+     *  and the eval harness can pin a fixed roster. */
+    roster?: string[];
   },
 ): Promise<CitedAnswer> {
   const generate = deps.generate ?? (sdkGenerateText as unknown as GenerateFn);
@@ -200,6 +214,7 @@ export async function answerAgentic(
   const prompt = [
     ...renderWindow(window),
     ...searchSection,
+    ...rosterLine(input.roster),
     ...askerLine(input.askerName),
     // Fenced exactly like the single-shot path (buildAskPrompt). Neutralizing alone
     // already made a forged ⟦…⟧ marker impossible, but the question still arrived as
@@ -216,7 +231,16 @@ export async function answerAgentic(
     model: deps.model,
     ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
     system,
-    prompt,
+    // Passed as `messages`, NOT as a `prompt` string — and this is an
+    // observability fix, not a style choice. The AI SDK converts a string prompt
+    // to exactly this shape internally (verified at the fetch layer: the two
+    // produce byte-identical request bodies), but the Langfuse integration only
+    // serializes the messages form. With `prompt`, every trace recorded
+    // `{role:"user", content:null}` — so the window, the search hits, the roster
+    // and the question were absent from tracing entirely, and the 2026-08-19
+    // "did she leak?" investigation needed a reconstruction script instead of a
+    // click. What she is shown must be what the trace shows.
+    messages: [{ role: "user" as const, content: prompt }],
     stopWhen: stepCountIs(deps.maxSteps ?? 3),
     tools: { search_chat: searchChat },
     // AI SDK v7 auto-enables telemetry once a Langfuse integration is
@@ -286,10 +310,27 @@ export async function answerAgentic(
     );
     return { text: answerText, citedIds };
   };
-  return deps.telemetry && deps.trace
-    ? await (deps.propagate ?? (await import("../observability/langfuse.js")).withTraceAttributes)(
-        deps.trace,
-        run,
-      )
-    : await run();
+  if (!(deps.telemetry && deps.trace)) return await run();
+  const traceTurn = deps.propagate ?? (await import("../observability/langfuse.js")).withTurnTrace;
+  // The metadata is chosen from a real incident, not from what was easy to add.
+  // On 2026-08-19 answering "did she leak this from another chat?" needed a
+  // reconstruction script, because a trace held the system prompt and the answer
+  // and nothing else. These four fields answer it by inspection: which messages
+  // she saw, whether they came from the window or from search, who she thought
+  // was in the room, and who was asking.
+  return await traceTurn(
+    {
+      name: "aida-turn",
+      attrs: deps.trace,
+      input: input.question,
+      metadata: {
+        groupId: input.groupId,
+        windowMessageIds: window.map((m) => m.messageId),
+        retrievedMessageIds: freshHits.map((h) => h.messageId),
+        roster: input.roster ?? [],
+        askerName: input.askerName ?? null,
+      },
+    },
+    run,
+  );
 }

@@ -159,7 +159,15 @@ export type AppConfig = {
    */
   retainMedia: boolean;
   /** @Aida agentic tool-loop (Vercel AI SDK). Off by default; ASK_AGENTIC=true opts in. */
-  ask: { agentic: boolean };
+  ask: {
+    agentic: boolean;
+    /**
+     * Enqueue @Aida's shadow memory extraction alongside each digest.
+     * OFF by default: it costs a GPU pass per group per digest and nothing reads
+     * the result yet, so it must be opted into for the shadow week.
+     */
+    memoryShadow: boolean;
+  };
   /** Local Langfuse trace UI for the agentic loop. Off by default;
    *  LANGFUSE_ENABLED=true starts the OTel exporter (see src/observability/langfuse.ts).
    *  baseUrl is pinned (NOT left to the SDK's cloud default) and enforced local
@@ -250,7 +258,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       // 6 h between sweeps.
       intervalMs: Number(env.MEDIA_PURGE_INTERVAL_MS ?? 21_600_000),
     },
-    ask: { agentic: env.ASK_AGENTIC === "true" },
+    ask: {
+      agentic: env.ASK_AGENTIC === "true",
+      memoryShadow: env.ASK_MEMORY_SHADOW === "true",
+    },
     langfuse: {
       enabled: env.LANGFUSE_ENABLED === "true",
       // Pinned local default — NOT the SDK's cloud fallback. A non-local value

@@ -67,6 +67,10 @@ export async function answerQuestion(
     asOf?: Date;
     excludeExternalId?: string;
     askerName?: string;
+    /** Who is in this group — see prompt.ts rosterLine(). Loaded by the caller
+     *  (the composition root) so this function stays DB-free beyond retrieval
+     *  and the eval harness can pin a fixed roster. */
+    roster?: string[];
   },
 ): Promise<CitedAnswer> {
   const k = deps.retrieveK ?? DEFAULT_K;
@@ -104,7 +108,10 @@ export async function answerQuestion(
 
   const context = fitToBudget(input.question, deduped, budget, window);
   const answer = await deps.llm.answer(
-    buildAskPrompt(input.question, context, window, { askerName: input.askerName }),
+    buildAskPrompt(input.question, context, window, {
+      askerName: input.askerName,
+      roster: input.roster,
+    }),
   );
   const trimmed = answer.trim();
   if (trimmed.length === 0) return { text: NOT_IN_CHAT, citedIds: [] };

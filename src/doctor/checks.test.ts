@@ -88,6 +88,7 @@ describe("checkEntries", () => {
       "Python + faster-whisper importable",
       "ffmpeg on PATH",
       // App health last — every infra check above is a prerequisite for it.
+      "@Aida roster resolvable",
       "@Aida embeddings current",
     ]);
     for (const e of entries) expect(e.fix.length).toBeGreaterThan(0);
@@ -115,13 +116,23 @@ describe("checkEntries", () => {
     for (const e of others) expect(e.onProbeError).toBeUndefined();
   });
 
-  it("marks the @Aida embedding check advisory, not a hard failure", () => {
+  it("marks BOTH @Aida app-health checks advisory, not hard failures", () => {
     // A stale sweep degrades @Aida without breaking Sumbox — and in split-dev it
     // is simply what "the worker isn't running" looks like. Failing hard there
-    // would make the doctor cry wolf every time only dev-ui is up.
-    const aida = checkEntries(fakeConfig()).find((e) => e.name.startsWith("@Aida"));
-    expect(aida?.level).toBe("warn");
-    expect(aida?.onProbeError).toBe("pass");
+    // would make the doctor cry wolf every time only dev-ui is up. The same
+    // reasoning covers the roster: an unresolvable roster costs her the
+    // people-safety member branch, it does not stop her answering.
+    //
+    // Matched by EXACT name, not `startsWith("@Aida")`: with two @Aida entries a
+    // prefix find() silently tests whichever is listed first, so this assertion
+    // would quietly stop covering the embedding check it was written for.
+    const entries = checkEntries(fakeConfig());
+    for (const name of ["@Aida roster resolvable", "@Aida embeddings current"]) {
+      const aida = entries.find((e) => e.name === name);
+      expect(aida, name).toBeDefined();
+      expect(aida?.level).toBe("warn");
+      expect(aida?.onProbeError).toBe("pass");
+    }
   });
 });
 
@@ -165,6 +176,6 @@ describe("runChecks", () => {
 
   it("defaultChecks wires the full table into runnable thunks", async () => {
     const checks = defaultChecks(fakeConfig());
-    expect(checks).toHaveLength(9);
+    expect(checks).toHaveLength(10);
   });
 });

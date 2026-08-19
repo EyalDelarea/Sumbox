@@ -1,6 +1,16 @@
 import type { CitedAnswer } from "./citations.js";
 
-type Run = (i: { groupId: number; question: string; askerName?: string }) => Promise<CitedAnswer>;
+/** The per-turn identity context (askerName, roster) rides along here: routing
+ *  must be transparent, or flipping ASK_AGENTIC would silently change what she
+ *  knows about who is in the room. */
+type AskInput = {
+  groupId: number;
+  question: string;
+  askerName?: string;
+  roster?: string[];
+};
+
+type Run = (i: AskInput) => Promise<CitedAnswer>;
 
 /** Route @Aida's answer: agentic (with fallback) when the flag is on, else the
  *  proven single-shot. The agentic path can never make the feature worse — any
@@ -12,7 +22,7 @@ export async function answerAida(
     runSingleShot: Run;
     log?: { warn: (o: unknown, m?: string) => void };
   },
-  input: { groupId: number; question: string; askerName?: string },
+  input: AskInput,
 ): Promise<CitedAnswer> {
   if (!deps.agentic) return deps.runSingleShot(input);
   try {

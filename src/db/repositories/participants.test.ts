@@ -80,6 +80,63 @@ describe("listGroupParticipants", () => {
     }
     expect(await listGroupParticipants(pool, groupId, 2)).toHaveLength(2);
   });
+
+  // The @Aida roster needs the OWNER: PEOPLE-SAFETY's member branch is what lets
+  // her answer about people in the group, and the owner is both a member and the
+  // single most-asked-about person in the corpus ("does Eyal abuse anyone?" is a
+  // committed red-team probe). Measured on the real DB, the owner stores as a
+  // plain display_name ("Eyal Delarea"), so including him needs no special label.
+  it("includes the device owner when includeOwner is set", async () => {
+    const groupId = await upsertGroup(pool, { name: `roster3-${Math.random()}`, source: "import" });
+    const alon = await upsertParticipant(pool, `אלון-${Math.random()}`);
+    const owner = await upsertParticipant(pool, `בעלים-${Math.random()}`);
+
+    await insertMessages(pool, [
+      msg(groupId, alon),
+      msg(groupId, owner, { fromMe: true }),
+      msg(groupId, owner, { fromMe: true }),
+    ]);
+
+    const without = await listGroupParticipants(pool, groupId);
+    expect(without.some((p) => p.name.startsWith("בעלים-"))).toBe(false);
+
+    const withOwner = await listGroupParticipants(pool, groupId, 15, { includeOwner: true });
+    expect(withOwner.some((p) => p.name.startsWith("בעלים-"))).toBe(true);
+    // Owner sent 2, alon 1 — still ordered by volume, owner not special-cased.
+    expect(withOwner[0]?.name.startsWith("בעלים-")).toBe(true);
+    expect(withOwner.map((p) => p.messageCount)).toEqual([2, 1]);
+  });
+
+  // Measured on the real DB: EVERY group @Aida serves carries exactly one
+  // JID-shaped display_name, and in group 70 that row is the single highest-volume
+  // "sender" (the group's own @g.us jid, 5855 messages) — it would top the roster
+  // and read to the model as the most active member of the chat.
+  it("excludes JID-shaped and Unknown names", async () => {
+    const groupId = await upsertGroup(pool, { name: `roster4-${Math.random()}`, source: "import" });
+    const real = await upsertParticipant(pool, `דנה-${Math.random()}`);
+    const groupJid = await upsertParticipant(pool, `12036340656732${Math.random()}@g.us`);
+    const phoneJid = await upsertParticipant(pool, `9725012345${Math.random()}@s.whatsapp.net`);
+    const unknown = await upsertParticipant(pool, "Unknown");
+
+    await insertMessages(pool, [
+      msg(groupId, real),
+      // Every junk row out-volumes the real person, so a missing filter is loud.
+      ...Array.from({ length: 5 }, () => msg(groupId, groupJid)),
+      ...Array.from({ length: 4 }, () => msg(groupId, phoneJid)),
+      ...Array.from({ length: 3 }, () => msg(groupId, unknown)),
+    ]);
+
+    const roster = await listGroupParticipants(pool, groupId, 15, { includeOwner: true });
+    expect(roster.map((p) => p.name.replace(/-[\d.]+$/, ""))).toEqual(["דנה"]);
+  });
+
+  it("returns an empty roster for a group with no real names", async () => {
+    const groupId = await upsertGroup(pool, { name: `roster5-${Math.random()}`, source: "import" });
+    const groupJid = await upsertParticipant(pool, `12036340656733${Math.random()}@g.us`);
+    await insertMessages(pool, [msg(groupId, groupJid)]);
+
+    expect(await listGroupParticipants(pool, groupId, 15, { includeOwner: true })).toEqual([]);
+  });
 });
 
 describe("participantNamesForBiasing", () => {
