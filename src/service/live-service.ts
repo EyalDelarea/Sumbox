@@ -366,7 +366,13 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
                       }),
                       telemetry: cfg.langfuse.enabled,
                       // Group a chat's @Aida turns; tag as live vs sandbox runs.
-                      trace: { sessionId: `group:${i.groupId}`, tags: ["aida", "live"] },
+                      trace: {
+                        sessionId: `group:${i.groupId}`,
+                        // Who asked. Without it every live trace was anonymous, so
+                        // "show me everything Royi asked her" was not expressible.
+                        ...(i.askerName ? { userId: i.askerName } : {}),
+                        tags: ["aida", "live"],
+                      },
                     },
                     i,
                   ),
@@ -411,6 +417,11 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
   let telemetry: { shutdown: () => Promise<void> } | null = null;
   const telemetryEndpoint = deps.telemetry;
   if (telemetryEndpoint) {
+    // Live traffic used to land in Langfuse's `default` environment, mixed in with
+    // everything else — only ask-sandbox and aida-eval ever set one. Naming it
+    // makes "what did she actually do in the group" a filter rather than a hunt.
+    // Set BEFORE the exporter starts: the Langfuse SDK reads this at init.
+    process.env.LANGFUSE_TRACING_ENVIRONMENT ??= "live";
     void (async () => {
       const { createLangfuseTelemetry, defaultLangfuseDeps } = await import(
         "../observability/langfuse.js"
