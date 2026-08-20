@@ -22,14 +22,14 @@
     "check": "biome check src"
   },
   "dependencies": {
-    "@langfuse/client": "^5.10.0",
+    "@langfuse/client": "^5.10.1",
     "@langfuse/core": "^5.10.0",
-    "@langfuse/otel": "^5.10.0",
+    "@langfuse/otel": "^5.10.1",
     "@langfuse/tracing": "^5.10.0",
-    "@langfuse/vercel-ai-sdk": "^5.10.0",
+    "@langfuse/vercel-ai-sdk": "^5.10.1",
     "@opentelemetry/sdk-node": "^0.221.0",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
-    "ai": "^7.0.29",
+    "ai": "^7.0.66",
     "amqplib": "^2.0.1",
     "commander": "^15.0.0",
     "dotenv": "^17.2.3",
@@ -41,12 +41,12 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.7",
+    "@biomejs/biome": "2.5.8",
     "@testcontainers/postgresql": "^12.1.0",
     "@testcontainers/rabbitmq": "^12.1.0",
     "@types/amqplib": "^0.10.7",
     "@types/node": "^26.2.0",
-    "@types/pg": "^8.21.0",
+    "@types/pg": "^8.23.0",
     "@types/unzipper": "^0.10.11",
     "node-pg-migrate": "^9.0.0",
     "pino-pretty": "^13.0.0",
