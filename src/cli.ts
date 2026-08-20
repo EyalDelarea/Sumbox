@@ -791,6 +791,103 @@ program
   );
 
 program
+  .command("aida-measure")
+  .description("Replay real questions N times and report per-metric mean + observed spread")
+  .option("--group <id>", "Restrict to one group (default: every group she has answered in)")
+  .option("--runs <n>", "Passes over the corpus. Fewer than 2 cannot resolve anything.", "3")
+  .option("--limit <n>", "Cap corpus size (a smoke run)")
+  .option("--save <file>", "Write the per-run scores as JSON, to diff against a later arm")
+  .option("--against <file>", "Compare this run to a saved arm and print a verdict table")
+  .action(
+    async (options: {
+      group?: string;
+      runs?: string;
+      limit?: string;
+      save?: string;
+      against?: string;
+    }) => {
+      const { createDbClient } = await import("./db/client.js");
+      const { OllamaEmbedder } = await import("./ask/embedder.js");
+      const { makeAgenticModel } = await import("./ask/ai-model.js");
+      const { buildCorpus } = await import("./eval/corpus.js");
+      const { runRepeated } = await import("./eval/run-labelfree.js");
+      const { summarize, compare, formatComparison } = await import("./eval/repeat.js");
+      const { LABEL_FREE_METRICS } = await import("./eval/labelfree.js");
+      const fs = await import("node:fs");
+
+      const config = loadConfig();
+      const pool = createDbClient();
+      try {
+        const corpus = await buildCorpus(pool, {
+          ...(options.group ? { groupId: Number(options.group) } : {}),
+          ...(options.limit ? { limit: Number(options.limit) } : {}),
+        });
+        if (corpus.length === 0) {
+          process.stdout.write("No questions found — has @Aida answered in this group?\n");
+          return;
+        }
+        const runs = Number(options.runs ?? 3);
+        process.stdout.write(
+          `${corpus.length} question(s) × ${runs} run(s). Read-only — nothing is sent.\n`,
+        );
+        if (runs < 2) {
+          // Stated up front rather than discovered in the verdict column, because
+          // a single run is exactly how a noise artefact gets reported as a finding.
+          process.stdout.write(
+            "⚠ --runs 1 cannot resolve any difference: one sample has no spread.\n",
+          );
+        }
+
+        const arm = await runRepeated(
+          {
+            pool,
+            embedder: new OllamaEmbedder({
+              host: config.embedding.ollamaHost,
+              model: config.embedding.model,
+              dim: config.embedding.dim,
+            }),
+            model: makeAgenticModel({
+              host: config.summarization.ollamaHost,
+              model: config.summarization.model,
+            }),
+          },
+          corpus,
+          runs,
+        );
+
+        process.stdout.write(
+          "\nmetric                mean        min         max         spread\n",
+        );
+        for (const s of summarize(arm)) {
+          const n = (x: number) => (Number.isInteger(x) ? String(x) : x.toFixed(3));
+          process.stdout.write(
+            `${s.metric.padEnd(20)}  ${n(s.mean).padEnd(10)}  ${n(s.min).padEnd(10)}  ` +
+              `${n(s.max).padEnd(10)}  ${n(s.spread)}\n`,
+          );
+        }
+
+        if (options.save) {
+          fs.writeFileSync(options.save, JSON.stringify(arm, null, 2));
+          process.stdout.write(`\nSaved to ${options.save}\n`);
+        }
+        if (options.against) {
+          const before = JSON.parse(fs.readFileSync(options.against, "utf8"));
+          const lower = new Set(
+            LABEL_FREE_METRICS.filter((m) => m.lowerIsBetter).map((m) => m.name),
+          );
+          process.stdout.write(`\nvs ${options.against}:\n\n`);
+          process.stdout.write(`${formatComparison(compare(before, arm), lower)}\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`Error: aida-measure failed: ${(err as Error).message}\n`);
+        process.exit(1);
+      } finally {
+        await pool.end();
+      }
+    },
+  );
+
+program
   .command("ask-search")
   .description("Probe: semantic-search a group's history (verifies retrieval + scoping)")
   .argument("<group>", "Group display name")
