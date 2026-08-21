@@ -68,11 +68,9 @@ describe("maybeHandleAskCommand", () => {
     const d = deps();
     const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d);
     expect(ok).toBe(true);
-    expect(d.answer).toHaveBeenCalledWith({
-      groupId,
-      question: "מתי נפגשים?",
-      askerName: expect.any(String),
-    });
+    // No askerName: askMsg carries no pushName, so the sender is unresolvable and
+    // the asker line is omitted rather than guessed. See the raw-jid test below.
+    expect(d.answer).toHaveBeenCalledWith({ groupId, question: "מתי נפגשים?" });
     expect(d.sendText).toHaveBeenCalledWith(JID, "לפי השיחה, נפגשים ב-21:00.", expect.anything());
   });
 
@@ -262,13 +260,30 @@ describe("maybeHandleAskCommand", () => {
     // askMsg carries no pushName and no key.participant, so mapWaMessage falls
     // all the way back to remoteJid — the GROUP's own jid. Unresolved, that
     // reached both the prompt's asker line and the Langfuse trace userId;
-    // observed live as user=120363406567322025@g.us, a group presented as a
-    // person. resolveSenderName collapses any non-phone jid to the unknown label.
+    // observed live as user=120363406567322025@g.us, a group presented as a person.
     const d = deps();
     await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d);
     const { askerName } = (d.answer as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(askerName).not.toContain("@");
-    expect(askerName).toBe(UNKNOWN_SENDER);
+    // OMITTED, not collapsed to UNKNOWN_SENDER. renderLine labels every
+    // unresolved transcript participant with that same string, so sending it as
+    // the asker would let askerLine resolve "מה אמרתי" to a DIFFERENT unknown
+    // participant's messages. Failing to resolve is safe; resolving to the wrong
+    // person is not.
+    expect(askerName).toBeUndefined();
+  });
+
+  it("still names a resolvable asker, and never the unknown label", async () => {
+    const d = deps();
+    const msg = {
+      key: { id: "m-known", remoteJid: JID, fromMe: false },
+      message: { conversation: "@אידה מה אמרתי?" },
+      pushName: "Eyal Delarea",
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    } as unknown as WAMessage;
+    await maybeHandleAskCommand(msg, d);
+    const { askerName } = (d.answer as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(askerName).toBe("Eyal Delarea");
+    expect(askerName).not.toBe(UNKNOWN_SENDER);
   });
 
   it("ignores a message with no @Aida tag", async () => {

@@ -18,7 +18,7 @@ import type { CitedAnswer } from "../ask/citations.js";
 import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { resolveCitationSource } from "../db/repositories/citation-sources.js";
 import { countPendingEnrichment } from "../db/repositories/pending-enrichment.js";
-import { resolveSenderName } from "../summarization/sender-name.js";
+import { resolveSenderName, UNKNOWN_SENDER } from "../summarization/sender-name.js";
 import { matchAskTrigger } from "./ask-trigger.js";
 import type { GroupTurnQueue } from "./group-turn-queue.js";
 import { mapWaMessage } from "./message-mapper.js";
@@ -380,15 +380,21 @@ export async function maybeHandleAskCommand(
     // the transcript names every speaker, but nothing else says which of them
     // is the "I" doing the asking — measured live as a false denial on a fact
     // that was in her window.
+    const asker = resolveSenderName(mapped.senderName);
     const { text: answer, citedIds } = await deps.answer({
       groupId,
       question,
-      // Resolved, not raw. senderName falls back to the JID when no pushName was
-      // ever delivered, and unresolved it reached BOTH the prompt's asker line and
-      // the Langfuse trace userId — observed live as
-      // user=120363406567322025@g.us, the group's own jid presented as a person.
-      // resolveSenderName maps a JID to the "unknown participant" label instead.
-      askerName: resolveSenderName(mapped.senderName),
+      // Resolved, not raw — senderName falls back to the jid when no pushName was
+      // ever delivered (observed live as user=120363406567322025@g.us, the
+      // group's own jid presented as a person).
+      //
+      // But an UNRESOLVABLE asker is omitted rather than sent as the unknown
+      // label. renderLine puts every unresolved transcript participant under that
+      // same "משתתף לא ידוע" string, and askerLine would then assert the asker IS
+      // that person — so "מה אמרתי על X" could resolve to a different unknown
+      // participant's messages. Failing to resolve is safe; resolving to the
+      // wrong person is not. askerLine already treats absent as "no asker line".
+      ...(asker === UNKNOWN_SENDER ? {} : { askerName: asker }),
     });
     const source = await resolveQuotedSource(deps, { groupId, jid, citedIds });
     const sent = await deps.sendText(jid, answer, { quoted: source ?? msg });
@@ -421,7 +427,21 @@ export async function maybeHandleAskCommand(
     deps.log?.warn({ err, groupId }, "@Aida: failed");
     await react("❌");
     try {
-      await deps.sendText(jid, ERROR_REPLY, { quoted: msg });
+      const sent = await deps.sendText(jid, ERROR_REPLY, { quoted: msg });
+      // The error reply is recorded too, for the same reason the success path
+      // records: every message she sends must be identifiable as hers.
+      //
+      // Two holes when it was not. (a) A user who swipe-replies to the error to
+      // retry was silently ignored — the reply-branch requires the quoted id to
+      // be hers. (b) If the self-reply guard's own isAidaMessage lookup throws,
+      // we land here quoting her echo; that error reply's echo then passed the
+      // guard (its id was never recorded) while satisfying the reply-branch (the
+      // quoted id IS hers), and she answered her own error text — re-entering the
+      // loop through the guard's failure path.
+      const errorId = sent?.key?.id;
+      if (errorId && groupId !== null) {
+        await recordAidaMessage(deps.pool, { groupId, externalId: errorId }).catch(() => {});
+      }
     } catch {
       /* best-effort */
     }
