@@ -3,6 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { upsertGroup } from "../db/repositories/groups.js";
+import { UNKNOWN_SENDER } from "../summarization/sender-name.js";
 import { createTestDatabase } from "../test/db.js";
 import { type AskCommandDeps, maybeHandleAskCommand } from "./ask-command.js";
 import { GroupTurnQueue } from "./group-turn-queue.js";
@@ -255,6 +256,19 @@ describe("maybeHandleAskCommand", () => {
     } as unknown as WAMessage;
     await maybeHandleAskCommand(msg, d);
     expect(d.answer).toHaveBeenCalledWith(expect.objectContaining({ askerName: "Eyal Delarea" }));
+  });
+
+  it("never hands a raw jid to the answer path as the asker", async () => {
+    // askMsg carries no pushName and no key.participant, so mapWaMessage falls
+    // all the way back to remoteJid — the GROUP's own jid. Unresolved, that
+    // reached both the prompt's asker line and the Langfuse trace userId;
+    // observed live as user=120363406567322025@g.us, a group presented as a
+    // person. resolveSenderName collapses any non-phone jid to the unknown label.
+    const d = deps();
+    await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d);
+    const { askerName } = (d.answer as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(askerName).not.toContain("@");
+    expect(askerName).toBe(UNKNOWN_SENDER);
   });
 
   it("ignores a message with no @Aida tag", async () => {
