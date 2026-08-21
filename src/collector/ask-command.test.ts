@@ -31,9 +31,9 @@ function askMsg(body: string, jid = JID, tsSec = Date.now() / 1000): WAMessage {
 }
 
 /** A reply quoting `quotedId`, exactly as Baileys shapes a swipe-reply. */
-function replyMsg(body: string, quotedId: string, jid = JID): WAMessage {
+function replyMsg(body: string, quotedId: string, jid = JID, id = "r1"): WAMessage {
   return {
-    key: { id: "r1", remoteJid: jid, fromMe: false },
+    key: { id, remoteJid: jid, fromMe: false },
     message: { extendedTextMessage: { text: body, contextInfo: { stanzaId: quotedId } } },
     messageTimestamp: Math.floor(Date.now() / 1000),
   } as unknown as WAMessage;
@@ -506,6 +506,36 @@ describe("reply-threading", () => {
     expect(d.answer).toHaveBeenCalledWith(
       expect.objectContaining({ groupId, question: "ומה לגבי אתמול?" }),
     );
+  });
+
+  it("does NOT answer her OWN message echoed back — the self-reply loop", async () => {
+    // Observed live 2026-08-20: five self-replies in three minutes, each
+    // "question" being her own previous answer.
+    //
+    // The loop: she posts quoting her last post → WhatsApp echoes it back to the
+    // collector → the reply-branch saw the QUOTED message was hers and treated
+    // the echo as a question → she answered → that answer was recorded as hers
+    // and quoted the previous one → round again. Latent until summary posts
+    // started being recorded in aida_messages, at which point her own posts began
+    // satisfying the branch.
+    await recordAidaMessage(pool, { groupId, externalId: "her-earlier-post" });
+    await recordAidaMessage(pool, { groupId, externalId: "her-echo-id" }); // the echo itself
+    const d = deps();
+    const ok = await maybeHandleAskCommand(
+      replyMsg("תכף תכף... תשובה קודמת שלי", "her-earlier-post", RJID, "her-echo-id"),
+      d,
+    );
+    expect(ok).toBe(false);
+    expect(d.answer).not.toHaveBeenCalled();
+  });
+
+  it("still answers the OWNER's message, which is also from_me", async () => {
+    // from_me is deliberately NOT the test: it covers the owner's own messages,
+    // and those must keep waking her.
+    await recordAidaMessage(pool, { groupId, externalId: "hers-again" });
+    const d = deps();
+    const ok = await maybeHandleAskCommand(replyMsg("ומה לגבי מחר?", "hers-again", RJID), d);
+    expect(ok).toBe(true);
   });
 
   it("does NOT fire on a reply to someone else's message", async () => {

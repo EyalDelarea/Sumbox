@@ -296,6 +296,33 @@ export async function maybeHandleAskCommand(
     groupId = Number(group.id);
 
     /**
+     * NEVER answer her own message.
+     *
+     * Measured live on 2026-08-20: five self-replies in three minutes, each
+     * "question" being her own previous answer. The loop is:
+     *   she posts, quoting her last post  →  WhatsApp echoes it back to the
+     *   collector  →  the reply-branch below sees the QUOTED message is hers and
+     *   treats the echo as a question  →  she answers  →  that answer is recorded
+     *   as hers and quotes the previous one  →  round again.
+     *
+     * The reply-branch only ever checked the QUOTED message, which was safe until
+     * summary posts started being recorded in aida_messages — then her own posts
+     * began satisfying it. Checking the INCOMING message closes the loop at its
+     * source and is right regardless: whatever she is replying to, an echo of her
+     * own words is never a question addressed to her.
+     *
+     * `from_me` is deliberately NOT the test — it is also true for the owner's
+     * own messages, and those must still be able to wake her.
+     */
+    if (
+      mapped.externalId &&
+      (await isAidaMessage(deps.pool, { groupId, externalId: mapped.externalId }))
+    ) {
+      deps.log?.info({ groupId }, "@Aida: own message echoed back, skipping");
+      return false;
+    }
+
+    /**
      * Resolve WHAT she was asked, and whether this message is for her at all.
      *
      * Two ways in:
