@@ -33,7 +33,9 @@ export type RedteamRunDeps = {
   /**
    * The asker fed to the prompt. Production always has one, so `askerLine` is
    * always in the shipping prompt; omitting it here scored a prompt that never
-   * ships. Injectable so a test can pin it.
+   * ships. Defaults to the first REAL roster member — an invented name would not
+   * be on the roster, and PEOPLE-SAFETY tells her to treat anyone not on that
+   * list as a non-member, which is a different prompt again. Injectable for tests.
    */
   askerName?: string;
   answer?: typeof answerAgentic;
@@ -61,6 +63,7 @@ export async function runRedteamScored(deps: RedteamRunDeps, runs: number): Prom
   const answer = deps.answer ?? answerAgentic;
   const rosterFor = deps.roster ?? ((g: number) => buildGroupRoster(deps.pool, g));
   const roster = await rosterFor(deps.group);
+  const askerName = deps.askerName ?? roster[0];
 
   const graded: ProbeRun[] = [];
   const manual = new Map<string, string[]>();
@@ -76,7 +79,7 @@ export async function runRedteamScored(deps: RedteamRunDeps, runs: number): Prom
             groupId: deps.group,
             question: probe.question,
             roster,
-            ...(deps.askerName ? { askerName: deps.askerName } : {}),
+            ...(askerName ? { askerName } : {}),
           },
         );
         text = out.text;

@@ -1,7 +1,7 @@
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { recordAidaMessage } from "../db/repositories/aida-messages.js";
+import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { upsertGroup } from "../db/repositories/groups.js";
 import { UNKNOWN_SENDER } from "../summarization/sender-name.js";
 import { createTestDatabase } from "../test/db.js";
@@ -535,6 +535,30 @@ describe("reply-threading", () => {
     expect(d.answer).toHaveBeenCalledWith(
       expect.objectContaining({ groupId, question: "ומה לגבי אתמול?" }),
     );
+  });
+
+  it("records the ERROR reply as hers, so a retry-reply to it wakes her", async () => {
+    // A distinct sendText id is load-bearing. The default harness returns "s1"
+    // for every test and the success-path test already inserts ("s1", …) for this
+    // same groupId; recordAidaMessage is ON CONFLICT DO NOTHING, so asserting on
+    // "s1" would pass with the production code deleted.
+    const d = deps({
+      answer: vi.fn(async () => {
+        throw new Error("ollama down");
+      }),
+      sendText: vi.fn(async () => ({ key: { id: "err-1" } }) as WAMessage),
+    });
+    const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?", RJID), d);
+    expect(ok).toBe(false);
+    expect(await isAidaMessage(pool, { groupId, externalId: "err-1" })).toBe(true);
+
+    // The point of recording it: a swipe-reply to that error is a retry, and the
+    // reply-branch requires the quoted id to be hers. Un-recorded, it was ignored.
+    const d2 = deps();
+    expect(await maybeHandleAskCommand(replyMsg("נסי שוב", "err-1", RJID, "retry-1"), d2)).toBe(
+      true,
+    );
+    expect(d2.answer).toHaveBeenCalled();
   });
 
   it("does NOT answer her OWN message echoed back — the self-reply loop", async () => {

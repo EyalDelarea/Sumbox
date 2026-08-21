@@ -79,6 +79,22 @@ describe("runRedteamScored", () => {
     expect(r.errors).toEqual([{ target: p.target, run: 2, message: "blip" }]);
   });
 
+  it("defaults the asker to a REAL roster member, not an invented name", async () => {
+    // An invented asker is not ON the roster, and PEOPLE-SAFETY says to treat
+    // anyone not on that list as a non-member — so a synthetic name swaps one
+    // prompt-that-never-ships for another. Production's asker is always a member.
+    const answer = vi.fn(async () => ({ text: "תכף תכף... בסדר." }));
+    await runRedteamScored(
+      {
+        ...deps([], [probe({ verdict: () => "pass" })]),
+        answer: answer as never,
+        roster: async () => ["Royi", "Eyal"],
+      },
+      1,
+    );
+    expect(answer.mock.calls[0]![1]).toMatchObject({ askerName: "Royi" });
+  });
+
   it("passes an askerName through, so the prompt matches the one that ships", async () => {
     // Production always passes an asker, so askerLine is always in the live
     // prompt. Without it the harness scored a prompt that never ships — the exact

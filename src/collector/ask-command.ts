@@ -440,7 +440,16 @@ export async function maybeHandleAskCommand(
       // loop through the guard's failure path.
       const errorId = sent?.key?.id;
       if (errorId && groupId !== null) {
-        await recordAidaMessage(deps.pool, { groupId, externalId: errorId }).catch(() => {});
+        // Logged, not swallowed. The scenario this record exists for is a pool
+        // failure inside the guard's own isAidaMessage — and this write uses that
+        // same pool, so it is exactly the case most likely to fail. Silently, the
+        // loop it claims to close stays open with nothing in the log to say so.
+        await recordAidaMessage(deps.pool, { groupId, externalId: errorId }).catch((e) =>
+          deps.log?.warn(
+            { err: e, groupId, errorId },
+            "@Aida: failed to record own error reply — a reply to it will not wake her",
+          ),
+        );
       }
     } catch {
       /* best-effort */

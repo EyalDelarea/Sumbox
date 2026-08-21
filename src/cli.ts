@@ -887,13 +887,6 @@ program
     },
   );
 
-/**
- * A fixed, obviously-synthetic asker for the red-team harness. Production always
- * passes one, so the prompt always carries `askerLine`; a constant keeps runs
- * comparable across arms.
- */
-const REDTEAM_ASKER = "בודק אדום";
-
 program
   .command("aida-redteam")
   .description("Run the red-team probes N times through the AGENTIC path and score them")
@@ -931,10 +924,10 @@ program
             model: config.summarization.model,
           }),
           group: Number(options.group),
-          // Production always passes an asker, so askerLine is always present in
-          // the shipping prompt. Without it this harness scores a prompt that
-          // never ships — the exact complaint the harness exists to answer.
-          askerName: REDTEAM_ASKER,
+          // askerName is left to the runner, which defaults it to the first real
+          // roster member. An invented name would not be ON the roster, and
+          // PEOPLE-SAFETY says to treat anyone not on that list as a non-member —
+          // so a synthetic asker swaps one prompt-that-never-ships for another.
           ...(options.verbose
             ? {
                 onAnswer: (r: { target: string; run: number; answer: string; verdict?: string }) =>
@@ -947,12 +940,30 @@ program
         runs,
       );
 
+      // Errored runs are counted PER TARGET and shown on the row itself. Printing
+      // them only in a list below let a row read "1.00  2/2" with no flag when a
+      // third run had crashed — a clean sweep the suite did not measure, one line
+      // away from the fix for it.
+      const erroredBy = new Map<string, number>();
+      for (const e of report.errors) erroredBy.set(e.target, (erroredBy.get(e.target) ?? 0) + 1);
+
       process.stdout.write("\nprobe                      pass rate    runs\n");
       for (const sc of report.scores) {
-        const flag = sc.passRate === 1 ? "" : sc.passRate === 0 ? "   ✗ BROKEN" : "   ⚠ flaky";
+        const errored = erroredBy.get(sc.target) ?? 0;
+        const flag = sc.passRate === 0 ? "   ✗ BROKEN" : sc.passRate < 1 ? "   ⚠ flaky" : "";
+        const note = errored ? `   ⚠ ${errored} errored, not scored` : "";
         process.stdout.write(
-          `${sc.target.padEnd(26)} ${sc.passRate.toFixed(2).padEnd(12)} ${sc.passed}/${sc.runs}${flag}\n`,
+          `${sc.target.padEnd(26)} ${sc.passRate.toFixed(2).padEnd(12)} ${sc.passed}/${sc.runs}${flag}${note}\n`,
         );
+      }
+      // A probe that errored on EVERY run has no score row at all, so it is named
+      // here or it vanishes from the report entirely.
+      for (const [target, n] of erroredBy) {
+        if (!report.scores.some((sc) => sc.target === target)) {
+          process.stdout.write(
+            `${target.padEnd(26)} ${"—".padEnd(12)} 0/${n}   ✗ ALL RUNS ERRORED\n`,
+          );
+        }
       }
       const broken = report.scores.filter((s) => s.passRate < 1).length;
       process.stdout.write(
@@ -970,6 +981,11 @@ program
           process.stdout.write(`  ${e.target} #${e.run}: ${e.message}\n`);
         }
       }
+      // The EXIT CODE is the machine-readable half of the report, and it was
+      // always 0 — so a wrapper reading only the status saw green while guards
+      // were BROKEN, or while every probe had crashed. exitCode (not exit()) so
+      // the `finally` still closes the pool.
+      if (broken || report.errors.length) process.exitCode = 1;
       if (report.manual.length) {
         // Named explicitly rather than silently omitted — an unscored probe that
         // nobody reads is indistinguishable from one that passes.
