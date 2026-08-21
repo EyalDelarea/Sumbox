@@ -888,6 +888,122 @@ program
   );
 
 program
+  .command("aida-redteam")
+  .description("Run the red-team probes N times through the AGENTIC path and score them")
+  .requiredOption("--group <id>", "Group to run against (its real roster and history are used)")
+  .option("--runs <n>", "Passes over the probe set", "3")
+  .option("--verbose", "Print every answer, not just the scores")
+  .action(async (options: { group: string; runs?: string; verbose?: boolean }) => {
+    const { createDbClient } = await import("./db/client.js");
+    const { OllamaEmbedder } = await import("./ask/embedder.js");
+    const { makeAgenticModel } = await import("./ask/ai-model.js");
+    const { runRedteamScored } = await import("./ops/redteam-run.js");
+    const config = loadConfig();
+    const runs = Number(options.runs ?? 3);
+    // Checked BEFORE any work. `Number("abc")` is NaN, `run <= NaN` is false, so
+    // the loop never ran, `scores` came back empty and the command printed "All
+    // scored guards held on every run" at exit 0 — a green security report from a
+    // suite that never executed. Same for `--runs 0`.
+    if (!Number.isInteger(runs) || runs < 1) {
+      process.stderr.write(`Error: --runs must be a positive integer (got "${options.runs}").\n`);
+      process.exit(1);
+    }
+    const pool = createDbClient();
+    try {
+      process.stdout.write(`Red-team × ${runs} run(s) on the agentic path. Read-only.\n\n`);
+      const report = await runRedteamScored(
+        {
+          pool,
+          embedder: new OllamaEmbedder({
+            host: config.embedding.ollamaHost,
+            model: config.embedding.model,
+            dim: config.embedding.dim,
+          }),
+          model: makeAgenticModel({
+            host: config.summarization.ollamaHost,
+            model: config.summarization.model,
+          }),
+          group: Number(options.group),
+          // askerName is left to the runner, which defaults it to the first real
+          // roster member. An invented name would not be ON the roster, and
+          // PEOPLE-SAFETY says to treat anyone not on that list as a non-member —
+          // so a synthetic asker swaps one prompt-that-never-ships for another.
+          ...(options.verbose
+            ? {
+                onAnswer: (r: { target: string; run: number; answer: string; verdict?: string }) =>
+                  process.stdout.write(
+                    `  [${r.target} #${r.run}${r.verdict ? ` ${r.verdict}` : ""}] ${r.answer.replace(/\n/g, " ").slice(0, 600)}\n`,
+                  ),
+              }
+            : {}),
+        },
+        runs,
+      );
+
+      // Errored runs are counted PER TARGET and shown on the row itself. Printing
+      // them only in a list below let a row read "1.00  2/2" with no flag when a
+      // third run had crashed — a clean sweep the suite did not measure, one line
+      // away from the fix for it.
+      const erroredBy = new Map<string, number>();
+      for (const e of report.errors) erroredBy.set(e.target, (erroredBy.get(e.target) ?? 0) + 1);
+
+      process.stdout.write("\nprobe                      pass rate    runs\n");
+      for (const sc of report.scores) {
+        const errored = erroredBy.get(sc.target) ?? 0;
+        const flag = sc.passRate === 0 ? "   ✗ BROKEN" : sc.passRate < 1 ? "   ⚠ flaky" : "";
+        const note = errored ? `   ⚠ ${errored} errored, not scored` : "";
+        process.stdout.write(
+          `${sc.target.padEnd(26)} ${sc.passRate.toFixed(2).padEnd(12)} ${sc.passed}/${sc.runs}${flag}${note}\n`,
+        );
+      }
+      // A probe that errored on EVERY run has no score row at all, so it is named
+      // here or it vanishes from the report entirely.
+      for (const [target, n] of erroredBy) {
+        if (!report.scores.some((sc) => sc.target === target)) {
+          process.stdout.write(
+            `${target.padEnd(26)} ${"—".padEnd(12)} 0/${n}   ✗ ALL RUNS ERRORED\n`,
+          );
+        }
+      }
+      const broken = report.scores.filter((s) => s.passRate < 1).length;
+      process.stdout.write(
+        broken
+          ? `\n${broken} guard(s) did not hold on every run.\n`
+          : report.errors.length
+            ? "\nEvery guard that RAN held — but see the errored runs below.\n"
+            : "\nAll scored guards held on every run.\n",
+      );
+      if (report.errors.length) {
+        // Named, never silently dropped: an errored run leaves the denominator
+        // short, and a probe that errored on every run appears in no table at all.
+        process.stdout.write(`\n${report.errors.length} run(s) errored and were NOT scored:\n`);
+        for (const e of report.errors) {
+          process.stdout.write(`  ${e.target} #${e.run}: ${e.message}\n`);
+        }
+      }
+      // The EXIT CODE is the machine-readable half of the report, and it was
+      // always 0 — so a wrapper reading only the status saw green while guards
+      // were BROKEN, or while every probe had crashed. exitCode (not exit()) so
+      // the `finally` still closes the pool.
+      if (broken || report.errors.length) process.exitCode = 1;
+      if (report.manual.length) {
+        // Named explicitly rather than silently omitted — an unscored probe that
+        // nobody reads is indistinguishable from one that passes.
+        process.stdout.write(
+          `\n${report.manual.length} probe(s) need a human read (no mechanical verdict): ` +
+            `${report.manual.map((m) => m.target).join(", ")}\n` +
+            `Re-run with --verbose to see their answers.\n`,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(`Error: aida-redteam failed: ${(err as Error).message}\n`);
+      process.exit(1);
+    } finally {
+      await pool.end();
+    }
+  });
+
+program
   .command("ask-search")
   .description("Probe: semantic-search a group's history (verifies retrieval + scoping)")
   .argument("<group>", "Group display name")

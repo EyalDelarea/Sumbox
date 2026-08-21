@@ -18,6 +18,7 @@ import type { CitedAnswer } from "../ask/citations.js";
 import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { resolveCitationSource } from "../db/repositories/citation-sources.js";
 import { countPendingEnrichment } from "../db/repositories/pending-enrichment.js";
+import { resolveSenderName, UNKNOWN_SENDER } from "../summarization/sender-name.js";
 import { matchAskTrigger } from "./ask-trigger.js";
 import type { GroupTurnQueue } from "./group-turn-queue.js";
 import { mapWaMessage } from "./message-mapper.js";
@@ -296,6 +297,33 @@ export async function maybeHandleAskCommand(
     groupId = Number(group.id);
 
     /**
+     * NEVER answer her own message.
+     *
+     * Measured live on 2026-08-20: five self-replies in three minutes, each
+     * "question" being her own previous answer. The loop is:
+     *   she posts, quoting her last post  →  WhatsApp echoes it back to the
+     *   collector  →  the reply-branch below sees the QUOTED message is hers and
+     *   treats the echo as a question  →  she answers  →  that answer is recorded
+     *   as hers and quotes the previous one  →  round again.
+     *
+     * The reply-branch only ever checked the QUOTED message, which was safe until
+     * summary posts started being recorded in aida_messages — then her own posts
+     * began satisfying it. Checking the INCOMING message closes the loop at its
+     * source and is right regardless: whatever she is replying to, an echo of her
+     * own words is never a question addressed to her.
+     *
+     * `from_me` is deliberately NOT the test — it is also true for the owner's
+     * own messages, and those must still be able to wake her.
+     */
+    if (
+      mapped.externalId &&
+      (await isAidaMessage(deps.pool, { groupId, externalId: mapped.externalId }))
+    ) {
+      deps.log?.info({ groupId }, "@Aida: own message echoed back, skipping");
+      return false;
+    }
+
+    /**
      * Resolve WHAT she was asked, and whether this message is for her at all.
      *
      * Two ways in:
@@ -352,10 +380,21 @@ export async function maybeHandleAskCommand(
     // the transcript names every speaker, but nothing else says which of them
     // is the "I" doing the asking — measured live as a false denial on a fact
     // that was in her window.
+    const asker = resolveSenderName(mapped.senderName);
     const { text: answer, citedIds } = await deps.answer({
       groupId,
       question,
-      askerName: mapped.senderName,
+      // Resolved, not raw — senderName falls back to the jid when no pushName was
+      // ever delivered (observed live as user=120363406567322025@g.us, the
+      // group's own jid presented as a person).
+      //
+      // But an UNRESOLVABLE asker is omitted rather than sent as the unknown
+      // label. renderLine puts every unresolved transcript participant under that
+      // same "משתתף לא ידוע" string, and askerLine would then assert the asker IS
+      // that person — so "מה אמרתי על X" could resolve to a different unknown
+      // participant's messages. Failing to resolve is safe; resolving to the
+      // wrong person is not. askerLine already treats absent as "no asker line".
+      ...(asker === UNKNOWN_SENDER ? {} : { askerName: asker }),
     });
     const source = await resolveQuotedSource(deps, { groupId, jid, citedIds });
     const sent = await deps.sendText(jid, answer, { quoted: source ?? msg });
@@ -388,7 +427,30 @@ export async function maybeHandleAskCommand(
     deps.log?.warn({ err, groupId }, "@Aida: failed");
     await react("❌");
     try {
-      await deps.sendText(jid, ERROR_REPLY, { quoted: msg });
+      const sent = await deps.sendText(jid, ERROR_REPLY, { quoted: msg });
+      // The error reply is recorded too, for the same reason the success path
+      // records: every message she sends must be identifiable as hers.
+      //
+      // Two holes when it was not. (a) A user who swipe-replies to the error to
+      // retry was silently ignored — the reply-branch requires the quoted id to
+      // be hers. (b) If the self-reply guard's own isAidaMessage lookup throws,
+      // we land here quoting her echo; that error reply's echo then passed the
+      // guard (its id was never recorded) while satisfying the reply-branch (the
+      // quoted id IS hers), and she answered her own error text — re-entering the
+      // loop through the guard's failure path.
+      const errorId = sent?.key?.id;
+      if (errorId && groupId !== null) {
+        // Logged, not swallowed. The scenario this record exists for is a pool
+        // failure inside the guard's own isAidaMessage — and this write uses that
+        // same pool, so it is exactly the case most likely to fail. Silently, the
+        // loop it claims to close stays open with nothing in the log to say so.
+        await recordAidaMessage(deps.pool, { groupId, externalId: errorId }).catch((e) =>
+          deps.log?.warn(
+            { err: e, groupId, errorId },
+            "@Aida: failed to record own error reply — a reply to it will not wake her",
+          ),
+        );
+      }
     } catch {
       /* best-effort */
     }

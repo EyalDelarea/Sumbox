@@ -1,8 +1,9 @@
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { recordAidaMessage } from "../db/repositories/aida-messages.js";
+import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { upsertGroup } from "../db/repositories/groups.js";
+import { UNKNOWN_SENDER } from "../summarization/sender-name.js";
 import { createTestDatabase } from "../test/db.js";
 import { type AskCommandDeps, maybeHandleAskCommand } from "./ask-command.js";
 import { GroupTurnQueue } from "./group-turn-queue.js";
@@ -31,9 +32,9 @@ function askMsg(body: string, jid = JID, tsSec = Date.now() / 1000): WAMessage {
 }
 
 /** A reply quoting `quotedId`, exactly as Baileys shapes a swipe-reply. */
-function replyMsg(body: string, quotedId: string, jid = JID): WAMessage {
+function replyMsg(body: string, quotedId: string, jid = JID, id = "r1"): WAMessage {
   return {
-    key: { id: "r1", remoteJid: jid, fromMe: false },
+    key: { id, remoteJid: jid, fromMe: false },
     message: { extendedTextMessage: { text: body, contextInfo: { stanzaId: quotedId } } },
     messageTimestamp: Math.floor(Date.now() / 1000),
   } as unknown as WAMessage;
@@ -67,11 +68,9 @@ describe("maybeHandleAskCommand", () => {
     const d = deps();
     const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d);
     expect(ok).toBe(true);
-    expect(d.answer).toHaveBeenCalledWith({
-      groupId,
-      question: "מתי נפגשים?",
-      askerName: expect.any(String),
-    });
+    // No askerName: askMsg carries no pushName, so the sender is unresolvable and
+    // the asker line is omitted rather than guessed. See the raw-jid test below.
+    expect(d.answer).toHaveBeenCalledWith({ groupId, question: "מתי נפגשים?" });
     expect(d.sendText).toHaveBeenCalledWith(JID, "לפי השיחה, נפגשים ב-21:00.", expect.anything());
   });
 
@@ -255,6 +254,36 @@ describe("maybeHandleAskCommand", () => {
     } as unknown as WAMessage;
     await maybeHandleAskCommand(msg, d);
     expect(d.answer).toHaveBeenCalledWith(expect.objectContaining({ askerName: "Eyal Delarea" }));
+  });
+
+  it("never hands a raw jid to the answer path as the asker", async () => {
+    // askMsg carries no pushName and no key.participant, so mapWaMessage falls
+    // all the way back to remoteJid — the GROUP's own jid. Unresolved, that
+    // reached both the prompt's asker line and the Langfuse trace userId;
+    // observed live as user=120363406567322025@g.us, a group presented as a person.
+    const d = deps();
+    await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?"), d);
+    const { askerName } = (d.answer as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    // OMITTED, not collapsed to UNKNOWN_SENDER. renderLine labels every
+    // unresolved transcript participant with that same string, so sending it as
+    // the asker would let askerLine resolve "מה אמרתי" to a DIFFERENT unknown
+    // participant's messages. Failing to resolve is safe; resolving to the wrong
+    // person is not.
+    expect(askerName).toBeUndefined();
+  });
+
+  it("still names a resolvable asker, and never the unknown label", async () => {
+    const d = deps();
+    const msg = {
+      key: { id: "m-known", remoteJid: JID, fromMe: false },
+      message: { conversation: "@אידה מה אמרתי?" },
+      pushName: "Eyal Delarea",
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    } as unknown as WAMessage;
+    await maybeHandleAskCommand(msg, d);
+    const { askerName } = (d.answer as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(askerName).toBe("Eyal Delarea");
+    expect(askerName).not.toBe(UNKNOWN_SENDER);
   });
 
   it("ignores a message with no @Aida tag", async () => {
@@ -506,6 +535,60 @@ describe("reply-threading", () => {
     expect(d.answer).toHaveBeenCalledWith(
       expect.objectContaining({ groupId, question: "ומה לגבי אתמול?" }),
     );
+  });
+
+  it("records the ERROR reply as hers, so a retry-reply to it wakes her", async () => {
+    // A distinct sendText id is load-bearing. The default harness returns "s1"
+    // for every test and the success-path test already inserts ("s1", …) for this
+    // same groupId; recordAidaMessage is ON CONFLICT DO NOTHING, so asserting on
+    // "s1" would pass with the production code deleted.
+    const d = deps({
+      answer: vi.fn(async () => {
+        throw new Error("ollama down");
+      }),
+      sendText: vi.fn(async () => ({ key: { id: "err-1" } }) as WAMessage),
+    });
+    const ok = await maybeHandleAskCommand(askMsg("@אידה מתי נפגשים?", RJID), d);
+    expect(ok).toBe(false);
+    expect(await isAidaMessage(pool, { groupId, externalId: "err-1" })).toBe(true);
+
+    // The point of recording it: a swipe-reply to that error is a retry, and the
+    // reply-branch requires the quoted id to be hers. Un-recorded, it was ignored.
+    const d2 = deps();
+    expect(await maybeHandleAskCommand(replyMsg("נסי שוב", "err-1", RJID, "retry-1"), d2)).toBe(
+      true,
+    );
+    expect(d2.answer).toHaveBeenCalled();
+  });
+
+  it("does NOT answer her OWN message echoed back — the self-reply loop", async () => {
+    // Observed live 2026-08-20: five self-replies in three minutes, each
+    // "question" being her own previous answer.
+    //
+    // The loop: she posts quoting her last post → WhatsApp echoes it back to the
+    // collector → the reply-branch saw the QUOTED message was hers and treated
+    // the echo as a question → she answered → that answer was recorded as hers
+    // and quoted the previous one → round again. Latent until summary posts
+    // started being recorded in aida_messages, at which point her own posts began
+    // satisfying the branch.
+    await recordAidaMessage(pool, { groupId, externalId: "her-earlier-post" });
+    await recordAidaMessage(pool, { groupId, externalId: "her-echo-id" }); // the echo itself
+    const d = deps();
+    const ok = await maybeHandleAskCommand(
+      replyMsg("תכף תכף... תשובה קודמת שלי", "her-earlier-post", RJID, "her-echo-id"),
+      d,
+    );
+    expect(ok).toBe(false);
+    expect(d.answer).not.toHaveBeenCalled();
+  });
+
+  it("still answers the OWNER's message, which is also from_me", async () => {
+    // from_me is deliberately NOT the test: it covers the owner's own messages,
+    // and those must keep waking her.
+    await recordAidaMessage(pool, { groupId, externalId: "hers-again" });
+    const d = deps();
+    const ok = await maybeHandleAskCommand(replyMsg("ומה לגבי מחר?", "hers-again", RJID), d);
+    expect(ok).toBe(true);
   });
 
   it("does NOT fire on a reply to someone else's message", async () => {
