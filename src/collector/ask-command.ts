@@ -18,6 +18,7 @@ import type { CitedAnswer } from "../ask/citations.js";
 import { isAidaMessage, recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { resolveCitationSource } from "../db/repositories/citation-sources.js";
 import { countPendingEnrichment } from "../db/repositories/pending-enrichment.js";
+import { resolveSenderName } from "../summarization/sender-name.js";
 import { matchAskTrigger } from "./ask-trigger.js";
 import type { GroupTurnQueue } from "./group-turn-queue.js";
 import { mapWaMessage } from "./message-mapper.js";
@@ -382,7 +383,12 @@ export async function maybeHandleAskCommand(
     const { text: answer, citedIds } = await deps.answer({
       groupId,
       question,
-      askerName: mapped.senderName,
+      // Resolved, not raw. senderName falls back to the JID when no pushName was
+      // ever delivered, and unresolved it reached BOTH the prompt's asker line and
+      // the Langfuse trace userId — observed live as
+      // user=120363406567322025@g.us, the group's own jid presented as a person.
+      // resolveSenderName maps a JID to the "unknown participant" label instead.
+      askerName: resolveSenderName(mapped.senderName),
     });
     const source = await resolveQuotedSource(deps, { groupId, jid, citedIds });
     const sent = await deps.sendText(jid, answer, { quoted: source ?? msg });
