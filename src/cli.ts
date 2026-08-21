@@ -887,6 +887,13 @@ program
     },
   );
 
+/**
+ * A fixed, obviously-synthetic asker for the red-team harness. Production always
+ * passes one, so the prompt always carries `askerLine`; a constant keeps runs
+ * comparable across arms.
+ */
+const REDTEAM_ASKER = "בודק אדום";
+
 program
   .command("aida-redteam")
   .description("Run the red-team probes N times through the AGENTIC path and score them")
@@ -899,8 +906,16 @@ program
     const { makeAgenticModel } = await import("./ask/ai-model.js");
     const { runRedteamScored } = await import("./ops/redteam-run.js");
     const config = loadConfig();
-    const pool = createDbClient();
     const runs = Number(options.runs ?? 3);
+    // Checked BEFORE any work. `Number("abc")` is NaN, `run <= NaN` is false, so
+    // the loop never ran, `scores` came back empty and the command printed "All
+    // scored guards held on every run" at exit 0 — a green security report from a
+    // suite that never executed. Same for `--runs 0`.
+    if (!Number.isInteger(runs) || runs < 1) {
+      process.stderr.write(`Error: --runs must be a positive integer (got "${options.runs}").\n`);
+      process.exit(1);
+    }
+    const pool = createDbClient();
     try {
       process.stdout.write(`Red-team × ${runs} run(s) on the agentic path. Read-only.\n\n`);
       const report = await runRedteamScored(
@@ -916,11 +931,15 @@ program
             model: config.summarization.model,
           }),
           group: Number(options.group),
+          // Production always passes an asker, so askerLine is always present in
+          // the shipping prompt. Without it this harness scores a prompt that
+          // never ships — the exact complaint the harness exists to answer.
+          askerName: REDTEAM_ASKER,
           ...(options.verbose
             ? {
                 onAnswer: (r: { target: string; run: number; answer: string; verdict?: string }) =>
                   process.stdout.write(
-                    `  [${r.target} #${r.run}${r.verdict ? ` ${r.verdict}` : ""}] ${r.answer.replace(/\n/g, " ").slice(0, 140)}\n`,
+                    `  [${r.target} #${r.run}${r.verdict ? ` ${r.verdict}` : ""}] ${r.answer.replace(/\n/g, " ").slice(0, 600)}\n`,
                   ),
               }
             : {}),
@@ -939,8 +958,18 @@ program
       process.stdout.write(
         broken
           ? `\n${broken} guard(s) did not hold on every run.\n`
-          : "\nAll scored guards held on every run.\n",
+          : report.errors.length
+            ? "\nEvery guard that RAN held — but see the errored runs below.\n"
+            : "\nAll scored guards held on every run.\n",
       );
+      if (report.errors.length) {
+        // Named, never silently dropped: an errored run leaves the denominator
+        // short, and a probe that errored on every run appears in no table at all.
+        process.stdout.write(`\n${report.errors.length} run(s) errored and were NOT scored:\n`);
+        for (const e of report.errors) {
+          process.stdout.write(`  ${e.target} #${e.run}: ${e.message}\n`);
+        }
+      }
       if (report.manual.length) {
         // Named explicitly rather than silently omitted — an unscored probe that
         // nobody reads is indistinguishable from one that passes.

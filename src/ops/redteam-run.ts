@@ -30,6 +30,12 @@ export type RedteamRunDeps = {
   /** The group to run against — its real roster and history are used. */
   group: number;
   probes?: Probe[];
+  /**
+   * The asker fed to the prompt. Production always has one, so `askerLine` is
+   * always in the shipping prompt; omitting it here scored a prompt that never
+   * ships. Injectable so a test can pin it.
+   */
+  askerName?: string;
   answer?: typeof answerAgentic;
   roster?: (groupId: number) => Promise<string[]>;
   onAnswer?: (r: { target: string; run: number; answer: string; verdict?: string }) => void;
@@ -39,6 +45,15 @@ export type RedteamReport = {
   scores: ProbeScore[];
   /** Probes with no machine verdict — printed for a human, never scored. */
   manual: { target: string; answers: string[] }[];
+  /**
+   * Runs that threw. A crash is still not a guard failure — scoring it as one
+   * would make an unrelated outage look like a security regression — but it is
+   * not nothing either, and it used to be dropped on the floor. A probe that
+   * crashed on every run appeared in NO table while the CLI printed "All scored
+   * guards held on every run"; a probe that crashed on one run of three reported
+   * `runs: 2` with the missing third silently absent from the denominator.
+   */
+  errors: { target: string; run: number; message: string }[];
 };
 
 export async function runRedteamScored(deps: RedteamRunDeps, runs: number): Promise<RedteamReport> {
@@ -49,6 +64,7 @@ export async function runRedteamScored(deps: RedteamRunDeps, runs: number): Prom
 
   const graded: ProbeRun[] = [];
   const manual = new Map<string, string[]>();
+  const errors: RedteamReport["errors"] = [];
 
   for (let run = 1; run <= runs; run++) {
     for (const probe of probes) {
@@ -56,17 +72,20 @@ export async function runRedteamScored(deps: RedteamRunDeps, runs: number): Prom
       try {
         const out = await answer(
           { pool: deps.pool, embedder: deps.embedder, model: deps.model },
-          { groupId: deps.group, question: probe.question, roster },
+          {
+            groupId: deps.group,
+            question: probe.question,
+            roster,
+            ...(deps.askerName ? { askerName: deps.askerName } : {}),
+          },
         );
         text = out.text;
       } catch (err) {
-        // A crash is not a guard failure. Scoring it as one would make an
-        // unrelated outage look like a security regression.
-        deps.onAnswer?.({
-          target: probe.target,
-          run,
-          answer: `<<ERROR: ${err instanceof Error ? err.message : String(err)}>>`,
-        });
+        // A crash is not a guard failure — but it IS recorded, so the run never
+        // disappears from the denominator without the operator being told.
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push({ target: probe.target, run, message });
+        deps.onAnswer?.({ target: probe.target, run, answer: `<<ERROR: ${message}>>` });
         continue;
       }
       if (probe.verdict) {
@@ -83,5 +102,6 @@ export async function runRedteamScored(deps: RedteamRunDeps, runs: number): Prom
   return {
     scores: scoreProbeRuns(graded),
     manual: [...manual.entries()].map(([target, answers]) => ({ target, answers })),
+    errors,
   };
 }

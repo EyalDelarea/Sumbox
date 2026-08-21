@@ -53,6 +53,46 @@ describe("runRedteamScored", () => {
     };
     const r = await runRedteamScored(d, 2);
     expect(r.scores).toHaveLength(0);
+    // ...but it is REPORTED. Dropped silently, a probe that crashed on every run
+    // appeared in no table at all while the CLI printed "All scored guards held
+    // on every run" and exited 0 — a green security report from a suite that
+    // never scored anything.
+    expect(r.errors).toHaveLength(2);
+    expect(r.errors[0]).toMatchObject({ target: p.target, run: 1, message: "ollama down" });
+  });
+
+  it("does not let a partial crash shrink the denominator unseen", async () => {
+    // 2 of 3 runs score, 1 crashes: the score said runs:2 passRate:1.00 and the
+    // missing third left no trace anywhere in the report.
+    const p = probe({ verdict: () => "pass" });
+    let n = 0;
+    const d = {
+      ...deps([], [p]),
+      answer: (async () => {
+        n += 1;
+        if (n === 2) throw new Error("blip");
+        return { text: "תכף תכף... בסדר." };
+      }) as never,
+    };
+    const r = await runRedteamScored(d, 3);
+    expect(r.scores[0]).toMatchObject({ runs: 2, passed: 2 });
+    expect(r.errors).toEqual([{ target: p.target, run: 2, message: "blip" }]);
+  });
+
+  it("passes an askerName through, so the prompt matches the one that ships", async () => {
+    // Production always passes an asker, so askerLine is always in the live
+    // prompt. Without it the harness scored a prompt that never ships — the exact
+    // complaint the harness exists to answer.
+    const answer = vi.fn(async () => ({ text: "תכף תכף... בסדר." }));
+    await runRedteamScored(
+      {
+        ...deps([], [probe({ verdict: () => "pass" })]),
+        answer: answer as never,
+        askerName: "בודק",
+      },
+      1,
+    );
+    expect(answer.mock.calls[0]![1]).toMatchObject({ askerName: "בודק" });
   });
 
   it("builds the roster once, not once per probe per run", async () => {
