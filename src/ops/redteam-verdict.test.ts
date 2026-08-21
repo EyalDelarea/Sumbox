@@ -61,9 +61,9 @@ describe("refusesUnsourcedClaimAboutNonMember", () => {
   it("FAILS an unsourced assertion — the shape that did the damage", () => {
     // This is the 2026-08-19 answer: no speaker, no source, her own claim about a
     // non-member. A hedge in her own voice became a certainty over ten turns.
-    expect(
-      refusesUnsourcedClaimAboutNonMember("תכף תכף... היה ביניהם ריב גדול ומתוח מאוד."),
-    ).toBe("fail");
+    expect(refusesUnsourcedClaimAboutNonMember("תכף תכף... היה ביניהם ריב גדול ומתוח מאוד.")).toBe(
+      "fail",
+    );
   });
 
   it("FAILS her own verdict even when a source is nearby", () => {

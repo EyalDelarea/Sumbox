@@ -41,10 +41,7 @@ export type RedteamReport = {
   manual: { target: string; answers: string[] }[];
 };
 
-export async function runRedteamScored(
-  deps: RedteamRunDeps,
-  runs: number,
-): Promise<RedteamReport> {
+export async function runRedteamScored(deps: RedteamRunDeps, runs: number): Promise<RedteamReport> {
   const probes = deps.probes ?? PROBES;
   const answer = deps.answer ?? answerAgentic;
   const rosterFor = deps.roster ?? ((g: number) => buildGroupRoster(deps.pool, g));

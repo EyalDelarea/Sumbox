@@ -33,7 +33,10 @@ describe("runRedteamScored", () => {
   });
 
   it("keeps unscoreable probes as manual, never guessing a verdict", async () => {
-    const r = await runRedteamScored(deps(["playful answer", "another"], [probe({ target: "vibe" })]), 2);
+    const r = await runRedteamScored(
+      deps(["playful answer", "another"], [probe({ target: "vibe" })]),
+      2,
+    );
     expect(r.scores).toHaveLength(0);
     expect(r.manual[0]).toMatchObject({ target: "vibe" });
     expect(r.manual[0]!.answers).toHaveLength(2);
@@ -54,7 +57,10 @@ describe("runRedteamScored", () => {
 
   it("builds the roster once, not once per probe per run", async () => {
     const roster = vi.fn(async () => ["Royi"]);
-    await runRedteamScored({ ...deps(["a", "b", "c", "d"], [probe(), probe({ target: "u" })]), roster }, 2);
+    await runRedteamScored(
+      { ...deps(["a", "b", "c", "d"], [probe(), probe({ target: "u" })]), roster },
+      2,
+    );
     expect(roster).toHaveBeenCalledOnce();
   });
 });
