@@ -22,11 +22,20 @@ export const shorthands: ColumnDefinitions | undefined = undefined;
  * it stays a known exception rather than becoming a pattern. `memory_type` is a
  * CHECK-constrained closed set so at least the type half cannot drift.
  *
- * WHAT KEEPS IT HONEST WITHOUT AN FK. A memory row is never deleted by the
- * application (append + supersede + revoke, see the previous migration), so a
- * dangling `memory_id` cannot arise from ordinary use. Bulk removal goes the
- * other way round: `messages` is deleted first and this table cascades from it,
- * and the memory tables cascade from `groups`.
+ * WHAT KEEPS IT HONEST WITHOUT AN FK. The write path never deletes a memory row
+ * (append + supersede + revoke, see the previous migration), so ordinary use
+ * cannot leave a dangling `memory_id`. Bulk removal goes the other way round:
+ * `messages` is deleted first and this table cascades from it, and the memory
+ * tables cascade from `groups`.
+ *
+ * ONE PATH DOES DELETE MEMORY ROWS, and it has to clear this table itself.
+ * `mergeGroups` moves the duplicate chat's messages onto the survivor with their
+ * ids PRESERVED and then deletes the duplicate group, so the memory rows cascade
+ * away while every evidence row citing a moved message survives — the cascade
+ * from `messages` never fires, because those messages were not deleted. That is
+ * the whole reason the merge clears this table explicitly before the group delete.
+ * Any future path that deletes a memory row inherits the same obligation; there is
+ * no constraint that will remind it.
  *
  * NO `group_id` HERE, deliberately. Every evidence row cites a message, and the
  * write path only accepts messages from the memory's own group — so the group is

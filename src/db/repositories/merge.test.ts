@@ -1,6 +1,7 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase } from "../../test/db.js";
+import { createMemory } from "./aida-memory.js";
 import { upsertGroupByWhatsappId } from "./groups.js";
 import { mergeGroups } from "./merge.js";
 import { upsertParticipant } from "./participants.js";
@@ -76,6 +77,49 @@ describe("mergeGroups", () => {
       survivorId,
     ]);
     expect(nameRows[0].name).toBe("Bar Hevr Merge");
+  });
+
+  it("leaves no orphaned evidence when a merge discards the dup chat's memories", async () => {
+    // The trap: step 1 MOVES the dup's messages with their ids preserved, so the
+    // evidence ledger's cascade from `messages` never fires — while the group
+    // delete cascades the memory rows away. Evidence has no FK to a memory (the
+    // schema's one deliberate polymorphic reference), so nothing but this explicit
+    // clear stops a dangling `memory_id` surviving an ordinary merge.
+    const survivorId = await upsertGroupByWhatsappId(pool, {
+      whatsappId: "972500000099-mem@s.whatsapp.net",
+      name: "Mem Survivor",
+      source: "live",
+    });
+    const dupId = await upsertGroupByWhatsappId(pool, {
+      whatsappId: "70390252580999-mem@lid",
+      name: "Mem Dup",
+      source: "live",
+    });
+    const p = await upsertParticipant(pool, "Mem Sender");
+    // Unique key, so this message MOVES rather than being deleted — the case that
+    // leaves the evidence row behind.
+    await insertMsg(dupId, p, "mem-unique", "EXT-MEM-1");
+    const { rows: msgRows } = await pool.query<{ id: string }>(
+      `SELECT id FROM messages WHERE group_id = $1`,
+      [dupId],
+    );
+    const messageId = Number(msgRows[0]?.id);
+    const memory = await createMemory(pool, {
+      memoryType: "episodic",
+      groupId: dupId,
+      content: "אמונה על הצ'אט הכפול",
+      evidence: [{ messageId, stance: "supports" }],
+    });
+    expect(memory).not.toBeNull();
+
+    const result = await mergeGroups(pool, { survivorId, dupId, name: "Mem Survivor" });
+
+    expect(result.movedMessages, "the cited message moved, it was not deleted").toBe(1);
+    expect(result.droppedMemories, "reported, so the loss is visible rather than silent").toBe(1);
+    const { rows: orphans } = await pool.query<{ n: string }>(
+      `SELECT count(*)::int AS n FROM aida_memory_evidence`,
+    );
+    expect(Number(orphans[0]?.n), "no evidence row outlives the memory it belongs to").toBe(0);
   });
 
   it("rejects merging a group into itself", async () => {

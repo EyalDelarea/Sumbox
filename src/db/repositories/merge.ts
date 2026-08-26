@@ -119,12 +119,32 @@ export async function findMergeCandidates(
   return candidates;
 }
 
+/**
+ * @Aida's four memory tables and the `memory_type` each one is recorded under in
+ * the shared evidence ledger. Kept beside the merge that has to clear both, so a
+ * fifth memory kind cannot be added without this list being visited.
+ */
+const MEMORY_TYPE_FOR: Record<string, string> = {
+  aida_episodic_memories: "episodic",
+  aida_semantic_memories: "semantic",
+  aida_relational_memories: "relational",
+  aida_self_state_memories: "self_state",
+};
+const AIDA_MEMORY_TABLES = Object.keys(MEMORY_TYPE_FOR);
+
 export type MergeResult = {
   movedMessages: number;
   deletedDuplicateMessages: number;
   movedImports: number;
   repointedTodos: number;
   repointedMeetings: number;
+  /**
+   * @Aida memories of the duplicate chat that the merge discarded.
+   *
+   * Non-zero is expected, not an error — see the note at the call site. Reported
+   * so it can be logged rather than being a silent loss.
+   */
+  droppedMemories: number;
 };
 
 export async function mergeGroups(
@@ -230,6 +250,38 @@ export async function mergeGroups(
     dupId,
   ]);
 
+  // 3b. Drop the dup group's @Aida memories and their evidence, EXPLICITLY.
+  //
+  //     The group delete below cascades the memory rows away on its own. What it
+  //     cannot do is reach their evidence: `aida_memory_evidence` is keyed on
+  //     `(memory_type, memory_id)` with no foreign key — the schema's one
+  //     deliberate polymorphic reference — and it cascades from `messages`, whose
+  //     rows this merge MOVED rather than deleted (step 1 preserves message ids).
+  //     So every evidence row citing a moved message would survive its memory and
+  //     become a dangling reference no constraint can catch. The evidence
+  //     migration says a dangling `memory_id` cannot arise from ordinary use; this
+  //     is what makes that true, because merging duplicate-named chats IS ordinary
+  //     use (CLAUDE.md names it as the sanctioned answer to a duplicate name).
+  //
+  //     The memories themselves are DISCARDED rather than carried over. Moving them
+  //     would mean resolving collisions against the survivor's own beliefs on a
+  //     partial unique index, and re-pointing evidence that may already cite the
+  //     same message — real work with real edge cases, for something re-extraction
+  //     rebuilds from the very messages step 1 just moved. The count is returned so
+  //     the loss is visible instead of silent. Carrying them across a merge is
+  //     tracked separately.
+  let droppedMemories = 0;
+  for (const table of AIDA_MEMORY_TABLES) {
+    await client.query(
+      `DELETE FROM aida_memory_evidence e
+        USING ${table} m
+        WHERE m.group_id = $1 AND e.memory_type = $2 AND e.memory_id = m.id`,
+      [dupId, MEMORY_TYPE_FOR[table]],
+    );
+    const dropped = await client.query(`DELETE FROM ${table} WHERE group_id = $1`, [dupId]);
+    droppedMemories += dropped.rowCount ?? 0;
+  }
+
   // 4. Delete the dup group — cascades its read_watermarks + summaries, and frees
   //    its name for the survivor.
   await client.query(`DELETE FROM groups WHERE id = $1`, [dupId]);
@@ -243,5 +295,6 @@ export async function mergeGroups(
     movedImports: movedImports.rowCount ?? 0,
     repointedTodos: repointedTodos.rowCount ?? 0,
     repointedMeetings: repointedMeetings.rowCount ?? 0,
+    droppedMemories,
   };
 }
