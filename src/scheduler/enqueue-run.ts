@@ -12,12 +12,6 @@ import { listIncludedGroupIds } from "../db/repositories/chat-scopes.js";
 import type { JobBus } from "../jobs/job-bus.js";
 
 export type EnqueueScheduledRunOpts = {
-  /**
-   * Also enqueue @Aida's shadow memory extraction for each group.
-   * OFF by default: memory is opt-in while it is in shadow, and the scheduler
-   * runs on every install whether or not @Aida is enabled.
-   */
-  extractMemory?: boolean;
   /** When true, enqueue all groups regardless of whether they have new messages. */
   all?: boolean;
   /**
@@ -76,12 +70,6 @@ async function hasNewMessages(pool: pg.Pool, groupId: number): Promise<boolean> 
  * Per-group errors are caught and logged — one failure never aborts the batch.
  * The function itself never throws.
  */
-/**
- * How far back memory extraction reads. Deliberately WIDER than the twice-daily
- * digest interval: an overlap costs nothing (re-extraction is idempotent via the
- * observation dedupe key), while a gap silently loses conversation forever.
- */
-const MEMORY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export async function enqueueScheduledRun(
   pool: pg.Pool,
@@ -111,31 +99,6 @@ export async function enqueueScheduledRun(
           groupId: String(groupId),
         });
         enqueued++;
-
-        // @Aida's shadow memory rides the same cadence (D1: piggyback the summary
-        // run) but as a SEPARATE job — a failing extractor must never be able to
-        // fail or retry a summary someone is waiting for.
-        //
-        // The window is the scheduler's own interval, passed explicitly so a
-        // re-run over the same span converges rather than duplicating (the
-        // observation dedupe key makes extraction idempotent).
-        //
-        // Best-effort: memory is a nice-to-have and the summary is not, so a
-        // failure here is logged and the batch continues.
-        if (opts?.extractMemory === true) {
-          try {
-            await bus.enqueue("memory.extract", {
-              groupId: String(groupId),
-              since: new Date(now.getTime() - MEMORY_WINDOW_MS).toISOString(),
-              until: now.toISOString(),
-            });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            process.stderr.write(
-              `[enqueueScheduledRun] group ${groupId} memory.extract enqueue failed: ${msg}\n`,
-            );
-          }
-        }
       } catch (err) {
         // Per-group error: log and continue the batch
         const msg = err instanceof Error ? err.message : String(err);

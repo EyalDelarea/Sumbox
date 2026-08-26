@@ -196,13 +196,7 @@ export async function startServe(options: { port?: string; collect?: boolean }):
       setTimer: (cb, ms) => setTimeout(cb, ms),
       getLastRun,
       recordRun,
-      // Carries the shadow-memory flag into the digest run. Without this the
-      // memory.extract job type, handler, migration and worker wiring would all
-      // exist and never be enqueued — the "ships inert" failure this repo has
-      // already hit twice (askerName dropped for a month; listGroupParticipants
-      // with zero callers).
-      enqueueRun: (p, b, o) =>
-        enqueueScheduledRun(p, b, { ...o, extractMemory: config.ask.memoryShadow }),
+      enqueueRun: (p, b, o) => enqueueScheduledRun(p, b, o),
     });
     if (config.digest.enabled) {
       log.scheduler.info(

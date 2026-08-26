@@ -692,104 +692,85 @@ program
 
 program
   .command("aida-memory")
-  .description("Review @Aida's shadow memory for a group (and optionally extract now)")
+  .description("Dry-run @Aida's memory extraction over a window — prints, never stores")
   .requiredOption("--group <id>", "Group id")
-  .option("--extract", "Run extraction over the window NOW instead of waiting for the digest")
+  .option("--extract", "Run extraction over the window and print what would be learned")
   .option("--hours <n>", "Window size for --extract, in hours", "24")
-  .option("--revoke <id>", "Tombstone one observation by id")
-  .option("--limit <n>", "How many observations to list", "50")
-  .action(
-    async (options: {
-      group: string;
-      extract?: boolean;
-      hours?: string;
-      revoke?: string;
-      limit?: string;
-    }) => {
-      const { createDbClient } = await import("./db/client.js");
-      const { listObservations, recordObservation, revokeObservation } = await import(
-        "./db/repositories/aida-memory.js"
+  .action(async (options: { group: string; extract?: boolean; hours?: string }) => {
+    // A DRY RUN, and deliberately so. The shadow-phase tables this used to write
+    // to and list are gone (see the drop migration); the four-type schema that
+    // replaces them lands in the next slice. What survives is the measurement
+    // path — it is what produced the extraction numbers on #83, and losing it
+    // while the schema is in flight would mean re-deriving them from scratch.
+    if (!options.extract) {
+      process.stdout.write(
+        "Nothing to show: memory storage is being replaced (see #83).\n" +
+          "Run with --extract to see what a window WOULD produce.\n",
       );
-      const groupId = Number(options.group);
-      const pool = createDbClient();
-      try {
-        if (options.revoke) {
-          const ok = await revokeObservation(pool, Number(options.revoke), { groupId });
-          process.stdout.write(ok ? "revoked\n" : "not found (or already revoked)\n");
-          return;
-        }
+      return;
+    }
+    const { createDbClient } = await import("./db/client.js");
+    const { selectCandidates, buildExtractionPrompt, parseCandidates, validateCandidate } =
+      await import("./ask/memory-extract.js");
+    const { OllamaSummarizer } = await import("./summarization/summarizer.js");
+    const groupId = Number(options.group);
+    const pool = createDbClient();
+    try {
+      const config = loadConfig();
+      const extractor = new OllamaSummarizer({
+        host: config.summarization.ollamaHost,
+        model: config.summarization.model,
+        numCtx: config.summarization.numCtx,
+        // Pinned to 0: extraction is a parsing task, not a writing one.
+        temperature: 0,
+        repeatPenalty: config.summarization.repeatPenalty,
+        numPredict: config.summarization.numPredict,
+      });
+      const until = new Date();
+      const since = new Date(until.getTime() - Number(options.hours ?? 24) * 3600_000);
 
-        if (options.extract) {
-          // The same code the job runs, on demand — so the shadow phase can be
-          // inspected immediately instead of waiting for the next digest.
-          const { selectCandidates } = await import("./ask/memory-extract.js");
-          const { makeMemoryExtractHandler } = await import("./workers/handlers/memory-extract.js");
-          const { OllamaSummarizer } = await import("./summarization/summarizer.js");
-          const config = loadConfig();
-          const extractor = new OllamaSummarizer({
-            host: config.summarization.ollamaHost,
-            model: config.summarization.model,
-            numCtx: config.summarization.numCtx,
-            temperature: 0,
-            repeatPenalty: config.summarization.repeatPenalty,
-            numPredict: config.summarization.numPredict,
-          });
-          const until = new Date();
-          const since = new Date(until.getTime() - Number(options.hours ?? 24) * 3600_000);
-          const run = makeMemoryExtractHandler({
-            selectCandidates: (g, a, b) => selectCandidates(pool, g, a, b),
-            generate: async (prompt) =>
-              (
-                await extractor.summarize({
-                  system:
-                    "You extract structured facts from chat logs. You reply with JSON only, never prose.",
-                  user: prompt,
-                })
-              ).overview,
-            recordObservation: (input) => recordObservation(pool, input),
-          });
-          const r = await run({
-            id: "cli",
-            type: "memory.extract",
-            payload: {
-              groupId: String(groupId),
-              since: since.toISOString(),
-              until: until.toISOString(),
-            },
-            attempts: 1,
-            maxAttempts: 1,
-          });
-          process.stdout.write(
-            `window ${r.windowTotal} · unattributable ${r.unattributable} · ` +
-              `considered ${r.considered} · proposed ${r.proposed} · accepted ${r.accepted}\n` +
-              `rejected: ${JSON.stringify(r.rejected)}\n\n`,
-          );
-        }
+      const selection = await selectCandidates(pool, groupId, since, until);
+      const shown = new Map(selection.candidates.map((m) => [m.messageId, m]));
+      const rejected: Record<string, number> = {};
+      const accepted: { sourceMessageId: number; content: string; sender: string }[] = [];
 
-        const rows = await listObservations(pool, groupId, Number(options.limit ?? 50));
-        if (rows.length === 0) {
-          process.stdout.write("No observations for this group.\n");
-          return;
+      if (selection.candidates.length > 0) {
+        const raw = (
+          await extractor.summarize({
+            system:
+              "You extract structured facts from chat logs. You reply with JSON only, never prose.",
+            user: buildExtractionPrompt(selection.candidates),
+          })
+        ).overview;
+        for (const candidate of parseCandidates(raw)) {
+          const { ok, reason } = validateCandidate(candidate, shown);
+          if (!ok) {
+            const key = reason ?? "unknown";
+            rejected[key] = (rejected[key] ?? 0) + 1;
+            continue;
+          }
+          accepted.push({ ...ok, sender: shown.get(ok.sourceMessageId)?.sender ?? "" });
         }
-        process.stdout.write(`${rows.length} observation(s) — nothing reads these yet:\n\n`);
-        for (const o of rows) {
-          const when = o.observedAt.toISOString().slice(0, 16).replace("T", " ");
-          // The citation is printed with every row on purpose: an observation you
-          // cannot trace back to a message is exactly what this design forbids,
-          // so the review surface should make the source impossible to overlook.
-          process.stdout.write(
-            `  #${o.id}  [${when}] ${o.speaker}: ${o.content}   (msg:${o.sourceMessageId})\n`,
-          );
-        }
-        process.stdout.write("\nRevoke one with: --revoke <id>\n");
-      } catch (err) {
-        process.stderr.write(`Error: aida-memory failed: ${(err as Error).message}\n`);
-        process.exit(1);
-      } finally {
-        await pool.end();
       }
-    },
-  );
+
+      process.stdout.write(
+        `window ${selection.windowTotal} · unattributable ${selection.unattributable} · ` +
+          `considered ${selection.candidates.length} · would-accept ${accepted.length}\n` +
+          `rejected: ${JSON.stringify(rejected)}\n\n`,
+      );
+      for (const a of accepted) {
+        // The citation prints with every row on purpose: a memory you cannot
+        // trace back to a message is exactly what this design forbids.
+        process.stdout.write(`  ${a.sender}: ${a.content}   (msg:${a.sourceMessageId})\n`);
+      }
+      process.stdout.write("\nNothing was stored.\n");
+    } catch (err) {
+      process.stderr.write(`Error: aida-memory failed: ${(err as Error).message}\n`);
+      process.exit(1);
+    } finally {
+      await pool.end();
+    }
+  });
 
 program
   .command("aida-measure")
