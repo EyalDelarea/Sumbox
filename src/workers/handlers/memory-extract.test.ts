@@ -12,8 +12,15 @@ const job = (): Job<"memory.extract"> => ({
 });
 
 const shown: CandidateMessage[] = [
-  { messageId: 10, sender: "Royi", content: "אני עובד בסייבר", sentAt: new Date() },
-  { messageId: 11, sender: "Alex", content: "אני גר בחיפה", sentAt: new Date() },
+  {
+    messageId: 10,
+    sender: "Royi",
+    senderJid: "972501111111@s.whatsapp.net",
+    content: "אני עובד בסייבר",
+    sentAt: new Date(),
+  },
+  // A real person the ingest path never captured a jid for. Must stay readable.
+  { messageId: 11, sender: "Alex", senderJid: null, content: "אני גר בחיפה", sentAt: new Date() },
 ];
 
 const deps = (over: Partial<Parameters<typeof makeMemoryExtractHandler>[0]> = {}) => ({

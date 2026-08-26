@@ -8,13 +8,17 @@
  * the assumption that it will sometimes be wrong or actively fooled. Two lines
  * of defence:
  *
- *   1. SELECTION (`selectCandidates`) — the D7 cold-start exclusions. Messages
- *      addressed to her and her own output never reach the extractor at all.
- *      This is what kills the plant vector: to teach her something durable you
- *      would have to say it to the GROUP as ordinary conversation, not to her.
- *      Measured on the 2026-08-19 incident: every turn of that jailbreak was
- *      either `@אידה`-addressed or her own reply, so the whole exchange is
- *      excluded by construction.
+ *   1. SELECTION (`selectCandidates`) — the D7 cold-start exclusions, plus the
+ *      author rule. Messages addressed to her, her own output, and anything whose
+ *      author is not an identifiable person never reach the extractor at all.
+ *      The first raises the cost of the plant vector: to teach her something
+ *      durable you would have to say it to the GROUP as ordinary conversation.
+ *      Measured on the 2026-08-19 incident, every turn of that jailbreak was
+ *      either `@אידה`-addressed or her own reply — though that generalises less
+ *      far than it looks, since the tag rule needs a LITERAL `@` and people
+ *      replying to her mid-conversation do not retype it (#83).
+ *      The author rule is the harder guarantee: a message she cannot attribute
+ *      to a person is one she cannot form a belief from.
  *   2. VALIDATION (`validateCandidate`) — the model's output is checked against
  *      the messages it was actually shown. An invented id, or an id from another
  *      group, is dropped and counted rather than repaired.
@@ -42,9 +46,55 @@ export const MAX_CANDIDATES = 300;
 export type CandidateMessage = {
   messageId: number;
   sender: string;
+  /**
+   * The author's WhatsApp identity, when the ingest path captured one.
+   *
+   * Nullable, because the column is. A later slice attributes a memory's subject
+   * to this rather than to `sender`: display names are self-chosen and two people
+   * sharing one collapse into a single participant row, so a name is not an
+   * identity. A null here is NOT a reason to drop the message — an author with a
+   * resolved display name is a real person whether or not a jid was recorded.
+   */
+  senderJid: string | null;
   content: string;
   sentAt: Date;
 };
+
+/**
+ * Is this display name a person we can attribute a belief to?
+ *
+ * Mirrors `listGroupParticipants`' predicate exactly — deliberately the SAME
+ * three tests, so the roster and the extractor cannot drift into two different
+ * ideas of who is in the room. That repository is the source of truth for the
+ * wording; this is its TypeScript twin, kept pure so the re-check beside the SQL
+ * is directly testable.
+ *
+ * A JID-shaped name is the failure this exists for. When a group message arrives
+ * with neither a pushName nor a per-message participant key, the ingest path
+ * falls back to the CHAT'S OWN jid as the sender's name, and participants are
+ * keyed on display_name alone — so every such message, from every such sender,
+ * lands on one row. Measured on group 70 over 30 days: 259 messages on one row,
+ * 159 `from_me` and 100 from a hundred different real people.
+ */
+export function isIdentifiableAuthor(displayName: string | null | undefined): boolean {
+  const name = (displayName ?? "").trim();
+  if (name === "") return false;
+  if (name.includes("@")) return false;
+  return name !== "Unknown";
+}
+
+/**
+ * The author rule, as SQL. Character-for-character `listGroupParticipants`'.
+ *
+ * It lives in the WHERE clause and not in the extraction prompt on purpose: a
+ * safety property written as a prompt rule can be argued with by a model reading
+ * untrusted chat, and the two sensitive third-party memories measured on #83 were
+ * extracted by a prompt that already forbade them in words.
+ */
+const AUTHOR_IS_A_PERSON = `
+      btrim(coalesce(p.display_name, '')) <> ''
+      AND p.display_name NOT LIKE '%@%'
+      AND p.display_name <> 'Unknown'`;
 
 /**
  * Messages eligible to be learned from, for one group and window.
@@ -56,6 +106,18 @@ export type CandidateMessage = {
  * - anything addressed to her — filtered in SQL by the same `@אידה`/`@aida`
  *   shape the trigger uses, then re-checked in TS with the real matcher.
  * - system messages and empty text.
+ *
+ * And, per #88, anything whose author is not an identifiable person. That rule
+ * also closes the historical digest hole for free: `aida_messages` covers her
+ * replies but only 5 of 9 digest posts in group 70, because posts predating
+ * 2026-08-19 were never marked — and every digest lands on a JID-shaped
+ * participant, so the author rule catches them all with no content heuristic and
+ * no backfill.
+ *
+ * This is a NARROWING, by roughly 100 real messages a month in the busiest group,
+ * and that is the correct trade. An unattributable message is one she cannot
+ * honestly form a belief from, and a memory attributed to the wrong person is not
+ * recoverable by revoking it — the belief was already wrong about someone.
  *
  * `from_me` is deliberately NOT excluded: measured on group 70 it covers 3405 of
  * the owner's own messages against 185 bot replies, so dropping it would blind
@@ -71,12 +133,13 @@ export async function selectCandidates(
   const { rows } = await client.query<{
     id: string;
     sender: string | null;
+    sender_jid: string | null;
     content: string;
     sent_at: Date;
   }>(
     `
     SELECT * FROM (
-    SELECT m.id, p.display_name AS sender, m.text_content AS content, m.sent_at
+    SELECT m.id, p.display_name AS sender, m.sender_jid, m.text_content AS content, m.sent_at
     FROM messages m
     LEFT JOIN participants p ON p.id = m.participant_id
     LEFT JOIN aida_messages a
@@ -88,6 +151,7 @@ export async function selectCandidates(
       AND a.external_id IS NULL              -- not hers
       AND m.text_content !~* '@(אידה|aida)'  -- not addressed to her
       AND m.participant_id IS NOT NULL
+      AND ${AUTHOR_IS_A_PERSON}
     -- Newest first for the cap, then flipped back to chronological below: if a
     -- window has to be trimmed, losing the OLDEST messages is the right loss.
     ORDER BY m.sent_at DESC
@@ -101,12 +165,15 @@ export async function selectCandidates(
       .map((r) => ({
         messageId: Number(r.id),
         sender: r.sender ?? "",
+        senderJid: r.sender_jid,
         content: r.content,
         sentAt: r.sent_at,
       }))
-      // Belt and braces: the SQL pattern is a cheap pre-filter, the real matcher is
-      // Unicode-aware and is what the collector actually trusts.
-      .filter((m) => matchAskTrigger(m.content) === null)
+      // Belt and braces on both SQL filters: the `@aida` pattern is a cheap
+      // pre-filter whose real matcher is Unicode-aware, and the author rule is
+      // re-asserted here so a future edit to the WHERE clause cannot quietly
+      // reopen the bucket without this failing.
+      .filter((m) => matchAskTrigger(m.content) === null && isIdentifiableAuthor(m.sender))
   );
 }
 

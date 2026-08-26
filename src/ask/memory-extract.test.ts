@@ -8,6 +8,7 @@ import type { NormalizedMessage } from "../importer/types.js";
 import { createTestDatabase } from "../test/db.js";
 import {
   type CandidateMessage,
+  isIdentifiableAuthor,
   parseCandidates,
   selectCandidates,
   validateCandidate,
@@ -92,6 +93,93 @@ describe("selectCandidates (D7 exclusions)", () => {
     ]);
   });
 
+  // ── #88 · the author must be an identifiable person ──────────────────────
+  //
+  // A group message arriving without a pushName and without a per-message
+  // participant key resolves its sender name to the CHAT'S OWN JID, and
+  // participants are keyed on display_name alone — so every such message from
+  // every such sender lands on one row. Measured on group 70 over 30 days: 259
+  // messages, 159 from_me and 100 from real different people, one "person".
+  //
+  // The roster already hides that row. Extraction did not, so the first thing
+  // memory would do on real data is form beliefs about someone who is not there.
+
+  it("excludes a message whose author is a JID-shaped participant", async () => {
+    const g = await upsertGroup(pool, { name: `j-${Math.random()}`, source: "import" });
+    const bucket = await upsertParticipant(pool, `120363406567322025@g.us`);
+    const real = await upsertParticipant(pool, `R-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, bucket, { textContent: "מאת אף אחד" }),
+      msg(g, real, { textContent: "אני גר בחיפה" }),
+    ]);
+    const got = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect(got.map((m) => m.content)).toEqual(["אני גר בחיפה"]);
+  });
+
+  it("excludes a message on the Unknown placeholder participant", async () => {
+    const g = await upsertGroup(pool, { name: `u-${Math.random()}`, source: "import" });
+    const unknown = await upsertParticipant(pool, "Unknown");
+    await insertMessages(pool, [msg(g, unknown, { textContent: "אני עובד בבנק" })]);
+    expect(await selectCandidates(pool, g, SINCE, UNTIL)).toEqual([]);
+  });
+
+  // The historical case, and the reason this rule beats a content heuristic.
+  // `aida_messages` covers her replies but only 5 of 9 digest posts in group 70;
+  // digests posted before 2026-08-19 were never marked, so today she reads her
+  // own summaries as ordinary conversation. Every digest lands on a JID-shaped
+  // participant, so the author rule closes the gap with no backfill.
+  it("excludes an unmarked digest post through the author rule, not its shape", async () => {
+    const g = await upsertGroup(pool, { name: `d-${Math.random()}`, source: "import" });
+    const bucket = await upsertParticipant(pool, `120363406567322099@g.us`);
+    await insertMessages(pool, [
+      msg(g, bucket, {
+        fromMe: true,
+        textContent: "🕐 _מסכם מ־10.8_ 📝 *תקציר* הקבוצה תכננה טיול למונטנגרו",
+      }),
+    ]);
+    // Deliberately NOT recorded in aida_messages — that is the whole point.
+    expect(await selectCandidates(pool, g, SINCE, UNTIL)).toEqual([]);
+  });
+
+  it("keeps ordinary members and the owner, with the existing exclusions intact", async () => {
+    const g = await upsertGroup(pool, { name: `k-${Math.random()}`, source: "import" });
+    const member = await upsertParticipant(pool, `M-${Math.random()}`);
+    const owner = await upsertParticipant(pool, `W-${Math.random()}`);
+    const hers = msg(g, member, { textContent: "תכף תכף... my own reply" });
+    await insertMessages(pool, [
+      msg(g, member, { textContent: "אני לומדת רפואה" }),
+      msg(g, owner, { fromMe: true, textContent: "אני גר בתל אביב" }),
+      msg(g, member, { textContent: "@אידה מה קורה?" }),
+      hers,
+    ]);
+    await recordAidaMessage(pool, { groupId: g, externalId: hers.externalId as string });
+    const got = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect(got.map((m) => m.content).sort()).toEqual(["אני גר בתל אביב", "אני לומדת רפואה"].sort());
+  });
+
+  // sender_jid is the identity a later slice attributes a memory to. It is
+  // NULLABLE on the column, and a null must never become an exclusion: a message
+  // with a resolved display name is from a real person whether or not the jid
+  // was captured. Getting this backwards silently guts the corpus.
+  it("carries the author's sender_jid, and keeps a candidate whose jid is null", async () => {
+    const g = await upsertGroup(pool, { name: `i-${Math.random()}`, source: "import" });
+    const withJid = await upsertParticipant(pool, `A-${Math.random()}`);
+    const noJid = await upsertParticipant(pool, `B-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, withJid, {
+        textContent: "יש לי כלב",
+        senderJid: "972501234567@s.whatsapp.net",
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      }),
+      msg(g, noJid, { textContent: "אין לי ג׳יד", sentAt: new Date("2026-05-01T11:00:00.000Z") }),
+    ]);
+    const got = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect(got.map((m) => [m.content, m.senderJid])).toEqual([
+      ["יש לי כלב", "972501234567@s.whatsapp.net"],
+      ["אין לי ג׳יד", null],
+    ]);
+  });
+
   it("scopes to the group and the window", async () => {
     const a = await upsertGroup(pool, { name: `a-${Math.random()}`, source: "import" });
     const b = await upsertGroup(pool, { name: `b-${Math.random()}`, source: "import" });
@@ -154,5 +242,26 @@ describe("parseCandidates", () => {
     expect(parseCandidates("I could not find anything useful")).toEqual([]);
     expect(parseCandidates("[not json")).toEqual([]);
     expect(parseCandidates('{"sourceMessageId":1}')).toEqual([]);
+  });
+});
+
+describe("isIdentifiableAuthor", () => {
+  // Mirrors listGroupParticipants' predicate exactly. Kept as a pure function so
+  // the TS re-check beside the SQL is directly testable rather than only
+  // reachable through a database.
+  it("rejects the shapes that are not a person", () => {
+    expect(isIdentifiableAuthor("120363406567322025@g.us")).toBe(false);
+    expect(isIdentifiableAuthor("972501234567@s.whatsapp.net")).toBe(false);
+    expect(isIdentifiableAuthor("Unknown")).toBe(false);
+    expect(isIdentifiableAuthor("")).toBe(false);
+    expect(isIdentifiableAuthor("   ")).toBe(false);
+    expect(isIdentifiableAuthor(null)).toBe(false);
+  });
+
+  it("accepts an ordinary display name", () => {
+    expect(isIdentifiableAuthor("רועי")).toBe(true);
+    expect(isIdentifiableAuthor("Eyal")).toBe(true);
+    // Not a JID, and not the placeholder — a self-chosen name stays a name.
+    expect(isIdentifiableAuthor("unknown")).toBe(true);
   });
 });
