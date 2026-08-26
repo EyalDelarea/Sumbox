@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { type Tool, tool } from "ai";
 import type pg from "pg";
 import { z } from "zod";
 import type { Embedder } from "./embedder.js";
@@ -8,7 +8,15 @@ import { searchMessagesHybrid } from "./retrieval.js";
 /** The one Slice-1 tool: search THIS group's history. groupId + the original
  *  question are captured by CLOSURE — the model cannot change the group, and the
  *  question is fused into the embedding so a narrow model query can't underperform
- *  the single-shot search. */
+ *  the single-shot search.
+ *
+ *  The return type is ANNOTATED, not inferred, on purpose. `tool()` returns an
+ *  `ExecutableTool<…>` that `ai` does not re-export, so the moment npm nests a
+ *  second `@ai-sdk/provider-utils` under `ai/node_modules` — which any bump that
+ *  desyncs `ai` from the hoisted copy does — tsc can name the inferred type only
+ *  through that private path and fails declaration emit with TS2883. Naming
+ *  `Tool`, which `ai` DOES export, keeps the emitted .d.ts portable however npm
+ *  happens to hoist. Do not drop it back to inference. */
 export function makeSearchChatTool(deps: {
   pool: pg.Pool | pg.PoolClient;
   embedder: Embedder;
@@ -25,7 +33,7 @@ export function makeSearchChatTool(deps: {
    * Optional and side-effect-only: prod passes nothing and behaviour is unchanged.
    */
   onRetrieved?: (messageIds: number[]) => void;
-}) {
+}): Tool<{ query: string }, string> {
   return tool({
     description:
       "Search THIS WhatsApp group's message history for messages relevant to a query. Returns matching messages.",
