@@ -67,6 +67,38 @@ export type CandidateSelection = {
   windowTotal: number;
   /** Of those, how many were dropped because their author is not a person. */
   unattributable: number;
+  /**
+   * Of the messages an identifiable person wrote, how many carry no `sender_jid`.
+   *
+   * Reported whether or not the selection was narrowed, because it is the number
+   * that says how far a historical gap has closed rather than anything about this
+   * run. `sender_jid` capture landed mid-July 2026; measured on group 70, the
+   * share without one fell from 100% before that to 17% in August. A caller that
+   * narrows is losing exactly these; a caller that does not still wants to watch
+   * the number go down.
+   */
+  withoutAuthorIdentity: number;
+};
+
+/** How to narrow a window beyond the D7 exclusions and the author rule. */
+export type SelectOptions = {
+  /** Most messages to hand the extractor in one pass. */
+  limit?: number;
+  /**
+   * Drop messages carrying no `sender_jid`.
+   *
+   * OFF BY DEFAULT, and it has to be. A null jid is not a reason to disbelieve a
+   * message — a resolved display name is a real person whether or not the jid was
+   * captured (#88) — and slice 4's episodic memories have a nullable subject, so
+   * those messages are usable there. Only a caller storing something whose subject
+   * is NOT NULL, like a semantic memory, needs this, and it asks for it explicitly
+   * rather than inheriting it.
+   *
+   * A WHERE clause rather than a stored mark on purpose: the gap is closing, so a
+   * persisted skip-list would go stale the moment a message gained a jid, while a
+   * predicate re-evaluates itself for free.
+   */
+  requireAuthorIdentity?: boolean;
 };
 
 /**
@@ -165,8 +197,10 @@ export async function selectCandidates(
   groupId: number,
   since: Date,
   until: Date,
-  limit = MAX_CANDIDATES,
+  opts: SelectOptions = {},
 ): Promise<CandidateSelection> {
+  const limit = opts.limit ?? MAX_CANDIDATES;
+  const identityClause = opts.requireAuthorIdentity ? "AND m.sender_jid IS NOT NULL" : "";
   const { rows } = await client.query<{
     id: string;
     sender: string | null;
@@ -180,6 +214,7 @@ export async function selectCandidates(
     ${FROM_WINDOW}
     WHERE ${D7_EXCLUSIONS}
       AND ${AUTHOR_IS_A_PERSON}
+      ${identityClause}
     -- Newest first for the cap, then flipped back to chronological below: if a
     -- window has to be trimmed, losing the OLDEST messages is the right loss.
     ORDER BY m.sent_at DESC
@@ -193,10 +228,16 @@ export async function selectCandidates(
   // is ENTIRELY unattributable returns no rows to hang a count on — and that is
   // precisely the case worth seeing. Deliberately un-capped and pre-re-check, so
   // the pair stays comparable run to run.
-  const { rows: counts } = await client.query<{ window_total: string; unattributable: string }>(
+  const { rows: counts } = await client.query<{
+    window_total: string;
+    unattributable: string;
+    without_identity: string;
+  }>(
     `
     SELECT count(*) AS window_total,
-           count(*) FILTER (WHERE NOT (${AUTHOR_IS_A_PERSON})) AS unattributable
+           count(*) FILTER (WHERE NOT (${AUTHOR_IS_A_PERSON})) AS unattributable,
+           count(*) FILTER (WHERE (${AUTHOR_IS_A_PERSON}) AND m.sender_jid IS NULL)
+             AS without_identity
     ${FROM_WINDOW}
     WHERE ${D7_EXCLUSIONS}
     `,
@@ -221,6 +262,7 @@ export async function selectCandidates(
     candidates,
     windowTotal: Number(counts[0]?.window_total ?? 0),
     unattributable: Number(counts[0]?.unattributable ?? 0),
+    withoutAuthorIdentity: Number(counts[0]?.without_identity ?? 0),
   };
 }
 

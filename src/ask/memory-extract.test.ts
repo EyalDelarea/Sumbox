@@ -182,6 +182,50 @@ describe("selectCandidates (D7 exclusions)", () => {
     ]);
   });
 
+  // #95: the narrowing --write needs, and the reason it is a PARAMETER and not a
+  // change of default. A semantic memory's subject is NOT NULL, so a belief cited
+  // from a jid-less message cannot be stored — but slice 4's episodic memories
+  // have a nullable subject, so the same message is usable there. Narrowing the
+  // default would take that away silently.
+  it("can require an author identity, without changing what the default returns", async () => {
+    const g = await upsertGroup(pool, { name: `ri-${Math.random()}`, source: "import" });
+    const withJid = await upsertParticipant(pool, `RA-${Math.random()}`);
+    const noJid = await upsertParticipant(pool, `RB-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, withJid, {
+        textContent: "יש לי ג׳יד",
+        senderJid: "972500000042@s.whatsapp.net",
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      }),
+      msg(g, noJid, { textContent: "אין לי ג׳יד", sentAt: new Date("2026-05-01T11:00:00.000Z") }),
+    ]);
+
+    const wide = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect(wide.candidates.map((m) => m.content)).toEqual(["יש לי ג׳יד", "אין לי ג׳יד"]);
+
+    const narrow = await selectCandidates(pool, g, SINCE, UNTIL, { requireAuthorIdentity: true });
+    expect(narrow.candidates.map((m) => m.content)).toEqual(["יש לי ג׳יד"]);
+  });
+
+  // The narrowing is a LOSS, and a loss nobody counts is a corpus that shrinks
+  // silently. Reported either way so the closing gap stays watchable from the
+  // dry run too — measured on group 70 it fell from 100% to 17% in two months.
+  it("counts the messages that carry no author identity, narrowed or not", async () => {
+    const g = await upsertGroup(pool, { name: `ci-${Math.random()}`, source: "import" });
+    const withJid = await upsertParticipant(pool, `CA-${Math.random()}`);
+    const noJid = await upsertParticipant(pool, `CB-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, withJid, { textContent: "a", senderJid: "972500000042@s.whatsapp.net" }),
+      msg(g, noJid, { textContent: "b" }),
+      msg(g, noJid, { textContent: "c" }),
+    ]);
+    expect((await selectCandidates(pool, g, SINCE, UNTIL)).withoutAuthorIdentity).toBe(2);
+    expect(
+      (await selectCandidates(pool, g, SINCE, UNTIL, { requireAuthorIdentity: true }))
+        .withoutAuthorIdentity,
+    ).toBe(2);
+  });
+
   // A corpus that shrinks silently reads as a quiet group. The counts are how
   // that stays visible; they describe the window BEFORE the cap and before the
   // TS re-check, which is what makes them comparable run to run.
