@@ -1334,6 +1334,7 @@ program
           let ok = 0;
           let moved = 0;
           let dropped = 0;
+          let droppedMemories = 0;
           for (const c of candidates) {
             const client = await pool.connect();
             try {
@@ -1347,8 +1348,17 @@ program
               ok++;
               moved += res.movedMessages;
               dropped += res.deletedDuplicateMessages;
+              droppedMemories += res.droppedMemories;
+              // @Aida's memories of the dup chat do not survive a merge. Say so
+              // per-merge rather than only in the total: a memory a human revoked
+              // loses the row that was holding its dedupe slot, so the next
+              // extraction can re-form it (#94). Silent would be worse than lossy.
+              const memoryNote =
+                res.droppedMemories > 0
+                  ? `, discarded ${res.droppedMemories} @Aida memory/ies`
+                  : "";
               console.log(
-                `  ✓ "${c.name}" — moved ${res.movedMessages}, dropped ${res.deletedDuplicateMessages} dup`,
+                `  ✓ "${c.name}" — moved ${res.movedMessages}, dropped ${res.deletedDuplicateMessages} dup${memoryNote}`,
               );
             } catch (err) {
               await client.query("ROLLBACK").catch(() => {});
@@ -1359,7 +1369,8 @@ program
             }
           }
           console.log(
-            `Applied ${ok}/${candidates.length} merge(s); moved ${moved} message(s), dropped ${dropped} duplicate(s).`,
+            `Applied ${ok}/${candidates.length} merge(s); moved ${moved} message(s), ` +
+              `dropped ${dropped} duplicate(s), discarded ${droppedMemories} @Aida memory/ies.`,
           );
         } else {
           console.log(

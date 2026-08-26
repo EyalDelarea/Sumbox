@@ -104,18 +104,31 @@ describe("mergeGroups", () => {
       [dupId],
     );
     const messageId = Number(msgRows[0]?.id);
-    const memory = await createMemory(pool, {
-      memoryType: "episodic",
-      groupId: dupId,
-      content: "אמונה על הצ'אט הכפול",
-      evidence: [{ messageId, stance: "supports" }],
-    });
-    expect(memory).not.toBeNull();
+    // All four kinds, because the clear runs per-table and one of them passing
+    // proves nothing about the other three.
+    const drafts = [
+      { memoryType: "episodic", content: "אירוע בצ'אט הכפול" },
+      { memoryType: "semantic", content: "תכונה", subjectJid: "972500000081@s.whatsapp.net" },
+      {
+        memoryType: "relational",
+        content: "יחס",
+        subjectJids: ["972500000081@s.whatsapp.net", "972500000082@s.whatsapp.net"],
+      },
+      { memoryType: "self_state", content: "לענות בקצרה", facet: "behaviour" },
+    ] as const;
+    for (const draft of drafts) {
+      const memory = await createMemory(pool, {
+        ...draft,
+        groupId: dupId,
+        evidence: [{ messageId, stance: "supports" }],
+      });
+      expect(memory, `expected the ${draft.memoryType} memory to be written`).not.toBeNull();
+    }
 
     const result = await mergeGroups(pool, { survivorId, dupId, name: "Mem Survivor" });
 
     expect(result.movedMessages, "the cited message moved, it was not deleted").toBe(1);
-    expect(result.droppedMemories, "reported, so the loss is visible rather than silent").toBe(1);
+    expect(result.droppedMemories, "reported, so the loss is visible rather than silent").toBe(4);
     const { rows: orphans } = await pool.query<{ n: string }>(
       `SELECT count(*)::int AS n FROM aida_memory_evidence`,
     );

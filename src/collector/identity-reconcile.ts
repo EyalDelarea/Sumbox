@@ -33,11 +33,13 @@ export async function reconcileIdentities(pool: pg.Pool): Promise<number> {
   // 2. Merge each pair in its own transaction so locks release between pairs.
   let merged = 0;
   let skipped = 0;
+  let droppedMemories = 0;
   for (const c of candidates) {
     try {
-      await withTransaction(pool, (client) =>
+      const res = await withTransaction(pool, (client) =>
         mergeGroups(client, { survivorId: c.survivorId, dupId: c.dupId, name: c.name }),
       );
+      droppedMemories += res.droppedMemories;
       merged++;
     } catch (err) {
       skipped++;
@@ -48,7 +50,11 @@ export async function reconcileIdentities(pool: pg.Pool): Promise<number> {
     }
   }
   if (merged > 0 || skipped > 0) {
-    log.info({ merged, skipped }, "identity reconcile complete");
+    // droppedMemories is logged, not just returned: a merge discards @Aida's
+    // memories of the dup chat, and this path runs unattended. A belief a human
+    // revoked loses the row holding its dedupe slot, so the next extraction can
+    // re-form it (#94) — that should never happen without a line saying it did.
+    log.info({ merged, skipped, droppedMemories }, "identity reconcile complete");
   }
   return merged;
 }
