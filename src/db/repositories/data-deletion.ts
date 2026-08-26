@@ -132,9 +132,6 @@ export const UNSELECTED_PURGE_GROUP_TABLES = [
   // group row SURVIVES the unselected purge, so its ON DELETE CASCADE would
   // never fire and these would outlive the conversation they belong to.
   "aida_messages",
-  // What she LEARNED from this chat. Memory is per-group by design, so when a
-  // chat's content goes, her beliefs derived from it must go with it — otherwise
-  // the group is "deleted" while she can still tell you what someone in it said.
   "summaries",
   "read_watermarks",
   // The group's shared /סיכום cursor. The group row SURVIVES the unselected

@@ -12,8 +12,6 @@ import { listIncludedGroupIds } from "../db/repositories/chat-scopes.js";
 import type { JobBus } from "../jobs/job-bus.js";
 
 export type EnqueueScheduledRunOpts = {
-  /**
-   */
   /** When true, enqueue all groups regardless of whether they have new messages. */
   all?: boolean;
   /**
