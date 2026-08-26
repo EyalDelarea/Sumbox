@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { upsertGroup } from "../db/repositories/groups.js";
 import { insertMessages } from "../db/repositories/messages.js";
-import { upsertParticipant } from "../db/repositories/participants.js";
+import { listGroupParticipants, upsertParticipant } from "../db/repositories/participants.js";
 import type { NormalizedMessage } from "../importer/types.js";
 import { createTestDatabase } from "../test/db.js";
 import {
@@ -264,6 +264,49 @@ describe("parseCandidates", () => {
     expect(parseCandidates("I could not find anything useful")).toEqual([]);
     expect(parseCandidates("[not json")).toEqual([]);
     expect(parseCandidates('{"sourceMessageId":1}')).toEqual([]);
+  });
+});
+
+describe("the author rule and the roster", () => {
+  let pool: pg.Pool;
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  // The extractor's predicate is a COPY of the roster's, and a copy with a
+  // comment promising it matches drifts the moment either side is edited. This
+  // is the promise, executable: one fixture, both readers, and they must name
+  // the same people. #88 puts the roster explicitly out of scope, so importing
+  // one shared fragment is not an option here — this is what replaces it.
+  //
+  // Mutation-checked in both directions it is meant to catch:
+  //   - drop `<> 'Unknown'` from listGroupParticipants  -> RED
+  //   - drop it from BOTH the SQL and isIdentifiableAuthor -> RED
+  // It deliberately does NOT catch dropping it from this module's SQL alone:
+  // isIdentifiableAuthor still filters the row, so behaviour is unchanged. That
+  // is the belt-and-braces working, not a hole — but it means this test pins the
+  // OBSERVABLE rule, not the SQL text.
+  it("agrees with the roster on who is a person", async () => {
+    const g = await upsertGroup(pool, { name: `r-${Math.random()}`, source: "import" });
+    const real = await upsertParticipant(pool, `Dana-${Math.random()}`);
+    const bucket = await upsertParticipant(pool, `120363406567322055@g.us`);
+    const unknown = await upsertParticipant(pool, "Unknown");
+    await insertMessages(pool, [
+      msg(g, real, { textContent: "אני גרה בירושלים" }),
+      msg(g, bucket, { textContent: "מאת אף אחד" }),
+      msg(g, unknown, { textContent: "מאת לא ידוע" }),
+    ]);
+
+    // includeOwner: true — the roster @Aida actually builds, and the one that
+    // matches selectCandidates, which does not exclude from_me either.
+    const roster = (await listGroupParticipants(pool, g, 25, { includeOwner: true })).map(
+      (r) => r.name,
+    );
+    const senders = (await selectCandidates(pool, g, SINCE, UNTIL)).candidates.map((m) => m.sender);
+    expect(new Set(senders)).toEqual(new Set(roster));
   });
 });
 

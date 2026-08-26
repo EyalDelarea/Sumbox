@@ -72,11 +72,20 @@ export type CandidateSelection = {
 /**
  * Is this display name a person we can attribute a belief to?
  *
- * Mirrors `listGroupParticipants`' predicate exactly — deliberately the SAME
- * three tests, so the roster and the extractor cannot drift into two different
- * ideas of who is in the room. That repository is the source of truth for the
- * wording; this is its TypeScript twin, kept pure so the re-check beside the SQL
- * is directly testable.
+ * The same three tests as `listGroupParticipants`' predicate, so the roster and
+ * the extractor hold one idea of who is in the room. That repository is the
+ * source of truth for the wording; {@link AUTHOR_IS_A_PERSON} is its SQL copy,
+ * character-for-character, and this is its TypeScript twin, kept pure so the
+ * re-check beside the SQL is directly testable.
+ *
+ * A copy with a promise attached would drift the moment either side is edited,
+ * so the promise is pinned by a test instead: `agrees with the roster on who is
+ * a person` fails if the two ever disagree.
+ *
+ * One deliberate asymmetry: SQL compares `'Unknown'` untrimmed, this trims first,
+ * so a padded `" Unknown "` passes there and is dropped here. The re-check runs
+ * after the query and may be stricter than it, never looser — a placeholder with
+ * whitespace round it is still a placeholder.
  *
  * A JID-shaped name is the failure this exists for. When a group message arrives
  * with neither a pushName nor a per-message participant key, the ingest path
