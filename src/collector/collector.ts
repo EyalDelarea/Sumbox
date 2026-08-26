@@ -17,6 +17,7 @@ import type pg from "pg";
 import {
   isDisplayNameUnresolved,
   updateDisplayName,
+  updateDisplayNameDisambiguated,
   upsertGroupByCanonicalJid,
 } from "../db/repositories/groups.js";
 import { recordLink, siblingForJid } from "../db/repositories/identity-links.js";
@@ -464,7 +465,23 @@ export async function handleIncomingMessage(
         // (representativeSenderName: `m.from_me IS NOT TRUE`); this is the same
         // rule on the live path.
         if (mapped.senderName && mapped.senderName.trim()) {
-          await updateDisplayName(client, jid, mapped.senderName.trim());
+          // Two different people can share a display name, and `groups.name` is
+          // UNIQUE — so this must disambiguate rather than throw, or the row
+          // keeps `name = whatsapp_id` and EVERY later message retries the same
+          // doomed write. `otherJid` is this chat's other WhatsApp identity: it
+          // supplies human-meaningful digits for the suffix, and it is how the
+          // repository recognizes a collision that is really the same person
+          // awaiting reconcile (which must stay nameless — see merge.ts).
+          const otherJid = canonicalJid === siblingJid ? mapped.remoteJid : siblingJid;
+          const outcome = await updateDisplayNameDisambiguated(
+            client,
+            jid,
+            mapped.senderName.trim(),
+            otherJid,
+          );
+          if (outcome.status === "unresolvable") {
+            opts.log?.warn({ jid }, "display name could not be made unique");
+          }
         }
       }
     }

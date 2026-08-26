@@ -255,6 +255,149 @@ export async function updateDisplayName(
   return (result.rowCount ?? 0) > 0;
 }
 
+// ── Disambiguating display-name resolution ──────────────────────────────────
+//
+// Two different people can share a WhatsApp display name, and `groups.name` is
+// UNIQUE. `updateDisplayName` throws 23505 on that, which is the right answer
+// for the contacts-directory path (there a collision means "same person, second
+// JID") but wrong for the message paths: the row keeps `name = whatsapp_id`, so
+// `isDisplayNameUnresolved` stays true and EVERY subsequent message retries the
+// same doomed UPDATE.
+//
+// `groups_tenant_name_unique` is load-bearing and must not be dropped:
+// `findGroupByName` is `WHERE name = $1 LIMIT 1` with no ordering, and it is the
+// lookup key for the CLI, both summarization prepare paths, and the web
+// handlers. Uniqueness is what makes that LIMIT 1 deterministic. So we keep
+// names unique and disambiguate the loser instead.
+
+/**
+ * Claim `candidate` for this chat, but only if it is free.
+ *
+ * The `NOT EXISTS` guard means a taken name yields 0 rows rather than raising
+ * 23505. That matters because this function is called in a loop: a raised
+ * unique_violation would abort an enclosing transaction, and the signature
+ * accepts a `PoolClient`. Same idempotence guard as `updateDisplayName` — it
+ * only ever touches a row still named by its raw JID.
+ *
+ * Returns true if the name was claimed.
+ */
+async function tryClaimName(
+  client: pg.Pool | pg.PoolClient,
+  whatsappId: string,
+  candidate: string,
+): Promise<boolean> {
+  const result = await client.query(
+    `UPDATE groups SET name = $2
+       WHERE whatsapp_id = $1
+         AND name = $1
+         AND NOT EXISTS (SELECT 1 FROM groups other WHERE other.name = $2)`,
+    [whatsappId, candidate],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** The part of a JID before '@' — a phone number for @s.whatsapp.net. */
+function jidUserPart(jid: string): string {
+  return jid.split("@")[0] ?? jid;
+}
+
+/**
+ * Pick the identity whose digits mean something to a human: the phone side of a
+ * lid↔pn pair when we know it, otherwise the chat's own JID. A bare @lid number
+ * is an opaque WhatsApp-internal id and identifies nobody.
+ */
+function digitSourceJid(whatsappId: string, siblingJid: string | null | undefined): string {
+  if (siblingJid && siblingJid.endsWith("@s.whatsapp.net")) return siblingJid;
+  return whatsappId;
+}
+
+/**
+ * The names to try, in order, when `displayName` is already taken by a stranger.
+ * Escalates until uniqueness is guaranteed by construction, so this can never
+ * fall back to `name = whatsappId` and re-enter the per-message retry loop.
+ *
+ * Exported for unit testing.
+ */
+export function disambiguationCandidates(
+  whatsappId: string,
+  displayName: string,
+  siblingJid?: string | null,
+): string[] {
+  const digits = jidUserPart(digitSourceJid(whatsappId, siblingJid));
+  const last4 = digits.slice(-4);
+  const candidates = [`${displayName} (~${digits})`, `${displayName} (${whatsappId})`];
+  // Only worth trying the short form when it is actually shorter.
+  if (last4 && last4 !== digits) candidates.unshift(`${displayName} (~${last4})`);
+  return candidates;
+}
+
+export type DisplayNameOutcome =
+  /** The row's name was set (to `name`, which may carry a disambiguating suffix). */
+  | { status: "updated"; name: string }
+  /**
+   * The name is held by this chat's own lid/pn sibling — the same person under
+   * their other identity, awaiting reconcile. Deliberately left nameless: it is
+   * `findMergeCandidates` (merge.ts) that reconciles the pair, and it only
+   * considers chats where `name == whatsapp_id`. Naming this row would
+   * disqualify it from the merge forever and split the conversation in two.
+   */
+  | { status: "skipped-sibling"; heldBy: string }
+  /** No row matched — it does not exist, or its name was already resolved. */
+  | { status: "noop" }
+  /** Every candidate collided. Pathological; the caller should log it. */
+  | { status: "unresolvable" };
+
+/**
+ * Like {@link updateDisplayName}, but resolves a duplicate-name collision instead
+ * of throwing. For the message-driven paths (live collector, batch resolver)
+ * where a collision means two different people share a display name.
+ *
+ * NOT for the contacts-directory path: there one contact is applied to several
+ * of its own JIDs, so a collision is the correct outcome and must stay a no-op.
+ *
+ * `siblingJid` is this chat's other WhatsApp identity (lid↔pn) when known. It
+ * is passed in rather than looked up so this repository stays free of
+ * identity-links queries.
+ */
+export async function updateDisplayNameDisambiguated(
+  client: pg.Pool | pg.PoolClient,
+  whatsappId: string,
+  displayName: string,
+  siblingJid?: string | null,
+): Promise<DisplayNameOutcome> {
+  if (await tryClaimName(client, whatsappId, displayName)) {
+    return { status: "updated", name: displayName };
+  }
+
+  // 0 rows has two causes: the row is absent / already resolved (nothing to do),
+  // or the name is taken. Only the second is worth more work.
+  if (!(await isDisplayNameUnresolved(client, whatsappId))) {
+    return { status: "noop" };
+  }
+
+  // Who holds the name? If it is our own sibling, stay nameless (see above).
+  const { rows } = await client.query<{ whatsapp_id: string | null }>(
+    `SELECT whatsapp_id FROM groups WHERE name = $1 LIMIT 1`,
+    [displayName],
+  );
+  const heldBy = rows[0]?.whatsapp_id ?? null;
+  if (!heldBy) {
+    // Freed between the two statements. Unreachable with a single collector
+    // process; the next message resolves the name normally.
+    return { status: "noop" };
+  }
+  if (siblingJid && heldBy === siblingJid) {
+    return { status: "skipped-sibling", heldBy };
+  }
+
+  for (const candidate of disambiguationCandidates(whatsappId, displayName, siblingJid)) {
+    if (await tryClaimName(client, whatsappId, candidate)) {
+      return { status: "updated", name: candidate };
+    }
+  }
+  return { status: "unresolvable" };
+}
+
 /**
  * Returns true iff a group row exists with name == whatsapp_id (i.e. the
  * display name has never been resolved from the raw JID). Used to gate the

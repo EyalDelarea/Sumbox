@@ -3,11 +3,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { NormalizedMessage } from "../../importer/types.js";
 import { createTestDatabase } from "../../test/db.js";
 import {
+  disambiguationCandidates,
   isDisplayNameUnresolved,
   listGroups,
   listUnresolvedGroups,
   representativeSenderName,
   updateDisplayName,
+  updateDisplayNameDisambiguated,
   upsertGroup,
   upsertGroupByCanonicalJid,
   upsertGroupByWhatsappId,
@@ -551,5 +553,215 @@ describe("representativeSenderName", () => {
 
     const name = await representativeSenderName(pool, groupId);
     expect(name).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateDisplayNameDisambiguated (#85 defect 1)
+// ---------------------------------------------------------------------------
+
+describe("disambiguationCandidates (#85)", () => {
+  it("prefers the phone side of a lid<->pn pair for the digits", () => {
+    expect(
+      disambiguationCandidates("1234567890@lid", "דנה כהן", "972501239876@s.whatsapp.net"),
+    ).toEqual(["דנה כהן (~9876)", "דנה כהן (~972501239876)", "דנה כהן (1234567890@lid)"]);
+  });
+
+  it("falls back to the chat's own digits when no sibling is known", () => {
+    expect(disambiguationCandidates("1234567890@lid", "דנה כהן")).toEqual([
+      "דנה כהן (~7890)",
+      "דנה כהן (~1234567890)",
+      "דנה כהן (1234567890@lid)",
+    ]);
+  });
+
+  it("ignores a sibling that is not a phone JID", () => {
+    expect(disambiguationCandidates("972500001111@s.whatsapp.net", "Dana", "555@lid")[0]).toBe(
+      "Dana (~1111)",
+    );
+  });
+
+  it("ends in a name unique by construction, so it can never fall back to the JID", () => {
+    const jid = "972500002222@s.whatsapp.net";
+    const candidates = disambiguationCandidates(jid, "Dana");
+    expect(candidates.at(-1)).toBe(`Dana (${jid})`);
+    expect(candidates).not.toContain(jid);
+  });
+
+  it("uses the trailing digits of a real numeric @g.us JID", () => {
+    expect(disambiguationCandidates("123456789-987654321@g.us", "צוות")[0]).toBe("צוות (~4321)");
+  });
+
+  it("does not emit a redundant short form when the digits are already short", () => {
+    expect(disambiguationCandidates("12@lid", "Dana")).toEqual(["Dana (~12)", "Dana (12@lid)"]);
+  });
+});
+
+describe("updateDisplayNameDisambiguated (#85)", () => {
+  let pool: pg.Pool;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  const seed = async (jid: string) => {
+    await upsertGroupByWhatsappId(pool, { whatsappId: jid, name: jid, source: "live" });
+  };
+  const nameOf = async (jid: string) => {
+    const { rows } = await pool.query<{ name: string }>(
+      `SELECT name FROM groups WHERE whatsapp_id = $1`,
+      [jid],
+    );
+    return rows[0]?.name ?? null;
+  };
+
+  it("claims a free name exactly like updateDisplayName", async () => {
+    const jid = "dis-free-001@s.whatsapp.net";
+    await seed(jid);
+
+    expect(await updateDisplayNameDisambiguated(pool, jid, "Free Name")).toEqual({
+      status: "updated",
+      name: "Free Name",
+    });
+    expect(await nameOf(jid)).toBe("Free Name");
+  });
+
+  it("disambiguates when a STRANGER holds the name, instead of throwing", async () => {
+    const stranger = "972500001111@s.whatsapp.net";
+    const mine = "972500002222@s.whatsapp.net";
+    await seed(stranger);
+    await seed(mine);
+    await updateDisplayName(pool, stranger, "דנה כהן");
+
+    const outcome = await updateDisplayNameDisambiguated(pool, mine, "דנה כהן");
+
+    expect(outcome).toEqual({ status: "updated", name: "דנה כהן (~2222)" });
+    expect(await nameOf(mine)).toBe("דנה כהן (~2222)");
+    // The stranger keeps the plain name; nobody was renamed out from under.
+    expect(await nameOf(stranger)).toBe("דנה כהן");
+  });
+
+  it("uses the linked phone digits for a @lid chat, not the opaque lid number", async () => {
+    const stranger = "972500003333@s.whatsapp.net";
+    const mine = "8881112223334@lid";
+    await seed(stranger);
+    await seed(mine);
+    await updateDisplayName(pool, stranger, "רון לוי");
+
+    const outcome = await updateDisplayNameDisambiguated(
+      pool,
+      mine,
+      "רון לוי",
+      "972500004444@s.whatsapp.net",
+    );
+
+    expect(outcome).toEqual({ status: "updated", name: "רון לוי (~4444)" });
+  });
+
+  it("leaves the chat NAMELESS when its own lid/pn sibling holds the name", async () => {
+    // Same person under two identities, awaiting reconcile. Naming this row
+    // would disqualify it from findMergeCandidates forever.
+    const pn = "972500005555@s.whatsapp.net";
+    const lid = "7770001112223@lid";
+    await seed(pn);
+    await seed(lid);
+    await updateDisplayName(pool, pn, "אבי מזרחי");
+
+    const outcome = await updateDisplayNameDisambiguated(pool, lid, "אבי מזרחי", pn);
+
+    expect(outcome).toEqual({ status: "skipped-sibling", heldBy: pn });
+    expect(await nameOf(lid)).toBe(lid);
+    // Still eligible for the merge path, which requires name == whatsapp_id.
+    expect(await isDisplayNameUnresolved(pool, lid)).toBe(true);
+  });
+
+  it("escalates to the full number when the short suffix is also taken", async () => {
+    const a = "972500006666@s.whatsapp.net";
+    const b = "972510006666@s.whatsapp.net"; // same last 4
+    const c = "972520006666@s.whatsapp.net"; // and again
+    await seed(a);
+    await seed(b);
+    await seed(c);
+    await updateDisplayName(pool, a, "Shared");
+
+    expect(await updateDisplayNameDisambiguated(pool, b, "Shared")).toEqual({
+      status: "updated",
+      name: "Shared (~6666)",
+    });
+    expect(await updateDisplayNameDisambiguated(pool, c, "Shared")).toEqual({
+      status: "updated",
+      name: "Shared (~972520006666)",
+    });
+  });
+
+  it("never leaves the row named after its own JID, so the retry loop cannot return", async () => {
+    const jid = "972500007777@s.whatsapp.net";
+    const holder = "972500008888@s.whatsapp.net";
+    await seed(jid);
+    await seed(holder);
+    await updateDisplayName(pool, holder, "Taken");
+    // Pre-occupy every escalation step except the last.
+    for (const [i, candidate] of ["Taken (~7777)", "Taken (~972500007777)"].entries()) {
+      const squatter = `squatter-${i}@g.us`;
+      await seed(squatter);
+      await updateDisplayName(pool, squatter, candidate);
+    }
+
+    const outcome = await updateDisplayNameDisambiguated(pool, jid, "Taken");
+
+    expect(outcome).toEqual({ status: "updated", name: `Taken (${jid})` });
+    expect(await isDisplayNameUnresolved(pool, jid)).toBe(false);
+  });
+
+  it("disambiguates when a THIRD, unrelated chat holds the name — not just any collision", async () => {
+    // The sibling check must not swallow a collision with a stranger just
+    // because this chat happens to have a known sibling elsewhere.
+    const stranger = "972500001212@s.whatsapp.net";
+    const mine = "9990001112223@lid";
+    const mySibling = "972500003434@s.whatsapp.net";
+    await seed(stranger);
+    await seed(mine);
+    await seed(mySibling);
+    await updateDisplayName(pool, stranger, "משותף");
+    await updateDisplayName(pool, mySibling, "שם אחר לגמרי");
+
+    expect(await updateDisplayNameDisambiguated(pool, mine, "משותף", mySibling)).toEqual({
+      status: "updated",
+      name: "משותף (~3434)",
+    });
+  });
+
+  it("is a no-op on an already-resolved row (never clobbers a resolved name)", async () => {
+    const jid = "dis-resolved-001@s.whatsapp.net";
+    await seed(jid);
+    await updateDisplayName(pool, jid, "Already Named");
+
+    expect(await updateDisplayNameDisambiguated(pool, jid, "Something Else")).toEqual({
+      status: "noop",
+    });
+    expect(await nameOf(jid)).toBe("Already Named");
+  });
+
+  it("is a no-op when the group does not exist", async () => {
+    expect(await updateDisplayNameDisambiguated(pool, "ghost@s.whatsapp.net", "Ghost")).toEqual({
+      status: "noop",
+    });
+  });
+
+  it("leaves updateDisplayName's throwing behaviour untouched for the contacts path", async () => {
+    const holder = "dis-throw-001@s.whatsapp.net";
+    const other = "dis-throw-002@s.whatsapp.net";
+    await seed(holder);
+    await seed(other);
+    await updateDisplayName(pool, holder, "Contact Name");
+
+    await expect(updateDisplayName(pool, other, "Contact Name")).rejects.toMatchObject({
+      code: "23505",
+    });
+    expect(await nameOf(other)).toBe(other);
   });
 });

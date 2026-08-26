@@ -10,7 +10,9 @@ import path from "node:path";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { isDisplayNameUnresolved } from "../db/repositories/groups.js";
 import { recordLink } from "../db/repositories/identity-links.js";
+import { findMergeCandidates } from "../db/repositories/merge.js";
 import { InMemoryJobBus } from "../jobs/in-memory-bus.js";
 import { InMemoryJobRunRecorder } from "../jobs/job-run-recorder.js";
 import { createTestDatabase } from "../test/db.js";
@@ -1162,6 +1164,72 @@ describe("display-name resolution skips outgoing messages (#85)", () => {
       { dataDir },
     );
     expect(await nameOf(jid)).toBe("רון לוי");
+  });
+
+  it("disambiguates instead of retrying forever when a stranger holds the name (#85 defect 1)", async () => {
+    const first = "972500000010@s.whatsapp.net";
+    const second = "972500000020@s.whatsapp.net";
+
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_DUP_001", remoteJid: first, pushName: "יוסי", text: "a" }),
+      { dataDir },
+    );
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_DUP_002", remoteJid: second, pushName: "יוסי", text: "b" }),
+      { dataDir },
+    );
+
+    expect(await nameOf(first)).toBe("יוסי");
+    expect(await nameOf(second)).toBe("יוסי (~0020)");
+
+    // Resolved means the next message skips resolution entirely — this is the
+    // per-message doomed UPDATE that #85 is about.
+    expect(await isDisplayNameUnresolved(pool, second)).toBe(false);
+  });
+
+  it("leaves a chat nameless when its own lid/pn sibling holds the name (#85)", async () => {
+    // The duplicate-pair state findMergeCandidates exists for: two rows for one
+    // person, formed before the lid<->pn link was known. Once the link IS known
+    // the canonicalizer routes new messages into the existing row, so the pair
+    // can only be reconciled by merge.ts — and merge.ts only considers chats
+    // still named by their JID. Naming this one would strand it forever.
+    const pn = "972500000030@s.whatsapp.net";
+    const lid = "5550001112223@lid";
+
+    // 1. Both rows form while the identities are still unlinked. The lid chat's
+    //    first message carries no pushName, so it stays named by its JID.
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_SIB_001", remoteJid: pn, pushName: "נועה", text: "a" }),
+      { dataDir },
+    );
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_SIB_002", remoteJid: lid, pushName: "", text: "b" }),
+      { dataDir },
+    );
+    expect(await nameOf(pn)).toBe("נועה");
+    expect(await nameOf(lid)).toBe(lid);
+
+    // 2. The link is learned, and the lid chat finally sees a pushName.
+    await recordLink(pool, { lidJid: lid, pnJid: pn, source: "message_alt" });
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_SIB_003", remoteJid: lid, pushName: "נועה", text: "c" }),
+      { dataDir },
+    );
+
+    // Not suffixed — left nameless, so the merge path can still claim it.
+    expect(await nameOf(lid)).toBe(lid);
+    expect(await isDisplayNameUnresolved(pool, lid)).toBe(true);
+
+    const candidates = await findMergeCandidates(pool, {
+      lidForPn: async (j) => (j === pn ? lid : null),
+      pnForLid: async (j) => (j === lid ? pn : null),
+    });
+    expect(candidates.map((c) => c.name)).toContain("נועה");
   });
 
   it("still resolves a @g.us group subject on an outgoing message", async () => {

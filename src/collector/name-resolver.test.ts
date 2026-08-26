@@ -139,8 +139,11 @@ describe("resolveAllGroupNames", () => {
     expect(rows[0]?.name).toBe("Already Resolved");
   });
 
-  it("does NOT throw and still resolves other groups when one subject collides with a UNIQUE name", async () => {
-    // Seed: group A is unresolved; group B is already named "Collision Name" (will cause UNIQUE violation for A)
+  it("disambiguates a colliding subject instead of leaving the group JID-named", async () => {
+    // Two chats resolving to the same display name used to raise 23505 here,
+    // dropping group A back into the unresolved set — so the NEXT connect, and
+    // every incoming message on it, retried the same doomed write (#85). It is
+    // now suffixed so it resolves once and stays resolved.
     const jidA = "nr-collision-a@g.us";
     const jidB = "nr-collision-b@g.us";
 
@@ -165,11 +168,17 @@ describe("resolveAllGroupNames", () => {
     const result = await resolveAllGroupNames(pool, { groupSubject });
     expect(result.resolved).toBeGreaterThanOrEqual(1); // at least jidC should succeed
 
-    // jidA should stay as its JID (collision skipped)
+    // jidA is disambiguated, not left JID-named — no retry loop next connect.
     const { rows: rowsA } = await pool.query(`SELECT name FROM groups WHERE whatsapp_id = $1`, [
       jidA,
     ]);
-    expect(rowsA[0]?.name).toBe(jidA);
+    expect(rowsA[0]?.name).not.toBe(jidA);
+    expect(rowsA[0]?.name).toMatch(/^Collision Name \(~/);
+    // jidB keeps the plain name: the loser is renamed, never the incumbent.
+    const { rows: rowsB } = await pool.query(`SELECT name FROM groups WHERE whatsapp_id = $1`, [
+      jidB,
+    ]);
+    expect(rowsB[0]?.name).toBe("Collision Name");
 
     // jidC should be resolved
     const { rows: rowsC } = await pool.query(`SELECT name FROM groups WHERE whatsapp_id = $1`, [
