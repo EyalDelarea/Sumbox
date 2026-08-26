@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CandidateMessage } from "../../ask/memory-extract.js";
+import type { CandidateMessage, CandidateSelection } from "../../ask/memory-extract.js";
 import type { Job } from "../../jobs/job-types.js";
 import { makeMemoryExtractHandler } from "./memory-extract.js";
 
@@ -23,8 +23,15 @@ const shown: CandidateMessage[] = [
   { messageId: 11, sender: "Alex", senderJid: null, content: "אני גר בחיפה", sentAt: new Date() },
 ];
 
+/** A window that held three messages and lost one to an unidentifiable author. */
+const selection = (candidates: CandidateMessage[], unattributable = 1): CandidateSelection => ({
+  candidates,
+  windowTotal: candidates.length + unattributable,
+  unattributable,
+});
+
 const deps = (over: Partial<Parameters<typeof makeMemoryExtractHandler>[0]> = {}) => ({
-  selectCandidates: async () => shown,
+  selectCandidates: async () => selection(shown),
   generate: async () => "[]",
   recordObservation: async () => 1,
   ...over,
@@ -46,7 +53,13 @@ describe("memory.extract handler (shadow)", () => {
       }),
     );
     const out = await handle(job());
-    expect(out).toMatchObject({ considered: 2, proposed: 2, accepted: 1 });
+    expect(out).toMatchObject({
+      windowTotal: 3,
+      unattributable: 1,
+      considered: 2,
+      proposed: 2,
+      accepted: 1,
+    });
     expect(out.rejected["invented-id"]).toBe(1);
     expect(recordObservation).toHaveBeenCalledOnce();
     expect(recordObservation).toHaveBeenCalledWith({
@@ -73,9 +86,14 @@ describe("memory.extract handler (shadow)", () => {
   it("treats an empty window as success, not failure", async () => {
     // Quiet windows are the common case; throwing would dead-letter half the runs.
     const generate = vi.fn(async () => "[]");
-    const handle = makeMemoryExtractHandler(deps({ selectCandidates: async () => [], generate }));
+    const handle = makeMemoryExtractHandler(
+      deps({ selectCandidates: async () => selection([], 4), generate }),
+    );
     const out = await handle(job());
     expect(out).toMatchObject({ considered: 0, proposed: 0, accepted: 0 });
+    // A window emptied ENTIRELY by the author rule must still report what it
+    // held — otherwise a corpus that vanished reads identically to a quiet group.
+    expect(out).toMatchObject({ windowTotal: 4, unattributable: 4 });
     // And it must not spend a GPU call to discover there was nothing to read.
     expect(generate).not.toHaveBeenCalled();
   });

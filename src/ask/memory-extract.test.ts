@@ -64,7 +64,7 @@ describe("selectCandidates (D7 exclusions)", () => {
     await recordAidaMessage(pool, { groupId: g, externalId: hers.externalId as string });
 
     const got = await selectCandidates(pool, g, SINCE, UNTIL);
-    expect(got.map((m) => m.content)).toEqual(["אני עובד בחברת סייבר"]);
+    expect(got.candidates.map((m) => m.content)).toEqual(["אני עובד בחברת סייבר"]);
   });
 
   // This is the property that makes the plant vector expensive: to teach her
@@ -79,7 +79,7 @@ describe("selectCandidates (D7 exclusions)", () => {
       reply,
     ]);
     await recordAidaMessage(pool, { groupId: g, externalId: reply.externalId as string });
-    expect(await selectCandidates(pool, g, SINCE, UNTIL)).toEqual([]);
+    expect((await selectCandidates(pool, g, SINCE, UNTIL)).candidates).toEqual([]);
   });
 
   it("keeps the owner's own messages — from_me is not an exclusion", async () => {
@@ -88,9 +88,9 @@ describe("selectCandidates (D7 exclusions)", () => {
     const g = await upsertGroup(pool, { name: `z-${Math.random()}`, source: "import" });
     const p = await upsertParticipant(pool, `O-${Math.random()}`);
     await insertMessages(pool, [msg(g, p, { fromMe: true, textContent: "אני גר בתל אביב" })]);
-    expect((await selectCandidates(pool, g, SINCE, UNTIL)).map((m) => m.content)).toEqual([
-      "אני גר בתל אביב",
-    ]);
+    expect(
+      (await selectCandidates(pool, g, SINCE, UNTIL)).candidates.map((m) => m.content),
+    ).toEqual(["אני גר בתל אביב"]);
   });
 
   // ── #88 · the author must be an identifiable person ──────────────────────
@@ -113,14 +113,14 @@ describe("selectCandidates (D7 exclusions)", () => {
       msg(g, real, { textContent: "אני גר בחיפה" }),
     ]);
     const got = await selectCandidates(pool, g, SINCE, UNTIL);
-    expect(got.map((m) => m.content)).toEqual(["אני גר בחיפה"]);
+    expect(got.candidates.map((m) => m.content)).toEqual(["אני גר בחיפה"]);
   });
 
   it("excludes a message on the Unknown placeholder participant", async () => {
     const g = await upsertGroup(pool, { name: `u-${Math.random()}`, source: "import" });
     const unknown = await upsertParticipant(pool, "Unknown");
     await insertMessages(pool, [msg(g, unknown, { textContent: "אני עובד בבנק" })]);
-    expect(await selectCandidates(pool, g, SINCE, UNTIL)).toEqual([]);
+    expect((await selectCandidates(pool, g, SINCE, UNTIL)).candidates).toEqual([]);
   });
 
   // The historical case, and the reason this rule beats a content heuristic.
@@ -138,7 +138,7 @@ describe("selectCandidates (D7 exclusions)", () => {
       }),
     ]);
     // Deliberately NOT recorded in aida_messages — that is the whole point.
-    expect(await selectCandidates(pool, g, SINCE, UNTIL)).toEqual([]);
+    expect((await selectCandidates(pool, g, SINCE, UNTIL)).candidates).toEqual([]);
   });
 
   it("keeps ordinary members and the owner, with the existing exclusions intact", async () => {
@@ -154,7 +154,9 @@ describe("selectCandidates (D7 exclusions)", () => {
     ]);
     await recordAidaMessage(pool, { groupId: g, externalId: hers.externalId as string });
     const got = await selectCandidates(pool, g, SINCE, UNTIL);
-    expect(got.map((m) => m.content).sort()).toEqual(["אני גר בתל אביב", "אני לומדת רפואה"].sort());
+    expect(got.candidates.map((m) => m.content).sort()).toEqual(
+      ["אני גר בתל אביב", "אני לומדת רפואה"].sort(),
+    );
   });
 
   // sender_jid is the identity a later slice attributes a memory to. It is
@@ -174,10 +176,30 @@ describe("selectCandidates (D7 exclusions)", () => {
       msg(g, noJid, { textContent: "אין לי ג׳יד", sentAt: new Date("2026-05-01T11:00:00.000Z") }),
     ]);
     const got = await selectCandidates(pool, g, SINCE, UNTIL);
-    expect(got.map((m) => [m.content, m.senderJid])).toEqual([
+    expect(got.candidates.map((m) => [m.content, m.senderJid])).toEqual([
       ["יש לי כלב", "972501234567@s.whatsapp.net"],
       ["אין לי ג׳יד", null],
     ]);
+  });
+
+  // A corpus that shrinks silently reads as a quiet group. The counts are how
+  // that stays visible; they describe the window BEFORE the cap and before the
+  // TS re-check, which is what makes them comparable run to run.
+  it("reports what the window held and what it lost to unattributable authorship", async () => {
+    const g = await upsertGroup(pool, { name: `c-${Math.random()}`, source: "import" });
+    const bucket = await upsertParticipant(pool, `120363406567322077@g.us`);
+    const real = await upsertParticipant(pool, `C-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, bucket, { textContent: "one" }),
+      msg(g, bucket, { textContent: "two" }),
+      msg(g, real, { textContent: "three" }),
+    ]);
+    const got = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect({
+      windowTotal: got.windowTotal,
+      unattributable: got.unattributable,
+      kept: got.candidates.length,
+    }).toEqual({ windowTotal: 3, unattributable: 2, kept: 1 });
   });
 
   it("scopes to the group and the window", async () => {
@@ -189,9 +211,9 @@ describe("selectCandidates (D7 exclusions)", () => {
       msg(a, p, { textContent: "too old", sentAt: new Date("2026-04-01T10:00:00Z") }),
       msg(a, p, { textContent: "in window" }),
     ]);
-    expect((await selectCandidates(pool, a, SINCE, UNTIL)).map((m) => m.content)).toEqual([
-      "in window",
-    ]);
+    expect(
+      (await selectCandidates(pool, a, SINCE, UNTIL)).candidates.map((m) => m.content),
+    ).toEqual(["in window"]);
   });
 });
 

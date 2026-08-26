@@ -3,7 +3,9 @@
  *
  * Reads a window of a group's ordinary conversation, asks the model for durable
  * self-stated facts, validates every candidate against the messages it was
- * actually shown, and writes the survivors as attributed observations.
+ * actually shown, and writes the survivors as attributed observations. Only
+ * messages with an identifiable author are ever read (#88), so every row it
+ * writes is attributable to someone real.
  *
  * NOTHING READS THESE ROWS. The whole point of the shadow phase is to accumulate
  * a week of real output so we can look at what she *would* have believed before
@@ -17,7 +19,7 @@
  */
 import {
   buildExtractionPrompt,
-  type CandidateMessage,
+  type CandidateSelection,
   parseCandidates,
   validateCandidate,
 } from "../../ask/memory-extract.js";
@@ -25,7 +27,17 @@ import type { Job } from "../../jobs/job-types.js";
 
 export type MemoryExtractResult = {
   groupId: number;
-  /** Messages the extractor was shown after the D7 exclusions. */
+  /** Messages the window held after the D7 exclusions, before the author rule. */
+  windowTotal: number;
+  /**
+   * Of those, how many were dropped because their author is not an identifiable
+   * person. Reported because a corpus that shrinks silently reads as a quiet
+   * group: measured on group 70, this is ~100 real messages a month, and if it
+   * ever approaches `windowTotal` the answer is to fix author resolution
+   * upstream, never to relax the rule.
+   */
+  unattributable: number;
+  /** Messages the extractor was actually shown. */
   considered: number;
   /** Candidates the model proposed. */
   proposed: number;
@@ -40,8 +52,8 @@ export type MemoryExtractResult = {
 };
 
 export type MemoryExtractHandlerDeps = {
-  /** D7-filtered candidates for the window. */
-  selectCandidates: (groupId: number, since: Date, until: Date) => Promise<CandidateMessage[]>;
+  /** Candidates for the window, with what it cost to produce them. */
+  selectCandidates: (groupId: number, since: Date, until: Date) => Promise<CandidateSelection>;
   /** Prompt → raw model text. */
   generate: (prompt: string) => Promise<string>;
   /** Writes one observation; returns null when rejected at the DB layer or deduped. */
@@ -59,9 +71,12 @@ export function makeMemoryExtractHandler(deps: MemoryExtractHandlerDeps) {
     const since = new Date(job.payload.since);
     const until = new Date(job.payload.until);
 
-    const considered = await deps.selectCandidates(groupId, since, until);
+    const selection = await deps.selectCandidates(groupId, since, until);
+    const considered = selection.candidates;
     const result: MemoryExtractResult = {
       groupId,
+      windowTotal: selection.windowTotal,
+      unattributable: selection.unattributable,
       considered: considered.length,
       proposed: 0,
       accepted: 0,

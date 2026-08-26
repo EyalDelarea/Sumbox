@@ -60,6 +60,15 @@ export type CandidateMessage = {
   sentAt: Date;
 };
 
+/** Candidates for one window, with what the window cost to produce them. */
+export type CandidateSelection = {
+  candidates: CandidateMessage[];
+  /** Messages the window held after the D7 exclusions, before the author rule. */
+  windowTotal: number;
+  /** Of those, how many were dropped because their author is not a person. */
+  unattributable: number;
+};
+
 /**
  * Is this display name a person we can attribute a belief to?
  *
@@ -84,6 +93,19 @@ export function isIdentifiableAuthor(displayName: string | null | undefined): bo
 }
 
 /**
+ * The D7 exclusions, as SQL. Shared between the candidate query and the count
+ * query so the two can never disagree about what the window held.
+ */
+const D7_EXCLUSIONS = `
+      m.group_id = $1
+      AND m.sent_at >= $2 AND m.sent_at < $3
+      AND m.message_type = 'text'
+      AND btrim(coalesce(m.text_content, '')) <> ''
+      AND a.external_id IS NULL              -- not hers
+      AND m.text_content !~* '@(אידה|aida)'  -- not addressed to her
+      AND m.participant_id IS NOT NULL`;
+
+/**
  * The author rule, as SQL. Character-for-character `listGroupParticipants`'.
  *
  * It lives in the WHERE clause and not in the extraction prompt on purpose: a
@@ -96,13 +118,19 @@ const AUTHOR_IS_A_PERSON = `
       AND p.display_name NOT LIKE '%@%'
       AND p.display_name <> 'Unknown'`;
 
+const FROM_WINDOW = `
+    FROM messages m
+    LEFT JOIN participants p ON p.id = m.participant_id
+    LEFT JOIN aida_messages a
+      ON a.group_id = m.group_id AND a.external_id = m.external_id`;
+
 /**
  * Messages eligible to be learned from, for one group and window.
  *
  * Excludes, per D7:
- * - her own output (`aida_messages`, which covers both @Aida replies and summary
- *   posts) — an agent that learns from itself reinforces whatever it said last,
- *   which is exactly how one hedged invention became a ten-turn certainty.
+ * - her own output (`aida_messages`) — an agent that learns from itself reinforces
+ *   whatever it said last, which is exactly how one hedged invention became a
+ *   ten-turn certainty.
  * - anything addressed to her — filtered in SQL by the same `@אידה`/`@aida`
  *   shape the trigger uses, then re-checked in TS with the real matcher.
  * - system messages and empty text.
@@ -129,7 +157,7 @@ export async function selectCandidates(
   since: Date,
   until: Date,
   limit = MAX_CANDIDATES,
-): Promise<CandidateMessage[]> {
+): Promise<CandidateSelection> {
   const { rows } = await client.query<{
     id: string;
     sender: string | null;
@@ -140,17 +168,8 @@ export async function selectCandidates(
     `
     SELECT * FROM (
     SELECT m.id, p.display_name AS sender, m.sender_jid, m.text_content AS content, m.sent_at
-    FROM messages m
-    LEFT JOIN participants p ON p.id = m.participant_id
-    LEFT JOIN aida_messages a
-      ON a.group_id = m.group_id AND a.external_id = m.external_id
-    WHERE m.group_id = $1
-      AND m.sent_at >= $2 AND m.sent_at < $3
-      AND m.message_type = 'text'
-      AND btrim(coalesce(m.text_content, '')) <> ''
-      AND a.external_id IS NULL              -- not hers
-      AND m.text_content !~* '@(אידה|aida)'  -- not addressed to her
-      AND m.participant_id IS NOT NULL
+    ${FROM_WINDOW}
+    WHERE ${D7_EXCLUSIONS}
       AND ${AUTHOR_IS_A_PERSON}
     -- Newest first for the cap, then flipped back to chronological below: if a
     -- window has to be trimmed, losing the OLDEST messages is the right loss.
@@ -160,21 +179,40 @@ export async function selectCandidates(
     `,
     [groupId, since, until, limit],
   );
-  return (
-    rows
-      .map((r) => ({
-        messageId: Number(r.id),
-        sender: r.sender ?? "",
-        senderJid: r.sender_jid,
-        content: r.content,
-        sentAt: r.sent_at,
-      }))
-      // Belt and braces on both SQL filters: the `@aida` pattern is a cheap
-      // pre-filter whose real matcher is Unicode-aware, and the author rule is
-      // re-asserted here so a future edit to the WHERE clause cannot quietly
-      // reopen the bucket without this failing.
-      .filter((m) => matchAskTrigger(m.content) === null && isIdentifiableAuthor(m.sender))
+
+  // Counted separately rather than with a window function, because a window that
+  // is ENTIRELY unattributable returns no rows to hang a count on — and that is
+  // precisely the case worth seeing. Deliberately un-capped and pre-re-check, so
+  // the pair stays comparable run to run.
+  const { rows: counts } = await client.query<{ window_total: string; unattributable: string }>(
+    `
+    SELECT count(*) AS window_total,
+           count(*) FILTER (WHERE NOT (${AUTHOR_IS_A_PERSON})) AS unattributable
+    ${FROM_WINDOW}
+    WHERE ${D7_EXCLUSIONS}
+    `,
+    [groupId, since, until],
   );
+
+  const candidates = rows
+    .map((r) => ({
+      messageId: Number(r.id),
+      sender: r.sender ?? "",
+      senderJid: r.sender_jid,
+      content: r.content,
+      sentAt: r.sent_at,
+    }))
+    // Belt and braces on both SQL filters: the `@aida` pattern is a cheap
+    // pre-filter whose real matcher is Unicode-aware, and the author rule is
+    // re-asserted here so a future edit to the WHERE clause cannot quietly
+    // reopen the bucket without this failing.
+    .filter((m) => matchAskTrigger(m.content) === null && isIdentifiableAuthor(m.sender));
+
+  return {
+    candidates,
+    windowTotal: Number(counts[0]?.window_total ?? 0),
+    unattributable: Number(counts[0]?.unattributable ?? 0),
+  };
 }
 
 /** What the extractor is asked to produce, per message. */
