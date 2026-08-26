@@ -1068,3 +1068,118 @@ describe("DB-first identity canonicalization (cold live bridge)", () => {
     expect(rows[0].source).toBe("message_alt");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Display-name resolution on 1:1 chats (#85 defect 2)
+// ---------------------------------------------------------------------------
+//
+// senderName comes from pushName, which on an OUTGOING message is the account
+// owner's own name. Resolving from it names the DM after yourself.
+
+describe("display-name resolution skips outgoing messages (#85)", () => {
+  let pool: pg.Pool;
+  let dataDir: string;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "sumbox-dn-test-"));
+  }, 120_000);
+
+  afterAll(async () => {
+    await pool?.end();
+    if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 30_000);
+
+  const nameOf = async (jid: string) => {
+    const { rows } = await pool.query<{ name: string }>(
+      `SELECT name FROM groups WHERE whatsapp_id = $1`,
+      [jid],
+    );
+    return rows[0]?.name ?? null;
+  };
+
+  it("does not name a 1:1 chat after the account owner on an outgoing message", async () => {
+    const jid = "972500000001@s.whatsapp.net";
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_FROMME_001",
+        remoteJid: jid,
+        fromMe: true,
+        pushName: "Eyal (me)",
+        text: "hi",
+      }),
+      { dataDir },
+    );
+
+    expect(await nameOf(jid)).toBe(jid);
+  });
+
+  it("names a 1:1 chat from an incoming message", async () => {
+    const jid = "972500000002@s.whatsapp.net";
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_INBOUND_001",
+        remoteJid: jid,
+        fromMe: false,
+        pushName: "דנה כהן",
+        text: "shalom",
+      }),
+      { dataDir },
+    );
+
+    expect(await nameOf(jid)).toBe("דנה כהן");
+  });
+
+  it("self-corrects: an outgoing message first, then the contact replies", async () => {
+    const jid = "972500000003@s.whatsapp.net";
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_ORDER_001",
+        remoteJid: jid,
+        // A distinct owner name: reusing one already taken by another chat
+        // would let the UNIQUE(name) constraint mask the defect instead of the
+        // guard preventing it.
+        fromMe: true,
+        pushName: "Eyal (owner, order case)",
+        text: "you there?",
+      }),
+      { dataDir },
+    );
+    expect(await nameOf(jid)).toBe(jid);
+
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_ORDER_002",
+        remoteJid: jid,
+        fromMe: false,
+        pushName: "רון לוי",
+        text: "yes",
+      }),
+      { dataDir },
+    );
+    expect(await nameOf(jid)).toBe("רון לוי");
+  });
+
+  it("still resolves a @g.us group subject on an outgoing message", async () => {
+    // The fromMe guard is scoped to non-@g.us chats: a group subject comes from
+    // the session, not from pushName, so it is unaffected by who spoke.
+    const jid = "900111222-333@g.us";
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_GUS_001",
+        remoteJid: jid,
+        fromMe: true,
+        pushName: "Eyal (me)",
+        text: "hi group",
+      }),
+      { dataDir, groupSubject: async () => "צוות פיתוח" },
+    );
+
+    expect(await nameOf(jid)).toBe("צוות פיתוח");
+  });
+});

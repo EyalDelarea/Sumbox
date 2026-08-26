@@ -454,9 +454,15 @@ export async function handleIncomingMessage(
             opts.log?.warn({ err: e, jid }, "failed to resolve group subject");
           }
         }
-      } else {
+      } else if (!mapped.fromMe) {
         // @s.whatsapp.net, @lid, and any other non-@g.us JID:
         // resolve from the message pushName (senderName).
+        //
+        // Outgoing messages are skipped: senderName comes from pushName, which
+        // on a fromMe message is the ACCOUNT OWNER's own name — naming a DM
+        // after yourself. The batch resolver already excludes them
+        // (representativeSenderName: `m.from_me IS NOT TRUE`); this is the same
+        // rule on the live path.
         if (mapped.senderName && mapped.senderName.trim()) {
           await updateDisplayName(client, jid, mapped.senderName.trim());
         }
