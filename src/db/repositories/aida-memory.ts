@@ -77,12 +77,33 @@ export type MemoryDraft = MemorySubject & {
   evidence: readonly EvidenceDraft[];
 };
 
+/**
+ * What a write actually did.
+ *
+ * Three outcomes rather than a boolean, because `converged` and
+ * `converged_onto_revoked` are the same shape and opposite meanings: one says
+ * "already recorded, nothing to add", the other says "this belief was WITHDRAWN
+ * and the evidence you brought was thrown away". Collapsing them would hide the
+ * one number worth watching — how often the extractor keeps re-proposing a belief
+ * a human already revoked, which is the signal that revocation is not reaching it.
+ */
+export type MemoryWriteOutcome = "created" | "converged" | "converged_onto_revoked";
+
 export type MemoryWriteResult = {
   id: number;
-  /** False when an identical memory already existed and this run converged onto it. */
-  created: boolean;
-  /** Evidence rows this call added. Zero on a repeat run that cited nothing new. */
-  evidenceRecorded: number;
+  outcome: MemoryWriteOutcome;
+  /** How many citations the caller offered. */
+  citationsOffered: number;
+  /**
+   * How many became evidence rows on THIS call.
+   *
+   * Lower than `citationsOffered` for two different reasons — citations the
+   * extractor invented, and citations already on file from an earlier run — so it
+   * is a floor on what landed, not a hallucination count. Read it against
+   * `outcome`: short on `created` means the model cited messages that do not
+   * exist here; short on `converged` usually just means a repeat run.
+   */
+  citationsRecorded: number;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -184,8 +205,21 @@ async function resolveCanonicalSubject(
       return draft.subjectJid ? await canonicalSubjectJid(client, draft.subjectJid) : null;
     case "semantic":
       return await canonicalSubjectJid(client, draft.subjectJid);
-    case "relational":
-      return await canonicalSubjectJids(client, draft.subjectJids);
+    case "relational": {
+      const subjects = await canonicalSubjectJids(client, draft.subjectJids);
+      // Canonicalization can COLLAPSE the list — two lids linked to one phone JID,
+      // or a lid plus its own phone sibling, which an extractor reading a roster
+      // that carries both forms produces routinely. The CHECK would reject the row
+      // with a constraint name that explains nothing; say what actually happened.
+      if (subjects.length < 2) {
+        throw new Error(
+          `createMemory: relational subjects collapsed to ${subjects.length} distinct ` +
+            `identity after canonicalization (from ${draft.subjectJids.length} offered) — ` +
+            "a relationship needs two different people",
+        );
+      }
+      return subjects;
+    }
     case "self_state":
       return null;
   }
@@ -229,6 +263,21 @@ export async function createMemory(
   if (draft.evidence.length === 0) {
     throw new Error("createMemory: a memory cannot be written without evidence");
   }
+  // One message takes ONE stance per belief — the ledger's primary key says so, and
+  // `ON CONFLICT DO NOTHING` would absorb the second silently, leaving whichever
+  // stance the model happened to list first. That would let a reordering of the
+  // extractor's own output flip a belief between supported and contradicted, which
+  // is exactly what the ledger records a stance to prevent. Reject it loudly.
+  const stanceByMessage = new Map<number, EvidenceStance>();
+  for (const e of draft.evidence) {
+    const seen = stanceByMessage.get(e.messageId);
+    if (seen !== undefined && seen !== e.stance) {
+      throw new Error(
+        `createMemory: message ${e.messageId} is cited as both "${seen}" and "${e.stance}"`,
+      );
+    }
+    stanceByMessage.set(e.messageId, e.stance);
+  }
 
   const table = TABLE_FOR[draft.memoryType];
   const contentHash = memoryContentHash(content);
@@ -236,6 +285,7 @@ export async function createMemory(
   const stances = draft.evidence.map((e) => e.stance);
 
   const client = await pool.connect();
+  let released = false;
   try {
     await client.query("BEGIN");
 
@@ -253,7 +303,17 @@ export async function createMemory(
     );
     const observedAt = windowRows[0]?.observed_at ?? null;
     if (observedAt === null) {
+      // `null` is reserved for "the extractor cited nothing real here", which is a
+      // rate worth measuring. A groupId that does not exist would inflate that same
+      // number with a caller bug, so separate the two before returning — one extra
+      // query, and only on the path that was going to reject anyway.
+      const { rows: groupRows } = await client.query(`SELECT 1 FROM groups WHERE id = $1`, [
+        draft.groupId,
+      ]);
       await client.query("ROLLBACK");
+      if (groupRows.length === 0) {
+        throw new Error(`createMemory: no such group ${draft.groupId}`);
+      }
       return null;
     }
 
@@ -270,21 +330,24 @@ export async function createMemory(
     const { rows: inserted } = await client.query<{ id: string }>(
       `INSERT INTO ${table} (${columns.join(", ")})
        VALUES (${placeholders})
-       ON CONFLICT (${target.columns.join(", ")}) DO NOTHING
+       ON CONFLICT (${target.columns.join(", ")}) WHERE superseded_by_id IS NULL DO NOTHING
        RETURNING id`,
       values,
     );
 
     let id: number;
-    let created: boolean;
+    let outcome: MemoryWriteOutcome;
     if (inserted[0]) {
       id = Number(inserted[0].id);
-      created = true;
+      outcome = "created";
     } else {
+      // The same predicate as the dedupe index, or this would find a superseded
+      // row the index deliberately no longer covers.
       const { rows: existing } = await client.query<{ id: string; revoked_at: Date | null }>(
         `SELECT id, revoked_at FROM ${table}
           WHERE group_id = $1 AND content_hash = $2
-            AND ${target.extraColumns[0]} IS NOT DISTINCT FROM $3`,
+            AND ${target.extraColumns[0]} IS NOT DISTINCT FROM $3
+            AND superseded_by_id IS NULL`,
         [draft.groupId, contentHash, target.extraValues[0]],
       );
       const row = existing[0];
@@ -294,12 +357,17 @@ export async function createMemory(
         throw new Error(`createMemory: dedupe conflict on ${table} with no matching row`);
       }
       id = Number(row.id);
-      created = false;
       if (row.revoked_at !== null) {
         // Converged onto a withdrawn belief. Do not feed it new evidence.
         await client.query("COMMIT");
-        return { id, created: false, evidenceRecorded: 0 };
+        return {
+          id,
+          outcome: "converged_onto_revoked",
+          citationsOffered: draft.evidence.length,
+          citationsRecorded: 0,
+        };
       }
+      outcome = "converged";
     }
 
     // Evidence is written FROM `messages`, so a cited id that is not a real
@@ -314,54 +382,129 @@ export async function createMemory(
        ON CONFLICT DO NOTHING`,
       [draft.memoryType, id, messageIds, stances, draft.groupId],
     );
-    const evidenceRecorded = rowCount ?? 0;
+    const citationsRecorded = rowCount ?? 0;
 
     // THE INVARIANT. A memory this call created with nothing behind it must not
     // survive the call. Only checked for a fresh row: a converged one already has
     // the evidence of the run that created it.
-    if (created && evidenceRecorded === 0) {
+    if (outcome === "created" && citationsRecorded === 0) {
       await client.query("ROLLBACK");
       return null;
     }
 
     await client.query("COMMIT");
-    return { id, created, evidenceRecorded };
+    return { id, outcome, citationsOffered: draft.evidence.length, citationsRecorded };
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    // A ROLLBACK that itself fails leaves this connection inside an aborted
+    // transaction. Releasing it clean would put it back in the idle pool, and the
+    // next unrelated query in the process would fail with "current transaction is
+    // aborted" in a stack trace nowhere near here. Release WITH the error so the
+    // pool destroys the connection instead of reusing it.
+    let rollbackFailed = false;
+    await client.query("ROLLBACK").catch(() => {
+      rollbackFailed = true;
+    });
+    client.release(rollbackFailed ? (err as Error) : undefined);
+    released = true;
     throw err;
   } finally {
-    client.release();
+    if (!released) client.release();
   }
 }
 
 // ── Supersede and revoke ──────────────────────────────────────────────────
 
 /**
- * Point a memory at the newer one that replaced it. Returns whether it landed.
+ * Why a supersede was refused, when it was.
+ *
+ * Not a boolean, because the four refusals mean different things and a caller
+ * that cannot tell them apart cannot tell a race ("someone already replaced this")
+ * from a bug ("you named a row in another chat").
+ */
+export type SupersedeOutcome =
+  | "superseded"
+  | "already_superseded"
+  | "not_found"
+  | "cross_group"
+  | "would_cycle";
+
+/**
+ * Point a memory at the newer one that replaced it.
  *
  * Guarded to `superseded_by_id IS NULL`, so this can only ever move a row from
  * unset to set. Re-pointing an already-superseded row at a different replacement
- * would rewrite the very history this column exists to keep, so it returns false
- * instead. Self-supersede is rejected for the same reason.
+ * would rewrite the very history this column exists to keep.
  *
- * Within one table by construction — both ids name rows in the same kind, which
- * is why the supersede pointer is a plain self-reference and not polymorphic.
- * Contradiction BETWEEN kinds is not a pointer; it is resolved at read time by
- * the precedence rule, where raw history beats memory.
+ * SCOPED TO ONE GROUP, and the caller has to say which. Memory is per-group —
+ * that is the privacy boundary — but the foreign key only confines the pointer to
+ * the same TABLE, so nothing in the schema stops a chain from leaving the chat it
+ * belongs to. Left unguarded that is not cosmetic: `revokeMemory` follows the
+ * chain, so withdrawing a belief in one chat would silently withdraw one in
+ * another, and `ON DELETE SET NULL` means purging the second chat would quietly
+ * un-supersede the first belief and bring it back to life.
+ *
+ * REFUSES A CYCLE. `a → b` then `b → a` passes a per-row guard — at the second
+ * call `b` is still the head of its chain — and leaves BOTH rows superseded, so a
+ * live belief disappears from every default read with no way back. The walk
+ * forward from the replacement catches it, along with the degenerate self-pointer.
+ *
+ * WHAT THIS STILL CANNOT CATCH: the four tables have four independent sequences,
+ * so a low id exists in all of them and a caller that pairs the right id with the
+ * wrong `memoryType` names a real, unrelated row. Requiring the group narrows the
+ * blast radius to a collision inside one chat; it does not close it. A caller
+ * should carry the pair it read from {@link listLiveMemories}, never re-type an id.
  */
 export async function supersedeMemory(
   client: pg.Pool | pg.PoolClient,
-  input: { memoryType: MemoryType; memoryId: number; replacedById: number },
-): Promise<boolean> {
-  if (input.memoryId === input.replacedById) return false;
+  input: { memoryType: MemoryType; groupId: number; memoryId: number; replacedById: number },
+): Promise<SupersedeOutcome> {
   const table = TABLE_FOR[input.memoryType];
-  const { rowCount } = await client.query(
-    `UPDATE ${table}
-        SET superseded_by_id = $2
-      WHERE id = $1 AND superseded_by_id IS NULL`,
-    [input.memoryId, input.replacedById],
+  const { rows } = await client.query<{ id: string; superseded_by_id: string | null }>(
+    `SELECT id, superseded_by_id FROM ${table} WHERE id = ANY($1::bigint[]) AND group_id = $2`,
+    [[input.memoryId, input.replacedById], input.groupId],
   );
-  return (rowCount ?? 0) > 0;
+  const found = new Map(rows.map((r) => [Number(r.id), r]));
+  const target = found.get(input.memoryId);
+  if (!target || !found.has(input.replacedById)) {
+    // Either id may be missing outright or sitting in another chat; from here the
+    // two are indistinguishable, and `cross_group` is the more useful guess only
+    // when both rows exist somewhere.
+    return (await existsAnywhere(client, table, [input.memoryId, input.replacedById]))
+      ? "cross_group"
+      : "not_found";
+  }
+  if (target.superseded_by_id !== null) return "already_superseded";
+
+  const { rowCount } = await client.query(
+    `WITH RECURSIVE forward AS (
+       SELECT id, superseded_by_id FROM ${table} WHERE id = $2 AND group_id = $3
+       UNION
+       SELECT m.id, m.superseded_by_id
+         FROM ${table} m
+         JOIN forward f ON m.id = f.superseded_by_id
+     )
+     UPDATE ${table} t
+        SET superseded_by_id = $2
+      WHERE t.id = $1
+        AND t.group_id = $3
+        AND t.superseded_by_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM forward WHERE forward.id = t.id)`,
+    [input.memoryId, input.replacedById, input.groupId],
+  );
+  return (rowCount ?? 0) > 0 ? "superseded" : "would_cycle";
+}
+
+/** Do these ids exist in this table at all, in any group? Only used to explain a refusal. */
+async function existsAnywhere(
+  client: pg.Pool | pg.PoolClient,
+  table: string,
+  ids: number[],
+): Promise<boolean> {
+  const { rows } = await client.query<{ n: string }>(
+    `SELECT count(*)::int AS n FROM ${table} WHERE id = ANY($1::bigint[])`,
+    [ids],
+  );
+  return Number(rows[0]?.n) === ids.length;
 }
 
 /**
@@ -378,27 +521,38 @@ export async function supersedeMemory(
  * not contain. The walk is a recursive CTE over the chain, and `UNION` (not
  * `UNION ALL`) terminates it even if a chain were ever cyclic.
  *
+ * THE WALK IS SCOPED TO THE GROUP, not just seeded inside it. `supersedeMemory`
+ * refuses to build a chain that leaves the chat, but this is the function that
+ * would pay for it if one ever existed, so it re-asserts the boundary rather than
+ * trusting the writer — a withdrawal in one chat must never reach another.
+ *
  * Already-revoked rows are left alone rather than re-stamped, so the timestamp
  * keeps saying when the belief was actually withdrawn.
  */
 export async function revokeMemory(
   client: pg.Pool | pg.PoolClient,
-  input: { memoryType: MemoryType; memoryId: number; revokedByParticipantId?: number | null },
+  input: {
+    memoryType: MemoryType;
+    groupId: number;
+    memoryId: number;
+    revokedByParticipantId?: number | null;
+  },
 ): Promise<number> {
   const table = TABLE_FOR[input.memoryType];
   const { rowCount } = await client.query(
     `WITH RECURSIVE chain AS (
-       SELECT id, superseded_by_id FROM ${table} WHERE id = $1
+       SELECT id, superseded_by_id FROM ${table} WHERE id = $1 AND group_id = $3
        UNION
        SELECT m.id, m.superseded_by_id
          FROM ${table} m
          JOIN chain c ON m.id = c.superseded_by_id
+        WHERE m.group_id = $3
      )
      UPDATE ${table} t
         SET revoked_at = now(), revoked_by_participant_id = $2
        FROM chain
       WHERE t.id = chain.id AND t.revoked_at IS NULL`,
-    [input.memoryId, input.revokedByParticipantId ?? null],
+    [input.memoryId, input.revokedByParticipantId ?? null, input.groupId],
   );
   return rowCount ?? 0;
 }
@@ -415,7 +569,16 @@ export type StoredMemory = {
   /** Only set for `self_state`. */
   facet: SelfStateFacet | null;
   observedAt: Date;
-  /** Messages that argue for this belief. */
+  /**
+   * Messages that argue for this belief.
+   *
+   * ZERO IS MEANINGFUL, and it is the one value a consumer must not render like
+   * any other. It says every message this belief was traced to has been deleted,
+   * so the claim can no longer be checked against anything — the unfalsifiable
+   * assertion the evidence ledger exists to make impossible. The row is kept
+   * rather than removed on purpose (the record must show it lost its support),
+   * which is exactly why the surface showing it has to say so.
+   */
   supportingEvidence: number;
   /** Messages that argue against it. */
   contradictingEvidence: number;
@@ -438,6 +601,12 @@ export type StoredMemory = {
  * union of them and two equally-supported rows from different tables would come
  * back in whatever order the planner felt like. The choice of which kind sorts
  * first is arbitrary; that the order is stable at all is not.
+ *
+ * THE LIMIT TRUNCATES SILENTLY, and this is a general-purpose read, not the read
+ * path. Slice 5 forces `self_state` into every turn; it must NOT do that through
+ * this function, whose global evidence ranking would let a one-message behaviour
+ * rule fall off the end once a chatty group accumulates better-cited memories.
+ * That query wants its own, scoped to the facet and taking the newest rows.
  */
 export async function listLiveMemories(
   client: pg.Pool | pg.PoolClient,

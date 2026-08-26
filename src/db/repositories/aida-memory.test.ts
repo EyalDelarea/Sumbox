@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase } from "../../test/db.js";
-import type { EvidenceStance } from "./aida-memory.js";
+import type { EvidenceStance, MemoryWriteResult } from "./aida-memory.js";
 import {
   canonicalSubjectJid,
   createMemory,
@@ -63,6 +63,22 @@ describe("aida-memory", () => {
       [groupId, opts.sentAt ?? null, `dk-${randomUUID()}`, opts.senderJid ?? null],
     );
     return Number(rows[0]?.id);
+  }
+
+  /**
+   * `createMemory`, with "it actually wrote something" asserted rather than
+   * assumed.
+   *
+   * Reaching for `written.id` instead let three cases in the first draft of
+   * this file pass in a world where `createMemory` returns null unconditionally —
+   * they revoked id 0, or asserted a count was 0, and were satisfied. That is the
+   * failure mode the #83 handoff warns about: a test that passes without the write
+   * path being correct. Every case that needs an id goes through here.
+   */
+  async function write(draft: Parameters<typeof createMemory>[1]): Promise<MemoryWriteResult> {
+    const result = await createMemory(pool, draft);
+    expect(result, "expected this write to land").not.toBeNull();
+    return result as MemoryWriteResult;
   }
 
   async function evidenceCount(memoryType: string, memoryId: number): Promise<number> {
@@ -160,7 +176,7 @@ describe("aida-memory", () => {
     const a = await newMessage(g, { sentAt: older });
     const b = await newMessage(g, { sentAt: newer });
 
-    const written = await createMemory(pool, {
+    const written = await write({
       memoryType: "episodic",
       groupId: g,
       content: "הטיול נדחה ליום ראשון",
@@ -172,7 +188,7 @@ describe("aida-memory", () => {
 
     const { rows } = await pool.query<{ observed_at: Date }>(
       `SELECT observed_at FROM aida_episodic_memories WHERE id = $1`,
-      [written?.id],
+      [written.id],
     );
     expect(rows[0]?.observed_at.toISOString()).toBe(newer.toISOString());
   });
@@ -208,14 +224,14 @@ describe("aida-memory", () => {
       source: "bridge",
     });
 
-    const viaLid = await createMemory(pool, {
+    const viaLid = await write({
       memoryType: "semantic",
       groupId: g,
       subjectJid: "777@lid",
       content: "מגיע תמיד מאוחר",
       evidence: [{ messageId: m1, stance: "supports" }],
     });
-    const viaPn = await createMemory(pool, {
+    const viaPn = await write({
       memoryType: "semantic",
       groupId: g,
       subjectJid: "972500000777@s.whatsapp.net",
@@ -223,8 +239,8 @@ describe("aida-memory", () => {
       evidence: [{ messageId: m2, stance: "supports" }],
     });
 
-    expect(viaPn?.id).toBe(viaLid?.id);
-    expect(viaPn?.created).toBe(false);
+    expect(viaPn.id).toBe(viaLid.id);
+    expect(viaPn.outcome).toBe("converged");
     expect(await countRows("aida_semantic_memories", g)).toBe(1);
   });
 
@@ -234,7 +250,7 @@ describe("aida-memory", () => {
     // The display name is identical; the identities are not. Subjects key on the
     // identity, which is the whole reason they are JIDs and not participant ids.
     for (const jid of ["972500000001@s.whatsapp.net", "972500000002@s.whatsapp.net"]) {
-      await createMemory(pool, {
+      await write({
         memoryType: "semantic",
         groupId: g,
         subjectJid: jid,
@@ -258,15 +274,15 @@ describe("aida-memory", () => {
       evidence: [{ messageId: m, stance: "supports" }],
     } as const;
 
-    const first = await createMemory(pool, draft);
-    const second = await createMemory(pool, draft);
+    const first = await write(draft);
+    const second = await write(draft);
 
-    expect(first?.created).toBe(true);
-    expect(second?.created).toBe(false);
-    expect(second?.id).toBe(first?.id);
-    expect(second?.evidenceRecorded, "a repeat citation is one citation").toBe(0);
+    expect(first.outcome).toBe("created");
+    expect(second.outcome).toBe("converged");
+    expect(second.id).toBe(first.id);
+    expect(second.citationsRecorded, "a repeat citation is one citation").toBe(0);
     expect(await countRows("aida_semantic_memories", g)).toBe(1);
-    expect(await evidenceCount("semantic", first?.id ?? 0)).toBe(1);
+    expect(await evidenceCount("semantic", first.id)).toBe(1);
   });
 
   it("converges on a subject-less episodic memory too", async () => {
@@ -282,10 +298,10 @@ describe("aida-memory", () => {
       evidence: [{ messageId: m, stance: "supports" }],
     } as const;
 
-    await createMemory(pool, draft);
-    const second = await createMemory(pool, draft);
+    await write(draft);
+    const second = await write(draft);
 
-    expect(second?.created).toBe(false);
+    expect(second.outcome).toBe("converged");
     expect(await countRows("aida_episodic_memories", g)).toBe(1);
   });
 
@@ -300,18 +316,18 @@ describe("aida-memory", () => {
       content: "לא אוכל בשר",
     } as const;
 
-    const first = await createMemory(pool, {
+    const first = await write({
       ...base,
       evidence: [{ messageId: m1, stance: "supports" }],
     });
-    const second = await createMemory(pool, {
+    const second = await write({
       ...base,
       evidence: [{ messageId: m2, stance: "supports" }],
     });
 
-    expect(second?.id).toBe(first?.id);
-    expect(second?.evidenceRecorded).toBe(1);
-    expect(await evidenceCount("semantic", first?.id ?? 0)).toBe(2);
+    expect(second.id).toBe(first.id);
+    expect(second.citationsRecorded).toBe(1);
+    expect(await evidenceCount("semantic", first.id)).toBe(2);
   });
 
   // ── Relational order-independence ────────────────────────────────────────
@@ -322,14 +338,14 @@ describe("aida-memory", () => {
     const m2 = await newMessage(g);
     const content = "מתכננים ביחד את הטיול";
 
-    const forward = await createMemory(pool, {
+    const forward = await write({
       memoryType: "relational",
       groupId: g,
       subjectJids: ["972500000010@s.whatsapp.net", "972500000020@s.whatsapp.net"],
       content,
       evidence: [{ messageId: m1, stance: "supports" }],
     });
-    const reversed = await createMemory(pool, {
+    const reversed = await write({
       memoryType: "relational",
       groupId: g,
       subjectJids: ["972500000020@s.whatsapp.net", "972500000010@s.whatsapp.net"],
@@ -337,7 +353,7 @@ describe("aida-memory", () => {
       evidence: [{ messageId: m2, stance: "supports" }],
     });
 
-    expect(reversed?.id).toBe(forward?.id);
+    expect(reversed.id).toBe(forward.id);
     expect(await countRows("aida_relational_memories", g)).toBe(1);
   });
 
@@ -368,7 +384,7 @@ describe("aida-memory", () => {
     const forIt = await newMessage(g);
     const againstIt = await newMessage(g);
 
-    const written = await createMemory(pool, {
+    const written = await write({
       memoryType: "semantic",
       groupId: g,
       subjectJid: "972500000030@s.whatsapp.net",
@@ -380,7 +396,7 @@ describe("aida-memory", () => {
     });
 
     const [memory] = await listLiveMemories(pool, { groupId: g });
-    expect(written?.evidenceRecorded).toBe(2);
+    expect(written.citationsRecorded).toBe(2);
     expect(memory?.supportingEvidence).toBe(1);
     expect(memory?.contradictingEvidence).toBe(1);
   });
@@ -390,14 +406,14 @@ describe("aida-memory", () => {
   it("leaves the old belief present and unmodified when it is superseded", async () => {
     const g = await newGroup("supersede");
     const m = await newMessage(g);
-    const old = await createMemory(pool, {
+    const old = await write({
       memoryType: "semantic",
       groupId: g,
       subjectJid: "972500000040@s.whatsapp.net",
       content: "גר בתל אביב",
       evidence: [{ messageId: m, stance: "supports" }],
     });
-    const fresh = await createMemory(pool, {
+    const fresh = await write({
       memoryType: "semantic",
       groupId: g,
       subjectJid: "972500000040@s.whatsapp.net",
@@ -408,52 +424,210 @@ describe("aida-memory", () => {
     expect(
       await supersedeMemory(pool, {
         memoryType: "semantic",
-        memoryId: old?.id ?? 0,
-        replacedById: fresh?.id ?? 0,
+        groupId: g,
+        memoryId: old.id,
+        replacedById: fresh.id,
       }),
-    ).toBe(true);
+    ).toBe("superseded");
 
     const { rows } = await pool.query<{ content: string; superseded_by_id: string }>(
       `SELECT content, superseded_by_id FROM aida_semantic_memories WHERE id = $1`,
-      [old?.id],
+      [old.id],
     );
     expect(rows[0]?.content, "the replaced belief is never rewritten").toBe("גר בתל אביב");
-    expect(Number(rows[0]?.superseded_by_id)).toBe(fresh?.id);
+    expect(Number(rows[0]?.superseded_by_id)).toBe(fresh.id);
   });
 
   it("refuses to re-point an already-superseded memory, or to point one at itself", async () => {
     const g = await newGroup("supersede-guard");
     const m = await newMessage(g);
-    const a = await createMemory(pool, {
+    const a = await write({
       memoryType: "episodic",
       groupId: g,
       content: "גרסה א",
       evidence: [{ messageId: m, stance: "supports" }],
     });
-    const b = await createMemory(pool, {
+    const b = await write({
       memoryType: "episodic",
       groupId: g,
       content: "גרסה ב",
       evidence: [{ messageId: m, stance: "supports" }],
     });
-    const c = await createMemory(pool, {
+    const c = await write({
       memoryType: "episodic",
       groupId: g,
       content: "גרסה ג",
       evidence: [{ messageId: m, stance: "supports" }],
     });
-    const ids = { a: a?.id ?? 0, b: b?.id ?? 0, c: c?.id ?? 0 };
+    const ids = { a: a.id, b: b.id, c: c.id };
+    const supersede = (memoryId: number, replacedById: number) =>
+      supersedeMemory(pool, { memoryType: "episodic", groupId: g, memoryId, replacedById });
+
+    expect(await supersede(ids.a, ids.b)).toBe("superseded");
+    expect(
+      await supersede(ids.a, ids.c),
+      "rewriting the pointer would destroy the history it exists to keep",
+    ).toBe("already_superseded");
+    expect(await supersede(ids.b, ids.b)).toBe("would_cycle");
+    // b → c → b would leave BOTH rows superseded and neither reachable, and a
+    // per-row guard cannot see it: at this point c is still the head of its chain.
+    expect(await supersede(ids.b, ids.c)).toBe("superseded");
+    expect(await supersede(ids.c, ids.b)).toBe("would_cycle");
+  });
+
+  it("refuses a supersede pointer that would leave the chat it belongs to", async () => {
+    // The FK only confines the pointer to the same TABLE. Left unguarded, a chain
+    // that crosses chats means a revoke in one silently withdraws a belief in
+    // another, and purging the second un-supersedes the first — both reproduced
+    // before this guard existed.
+    const mine = await newGroup("cross-mine");
+    const theirs = await newGroup("cross-theirs");
+    const ours = await write({
+      memoryType: "episodic",
+      groupId: mine,
+      content: "אמונה שלנו",
+      evidence: [{ messageId: await newMessage(mine), stance: "supports" }],
+    });
+    const foreign = await write({
+      memoryType: "episodic",
+      groupId: theirs,
+      content: "אמונה שלהם",
+      evidence: [{ messageId: await newMessage(theirs), stance: "supports" }],
+    });
 
     expect(
-      await supersedeMemory(pool, { memoryType: "episodic", memoryId: ids.a, replacedById: ids.b }),
-    ).toBe(true);
+      await supersedeMemory(pool, {
+        memoryType: "episodic",
+        groupId: mine,
+        memoryId: ours.id,
+        replacedById: foreign.id,
+      }),
+    ).toBe("cross_group");
+    // And the withdrawal cannot walk out of the chat either.
+    await revokeMemory(pool, { memoryType: "episodic", groupId: mine, memoryId: ours.id });
+    expect(await listLiveMemories(pool, { groupId: theirs })).toHaveLength(1);
+  });
+
+  it("refuses to supersede a memory that is not in the named group", async () => {
+    const mine = await newGroup("scoped-supersede");
+    const m = await newMessage(mine);
+    const a = await write({
+      memoryType: "episodic",
+      groupId: mine,
+      content: "א",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    const b = await write({
+      memoryType: "episodic",
+      groupId: mine,
+      content: "ב",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    const elsewhere = await newGroup("scoped-elsewhere");
     expect(
-      await supersedeMemory(pool, { memoryType: "episodic", memoryId: ids.a, replacedById: ids.c }),
-      "rewriting the pointer would destroy the history it exists to keep",
-    ).toBe(false);
-    expect(
-      await supersedeMemory(pool, { memoryType: "episodic", memoryId: ids.b, replacedById: ids.b }),
-    ).toBe(false);
+      await supersedeMemory(pool, {
+        memoryType: "episodic",
+        groupId: elsewhere,
+        memoryId: a.id,
+        replacedById: b.id,
+      }),
+    ).toBe("cross_group");
+  });
+
+  it("lets a superseded belief be formed again when the chat says it again", async () => {
+    // The dedupe index is PARTIAL on superseded_by_id for this reason. A total one
+    // would make a replaced belief permanently unwritable in the group — and
+    // silently, since the write would report success onto the superseded row.
+    const g = await newGroup("re-form");
+    const draft = {
+      memoryType: "episodic",
+      groupId: g,
+      content: "גר בתל אביב",
+      evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+    } as const;
+
+    const original = await write(draft);
+    const replacement = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "עבר לחיפה",
+      evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+    });
+    await supersedeMemory(pool, {
+      memoryType: "episodic",
+      groupId: g,
+      memoryId: original.id,
+      replacedById: replacement.id,
+    });
+
+    const reformed = await write({
+      ...draft,
+      evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+    });
+
+    expect(reformed.outcome, "new messages, so a new belief — not a converge").toBe("created");
+    expect(reformed.id).not.toBe(original.id);
+    expect((await listLiveMemories(pool, { groupId: g })).map((r) => r.content).sort()).toEqual([
+      "גר בתל אביב",
+      "עבר לחיפה",
+    ]);
+  });
+
+  // ── Incoherent input is a caller bug, not a data outcome ─────────────────
+
+  it("refuses a message cited as both supporting and contradicting", async () => {
+    // The ledger's primary key would absorb the second row and keep whichever
+    // stance the model listed first, so the extractor reordering its own output
+    // could flip a belief between supported and contradicted.
+    const g = await newGroup("both-stances");
+    const m = await newMessage(g);
+    await expect(
+      createMemory(pool, {
+        memoryType: "episodic",
+        groupId: g,
+        content: "גם וגם",
+        evidence: [
+          { messageId: m, stance: "supports" },
+          { messageId: m, stance: "contradicts" },
+        ],
+      }),
+    ).rejects.toThrow(/cited as both/);
+    expect(await countRows("aida_episodic_memories", g)).toBe(0);
+  });
+
+  it("says so when canonicalization collapses a relationship to one person", async () => {
+    // An ordinary extractor mistake, not an exotic one: a roster carrying both
+    // forms of the same human yields a lid and its own phone sibling. Without this
+    // the caller gets a bare CHECK-constraint name that explains nothing.
+    const g = await newGroup("collapse");
+    await recordLink(pool, {
+      lidJid: "313@lid",
+      pnJid: "972500000313@s.whatsapp.net",
+      source: "bridge",
+    });
+    await expect(
+      createMemory(pool, {
+        memoryType: "relational",
+        groupId: g,
+        subjectJids: ["313@lid", "972500000313@s.whatsapp.net"],
+        content: "יחס של אדם עם עצמו",
+        evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+      }),
+    ).rejects.toThrow(/collapsed to 1 distinct identity/);
+  });
+
+  it("separates a wrong group from an extractor that cited nothing real", async () => {
+    // Both used to return null, so a caller bug inflated the reject rate that
+    // exists to grade the model.
+    const g = await newGroup("unknown-group");
+    await expect(
+      createMemory(pool, {
+        memoryType: "episodic",
+        groupId: 999_999_999,
+        content: "קבוצה שלא קיימת",
+        evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+      }),
+    ).rejects.toThrow(/no such group/);
   });
 
   // ── Revoke ───────────────────────────────────────────────────────────────
@@ -466,26 +640,32 @@ describe("aida-memory", () => {
     const m = await newMessage(g);
     const ids: number[] = [];
     for (const content of ["גרסה 1", "גרסה 2", "גרסה 3"]) {
-      const written = await createMemory(pool, {
+      const written = await write({
         memoryType: "episodic",
         groupId: g,
         content,
         evidence: [{ messageId: m, stance: "supports" }],
       });
-      ids.push(written?.id ?? 0);
+      ids.push(written.id);
     }
     await supersedeMemory(pool, {
       memoryType: "episodic",
-      memoryId: ids[0] ?? 0,
-      replacedById: ids[1] ?? 0,
+      groupId: g,
+      memoryId: ids[0],
+      replacedById: ids[1],
     });
     await supersedeMemory(pool, {
       memoryType: "episodic",
-      memoryId: ids[1] ?? 0,
-      replacedById: ids[2] ?? 0,
+      groupId: g,
+      memoryId: ids[1],
+      replacedById: ids[2],
     });
 
-    const stamped = await revokeMemory(pool, { memoryType: "episodic", memoryId: ids[0] ?? 0 });
+    const stamped = await revokeMemory(pool, {
+      memoryType: "episodic",
+      groupId: g,
+      memoryId: ids[0],
+    });
 
     expect(stamped, "the root and both descendants").toBe(3);
     const { rows } = await pool.query<{ n: string }>(
@@ -499,24 +679,24 @@ describe("aida-memory", () => {
   it("does not re-stamp a memory that was already withdrawn", async () => {
     const g = await newGroup("revoke-twice");
     const m = await newMessage(g);
-    const written = await createMemory(pool, {
+    const written = await write({
       memoryType: "episodic",
       groupId: g,
       content: "טעות",
       evidence: [{ messageId: m, stance: "supports" }],
     });
-    await revokeMemory(pool, { memoryType: "episodic", memoryId: written?.id ?? 0 });
+    await revokeMemory(pool, { memoryType: "episodic", groupId: g, memoryId: written.id });
     const { rows: first } = await pool.query<{ revoked_at: Date }>(
       `SELECT revoked_at FROM aida_episodic_memories WHERE id = $1`,
-      [written?.id],
+      [written.id],
     );
 
-    expect(await revokeMemory(pool, { memoryType: "episodic", memoryId: written?.id ?? 0 })).toBe(
-      0,
-    );
+    expect(
+      await revokeMemory(pool, { memoryType: "episodic", groupId: g, memoryId: written.id }),
+    ).toBe(0);
     const { rows: second } = await pool.query<{ revoked_at: Date }>(
       `SELECT revoked_at FROM aida_episodic_memories WHERE id = $1`,
-      [written?.id],
+      [written.id],
     );
     expect(second[0]?.revoked_at.toISOString()).toBe(first[0]?.revoked_at.toISOString());
   });
@@ -532,12 +712,14 @@ describe("aida-memory", () => {
       evidence: [{ messageId: m, stance: "supports" }],
     } as const;
 
-    const written = await createMemory(pool, draft);
-    await revokeMemory(pool, { memoryType: "semantic", memoryId: written?.id ?? 0 });
-    const again = await createMemory(pool, draft);
+    const written = await write(draft);
+    await revokeMemory(pool, { memoryType: "semantic", groupId: g, memoryId: written.id });
+    const again = await write(draft);
 
-    expect(again?.id).toBe(written?.id);
-    expect(again?.created).toBe(false);
+    expect(again.id).toBe(written.id);
+    expect(again.outcome, "and the caller is told it was withdrawn, not merely known").toBe(
+      "converged_onto_revoked",
+    );
     expect(await countRows("aida_semantic_memories", g)).toBe(1);
     expect(await listLiveMemories(pool, { groupId: g })).toEqual([]);
   });
@@ -548,7 +730,7 @@ describe("aida-memory", () => {
     const g = await newGroup("default-read");
     const m = await newMessage(g);
     const make = (content: string) =>
-      createMemory(pool, {
+      write({
         memoryType: "episodic",
         groupId: g,
         content,
@@ -559,17 +741,18 @@ describe("aida-memory", () => {
     const revoked = await make("מבוטל");
     const replaced = await make("הוחלף");
     const replacement = await make("המחליף");
-    await revokeMemory(pool, { memoryType: "episodic", memoryId: revoked?.id ?? 0 });
+    await revokeMemory(pool, { memoryType: "episodic", groupId: g, memoryId: revoked.id });
     await supersedeMemory(pool, {
       memoryType: "episodic",
-      memoryId: replaced?.id ?? 0,
-      replacedById: replacement?.id ?? 0,
+      groupId: g,
+      memoryId: replaced.id,
+      replacedById: replacement.id,
     });
 
     const contents = (await listLiveMemories(pool, { groupId: g })).map((r) => r.content).sort();
     expect(contents).toEqual(["המחליף", "חי"]);
     expect(contents).not.toContain("מבוטל");
-    expect(live?.created).toBe(true);
+    expect(live.outcome).toBe("created");
   });
 
   it("returns all four kinds, ranked by evidence and then recency", async () => {
@@ -579,20 +762,20 @@ describe("aida-memory", () => {
     const m1 = await newMessage(g, { sentAt: older });
     const m2 = await newMessage(g, { sentAt: newer });
 
-    await createMemory(pool, {
+    await write({
       memoryType: "episodic",
       groupId: g,
       content: "אירוע",
       evidence: [{ messageId: m1, stance: "supports" }],
     });
-    await createMemory(pool, {
+    await write({
       memoryType: "semantic",
       groupId: g,
       subjectJid: "972500000060@s.whatsapp.net",
       content: "תכונה",
       evidence: [{ messageId: m2, stance: "supports" }],
     });
-    await createMemory(pool, {
+    await write({
       memoryType: "relational",
       groupId: g,
       subjectJids: ["972500000060@s.whatsapp.net", "972500000070@s.whatsapp.net"],
@@ -603,7 +786,7 @@ describe("aida-memory", () => {
         { messageId: m2, stance: "supports" },
       ],
     });
-    await createMemory(pool, {
+    await write({
       memoryType: "self_state",
       groupId: g,
       facet: "behaviour",
@@ -634,7 +817,7 @@ describe("aida-memory", () => {
     const mine = await newGroup("scoped-mine");
     const theirs = await newGroup("scoped-theirs");
     const m = await newMessage(theirs);
-    await createMemory(pool, {
+    await write({
       memoryType: "episodic",
       groupId: theirs,
       content: "של הקבוצה השנייה",
@@ -648,7 +831,7 @@ describe("aida-memory", () => {
   it("takes a group's memories and their evidence with the group", async () => {
     const g = await newGroup("cascade-group");
     const m = await newMessage(g);
-    const written = await createMemory(pool, {
+    const written = await write({
       memoryType: "episodic",
       groupId: g,
       content: "ימחק עם הקבוצה",
@@ -659,7 +842,7 @@ describe("aida-memory", () => {
     // messages first and the group last, so this follows the same order. Evidence
     // goes with the messages; the memories go with the group.
     await pool.query(`DELETE FROM messages WHERE group_id = $1`, [g]);
-    expect(await evidenceCount("episodic", written?.id ?? 0)).toBe(0);
+    expect(await evidenceCount("episodic", written.id)).toBe(0);
 
     await pool.query(`DELETE FROM groups WHERE id = $1`, [g]);
     expect(await countRows("aida_episodic_memories", g)).toBe(0);
@@ -668,7 +851,7 @@ describe("aida-memory", () => {
   it("leaves a memory unsupported rather than gone when its source message is deleted", async () => {
     const g = await newGroup("cascade-message");
     const m = await newMessage(g);
-    const written = await createMemory(pool, {
+    const written = await write({
       memoryType: "episodic",
       groupId: g,
       content: "המקור נמחק",
@@ -680,7 +863,7 @@ describe("aida-memory", () => {
     // The belief survives with nothing behind it — which is the correct signal,
     // not a bug: the record has to show that it lost its support.
     expect(await countRows("aida_episodic_memories", g)).toBe(1);
-    expect(await evidenceCount("episodic", written?.id ?? 0)).toBe(0);
+    expect(await evidenceCount("episodic", written.id)).toBe(0);
     const [memory] = await listLiveMemories(pool, { groupId: g });
     expect(memory?.supportingEvidence).toBe(0);
   });

@@ -88,6 +88,35 @@ function liveIndex(pgm: MigrationBuilder, table: string): void {
   });
 }
 
+/**
+ * The dedupe key, which is what makes re-running extraction over the same window
+ * converge instead of writing a new row per run.
+ *
+ * PARTIAL ON `superseded_by_id IS NULL`, and the predicate carries real meaning.
+ * A belief she has since replaced must be re-formable: if the chat starts saying
+ * the old thing again, that is a new observation with new messages behind it, and
+ * a total index would make the belief permanently unwritable in that group —
+ * silently, since the write would report success onto the superseded row.
+ *
+ * A REVOKED row is NOT excluded, deliberately. It keeps occupying its slot, so
+ * re-extraction converges onto the withdrawn belief and adds nothing. Revocation
+ * is sticky by construction rather than by a filter someone has to remember, and
+ * that asymmetry between revoked and superseded is the whole point of the
+ * predicate being written this narrowly.
+ *
+ * A raw index rather than a UNIQUE constraint because a constraint cannot be
+ * partial — and, for the episodic case, because Postgres treats NULLs as distinct
+ * in a unique index by default, so `NULLS NOT DISTINCT` is needed or every
+ * re-extraction would insert another copy of the same subject-less event.
+ */
+function dedupeIndex(pgm: MigrationBuilder, table: string, subjectColumn: string): void {
+  pgm.sql(`
+    CREATE UNIQUE INDEX ${table}_dedupe
+      ON ${table} (group_id, ${subjectColumn}, content_hash) NULLS NOT DISTINCT
+      WHERE superseded_by_id IS NULL;
+  `);
+}
+
 export async function up(pgm: MigrationBuilder): Promise<void> {
   // ── Relational subject canonicalization ──────────────────────────────────
   // "Ron and Eyal" and "Eyal and Ron" are ONE relationship, and the schema must
@@ -129,14 +158,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     ...commonColumns(pgm, "aida_episodic_memories"),
     subject_jid: { type: "text", notNull: false },
   });
-  // NULLS NOT DISTINCT, which a plain UNIQUE constraint does not give: Postgres
-  // treats NULLs as distinct by default, so without it every re-extraction would
-  // insert another copy of the same subject-less event and the convergence this
-  // hash exists for would silently not happen.
-  pgm.sql(`
-    CREATE UNIQUE INDEX aida_episodic_memories_dedupe
-      ON aida_episodic_memories (group_id, subject_jid, content_hash) NULLS NOT DISTINCT;
-  `);
+  dedupeIndex(pgm, "aida_episodic_memories", "subject_jid");
   liveIndex(pgm, "aida_episodic_memories");
 
   // ── Semantic — a lasting pattern about one person ────────────────────────
@@ -144,9 +166,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     ...commonColumns(pgm, "aida_semantic_memories"),
     subject_jid: { type: "text", notNull: true },
   });
-  pgm.addConstraint("aida_semantic_memories", "aida_semantic_memories_dedupe", {
-    unique: ["group_id", "subject_jid", "content_hash"],
-  });
+  dedupeIndex(pgm, "aida_semantic_memories", "subject_jid");
   liveIndex(pgm, "aida_semantic_memories");
 
   // ── Relational — a lasting pattern between people ────────────────────────
@@ -160,9 +180,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
   // Array equality is order-sensitive, which is exactly what makes this dedupe
   // work: the CHECK above guarantees the stored order is canonical, so two rows
   // for the same set of people are impossible rather than merely discouraged.
-  pgm.addConstraint("aida_relational_memories", "aida_relational_memories_dedupe", {
-    unique: ["group_id", "subject_jids", "content_hash"],
-  });
+  dedupeIndex(pgm, "aida_relational_memories", "subject_jids");
   liveIndex(pgm, "aida_relational_memories");
 
   // ── Self-state — what she holds about herself, and how to behave ─────────
@@ -186,9 +204,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
   pgm.addConstraint("aida_self_state_memories", "aida_self_state_memories_facet_closed_set", {
     check: "facet IN ('knowledge', 'behaviour')",
   });
-  pgm.addConstraint("aida_self_state_memories", "aida_self_state_memories_dedupe", {
-    unique: ["group_id", "facet", "content_hash"],
-  });
+  dedupeIndex(pgm, "aida_self_state_memories", "facet");
   liveIndex(pgm, "aida_self_state_memories");
 }
 
