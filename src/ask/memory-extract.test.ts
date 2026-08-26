@@ -182,6 +182,166 @@ describe("selectCandidates (D7 exclusions)", () => {
     ]);
   });
 
+  // #95: the narrowing --write needs, and the reason it is a PARAMETER and not a
+  // change of default. A semantic memory's subject is NOT NULL, so a belief cited
+  // from a jid-less message cannot be stored — but slice 4's episodic memories
+  // have a nullable subject, so the same message is usable there. Narrowing the
+  // default would take that away silently.
+  it("can require an author identity, without changing what the default returns", async () => {
+    const g = await upsertGroup(pool, { name: `ri-${Math.random()}`, source: "import" });
+    const withJid = await upsertParticipant(pool, `RA-${Math.random()}`);
+    const noJid = await upsertParticipant(pool, `RB-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, withJid, {
+        textContent: "יש לי ג׳יד",
+        senderJid: "972500000042@s.whatsapp.net",
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      }),
+      msg(g, noJid, { textContent: "אין לי ג׳יד", sentAt: new Date("2026-05-01T11:00:00.000Z") }),
+    ]);
+
+    const wide = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect(wide.candidates.map((m) => m.content)).toEqual(["יש לי ג׳יד", "אין לי ג׳יד"]);
+
+    const narrow = await selectCandidates(pool, g, SINCE, UNTIL, { requireAuthorIdentity: true });
+    expect(narrow.candidates.map((m) => m.content)).toEqual(["יש לי ג׳יד"]);
+  });
+
+  // The empty string is not null, and on this data it is the COMMON case: 2157
+  // messages carry `sender_jid = ''`, every one of them in a 1:1 chat, because
+  // the mapper resolves a group's per-message participant key but a DM's is
+  // absent. `IS NOT NULL` admits them, so a narrowing written that way narrows
+  // nothing on more than half the chats — and every candidate then dies later,
+  // in a different counter, with the skip line still reading zero.
+  it("treats an empty sender_jid as no identity, exactly as a null one", async () => {
+    const g = await upsertGroup(pool, { name: `es-${Math.random()}`, source: "import" });
+    const real = await upsertParticipant(pool, `EA-${Math.random()}`);
+    const blank = await upsertParticipant(pool, `EB-${Math.random()}`);
+    const spaces = await upsertParticipant(pool, `EC-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, real, {
+        textContent: "יש לי ג׳יד",
+        senderJid: "972500000042@s.whatsapp.net",
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      }),
+      msg(g, blank, {
+        textContent: "ג׳יד ריק",
+        senderJid: "",
+        sentAt: new Date("2026-05-01T11:00:00.000Z"),
+      }),
+      msg(g, spaces, {
+        textContent: "ג׳יד רווחים",
+        senderJid: "   ",
+        sentAt: new Date("2026-05-01T12:00:00.000Z"),
+      }),
+    ]);
+
+    const narrow = await selectCandidates(pool, g, SINCE, UNTIL, { requireAuthorIdentity: true });
+    expect(narrow.candidates.map((m) => m.content)).toEqual(["יש לי ג׳יד"]);
+    // And the count must agree with the narrowing, or the printed skip line
+    // contradicts the run it describes.
+    expect(narrow.withoutAuthorIdentity).toBe(2);
+  });
+
+  // The narrowing is a LOSS, and a loss nobody counts is a corpus that shrinks
+  // silently. Reported either way so the closing gap stays watchable from the
+  // dry run too — measured on group 70 it fell from 100% to 17% in two months.
+  it("counts the messages that carry no author identity, narrowed or not", async () => {
+    const g = await upsertGroup(pool, { name: `ci-${Math.random()}`, source: "import" });
+    const withJid = await upsertParticipant(pool, `CA-${Math.random()}`);
+    const noJid = await upsertParticipant(pool, `CB-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, withJid, { textContent: "a", senderJid: "972500000042@s.whatsapp.net" }),
+      msg(g, noJid, { textContent: "b" }),
+      msg(g, noJid, { textContent: "c" }),
+    ]);
+    expect((await selectCandidates(pool, g, SINCE, UNTIL)).withoutAuthorIdentity).toBe(2);
+    expect(
+      (await selectCandidates(pool, g, SINCE, UNTIL, { requireAuthorIdentity: true }))
+        .withoutAuthorIdentity,
+    ).toBe(2);
+  });
+
+  // The mis-attribution the design calls unrecoverable. In a 1:1 chat the mapper
+  // has no per-message participant key and falls back to the chat's remote jid —
+  // so the OWNER'S OWN messages carry the other person's identity. Measured live:
+  // 36 distinct jids across 923 from_me rows in 1:1 chats, against exactly 1
+  // across 783 in group chats. Attributing on those rows would file what Eyal
+  // said about himself against whoever he was talking to.
+  it("refuses the owner's own messages in a 1:1 chat, where the jid is the other person's", async () => {
+    const dm = await upsertGroup(pool, { name: `dm-${Math.random()}`, source: "live" });
+    await pool.query(`UPDATE groups SET whatsapp_id = $2 WHERE id = $1`, [
+      dm,
+      `972500000077@s.whatsapp.net`,
+    ]);
+    const them = await upsertParticipant(pool, `DM-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(dm, them, {
+        textContent: "אני גר בחיפה",
+        senderJid: "972500000077@s.whatsapp.net",
+        fromMe: false,
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      }),
+      // Eyal's own message — carrying THEIR jid, which is the bug.
+      msg(dm, them, {
+        textContent: "אני עובד באינטל",
+        senderJid: "972500000077@s.whatsapp.net",
+        fromMe: true,
+        sentAt: new Date("2026-05-01T11:00:00.000Z"),
+      }),
+    ]);
+
+    const narrow = await selectCandidates(pool, dm, SINCE, UNTIL, { requireAuthorIdentity: true });
+    expect(narrow.candidates.map((m) => m.content)).toEqual(["אני גר בחיפה"]);
+    // Counted, and counted SEPARATELY. The narrowing drops rows for two unrelated
+    // reasons; a caller reporting only the identity one understates what it left
+    // out, which is the skip-line-disagrees-with-the-run bug in a new place.
+    expect(narrow.misattributedSelfMessages).toBe(1);
+    expect(narrow.withoutAuthorIdentity, "a different reason, a different count").toBe(0);
+    // The dry run still sees both — slice 4 can hold them without attributing.
+    expect((await selectCandidates(pool, dm, SINCE, UNTIL)).candidates).toHaveLength(2);
+  });
+
+  // The cap keeps the NEWEST, so widening --hours to reach a backlog drops the
+  // oldest — the opposite of what widening it was for. Untested, the flag that
+  // says so was wired to the output and never proven to fire.
+  it("says when the window held more than the cap allowed, and which end was lost", async () => {
+    const g = await upsertGroup(pool, { name: `tr-${Math.random()}`, source: "import" });
+    const p = await upsertParticipant(pool, `TR-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, p, { textContent: "ישן", sentAt: new Date("2026-05-01T09:00:00.000Z") }),
+      msg(g, p, { textContent: "אמצע", sentAt: new Date("2026-05-01T10:00:00.000Z") }),
+      msg(g, p, { textContent: "חדש", sentAt: new Date("2026-05-01T11:00:00.000Z") }),
+    ]);
+
+    const capped = await selectCandidates(pool, g, SINCE, UNTIL, { limit: 2 });
+    expect(capped.truncated).toBe(true);
+    expect(
+      capped.candidates.map((m) => m.content),
+      "the oldest is what falls off",
+    ).toEqual(["אמצע", "חדש"]);
+
+    expect((await selectCandidates(pool, g, SINCE, UNTIL, { limit: 3 })).truncated).toBe(false);
+  });
+
+  it("keeps the owner's own messages in a GROUP chat, where the jid really is theirs", async () => {
+    const grp = await upsertGroup(pool, { name: `gc-${Math.random()}`, source: "live" });
+    await pool.query(`UPDATE groups SET whatsapp_id = $2 WHERE id = $1`, [
+      grp,
+      `120363000000000001@g.us`,
+    ]);
+    const me = await upsertParticipant(pool, `GC-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(grp, me, {
+        textContent: "אני עובד באינטל",
+        senderJid: "972500000099@s.whatsapp.net",
+        fromMe: true,
+      }),
+    ]);
+    const narrow = await selectCandidates(pool, grp, SINCE, UNTIL, { requireAuthorIdentity: true });
+    expect(narrow.candidates.map((m) => m.content)).toEqual(["אני עובד באינטל"]);
+  });
+
   // A corpus that shrinks silently reads as a quiet group. The counts are how
   // that stays visible; they describe the window BEFORE the cap and before the
   // TS re-check, which is what makes them comparable run to run.

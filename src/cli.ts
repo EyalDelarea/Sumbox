@@ -692,85 +692,159 @@ program
 
 program
   .command("aida-memory")
-  .description("Dry-run @Aida's memory extraction over a window — prints, never stores")
+  .description("Extract @Aida's memories over a window — prints by default, stores with --write")
   .requiredOption("--group <id>", "Group id")
   .option("--extract", "Run extraction over the window and print what would be learned")
+  .option("--write", "Store what --extract would learn. The only path that writes a memory.")
   .option("--hours <n>", "Window size for --extract, in hours", "24")
-  .action(async (options: { group: string; extract?: boolean; hours?: string }) => {
-    // A DRY RUN, and deliberately so. The shadow-phase tables this used to write
-    // to and list are gone (see the drop migration); the four-type schema that
-    // replaces them lands in the next slice. What survives is the measurement
-    // path — it is what produced the extraction numbers on #83, and losing it
-    // while the schema is in flight would mean re-deriving them from scratch.
-    if (!options.extract) {
-      process.stdout.write(
-        "Nothing to show: memory storage is being replaced (see #83).\n" +
-          "Run with --extract to see what a window WOULD produce.\n",
-      );
-      return;
-    }
-    const { createDbClient } = await import("./db/client.js");
-    const { selectCandidates, buildExtractionPrompt, parseCandidates, validateCandidate } =
-      await import("./ask/memory-extract.js");
-    const { OllamaSummarizer } = await import("./summarization/summarizer.js");
-    const groupId = Number(options.group);
-    const pool = createDbClient();
-    try {
-      const config = loadConfig();
-      const extractor = new OllamaSummarizer({
-        host: config.summarization.ollamaHost,
-        model: config.summarization.model,
-        numCtx: config.summarization.numCtx,
-        // Pinned to 0: extraction is a parsing task, not a writing one.
-        temperature: 0,
-        repeatPenalty: config.summarization.repeatPenalty,
-        numPredict: config.summarization.numPredict,
-      });
-      const until = new Date();
-      const since = new Date(until.getTime() - Number(options.hours ?? 24) * 3600_000);
+  .action(
+    async (options: { group: string; extract?: boolean; write?: boolean; hours?: string }) => {
+      // --extract alone is a DRY RUN and stays one: it is the measurement path that
+      // produced the extraction numbers on #83, and slice 4 still needs it to see
+      // what a window holds INCLUDING the messages --write narrows away.
+      //
+      // --write is the first thing in this project that ever stores a memory, and
+      // it is a flag rather than a setting on purpose — no configuration change can
+      // cause a belief to be written behind your back. There is no confirmation
+      // prompt either: everything it writes is revocable from the memories screen
+      // (#96), and a prompt would only train the habit of dismissing it.
+      if (!options.extract) {
+        process.stdout.write(
+          "Nothing to show. Run with --extract to see what a window would produce,\n" +
+            "or --extract --write to store it.\n",
+        );
+        return;
+      }
+      const { createDbClient } = await import("./db/client.js");
+      const { selectCandidates, buildExtractionPrompt, parseCandidates, validateCandidate } =
+        await import("./ask/memory-extract.js");
+      const { storeAccepted, tally } = await import("./ask/memory-write.js");
+      const { OllamaSummarizer } = await import("./summarization/summarizer.js");
 
-      const selection = await selectCandidates(pool, groupId, since, until);
-      const shown = new Map(selection.candidates.map((m) => [m.messageId, m]));
-      const rejected: Record<string, number> = {};
-      const accepted: { sourceMessageId: number; content: string; sender: string }[] = [];
+      // Validated for the reason the --runs guard 120 lines below records:
+      // Number("abc") is NaN, and an unvalidated one there produced a green
+      // security report from a suite that never executed. Here the cost is worse
+      // — --hours 0 or a negative makes `since >= until`, which matches nothing
+      // and prints as a clean empty window, so a typo reads as "she learned
+      // nothing" from the one command in this project that writes.
+      const groupId = Number(options.group);
+      const hours = Number(options.hours ?? 24);
+      if (!Number.isInteger(groupId) || groupId <= 0) {
+        process.stderr.write(
+          `Error: --group must be a positive group id, got "${options.group}"\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (!Number.isFinite(hours) || hours <= 0) {
+        process.stderr.write(`Error: --hours must be a positive number, got "${options.hours}"\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const pool = createDbClient();
+      try {
+        const config = loadConfig();
+        const extractor = new OllamaSummarizer({
+          host: config.summarization.ollamaHost,
+          model: config.summarization.model,
+          numCtx: config.summarization.numCtx,
+          // Pinned to 0: extraction is a parsing task, not a writing one.
+          temperature: 0,
+          repeatPenalty: config.summarization.repeatPenalty,
+          numPredict: config.summarization.numPredict,
+        });
+        const until = new Date();
+        const since = new Date(until.getTime() - hours * 3600_000);
 
-      if (selection.candidates.length > 0) {
-        const raw = (
-          await extractor.summarize({
-            system:
-              "You extract structured facts from chat logs. You reply with JSON only, never prose.",
-            user: buildExtractionPrompt(selection.candidates),
-          })
-        ).overview;
-        for (const candidate of parseCandidates(raw)) {
-          const { ok, reason } = validateCandidate(candidate, shown);
-          if (!ok) {
-            const key = reason ?? "unknown";
-            rejected[key] = (rejected[key] ?? 0) + 1;
-            continue;
+        // --write narrows to messages carrying an author identity: everything the
+        // shipped prompt emits is a self-statement, and a semantic memory's subject
+        // is NOT NULL, so a jid-less message cannot produce a storable belief. Not
+        // sending them to the model at all beats extracting and discarding.
+        const selection = await selectCandidates(pool, groupId, since, until, {
+          requireAuthorIdentity: options.write === true,
+        });
+        const shown = new Map(selection.candidates.map((m) => [m.messageId, m]));
+        const rejected: Record<string, number> = {};
+        const accepted: { sourceMessageId: number; content: string; sender: string }[] = [];
+
+        if (selection.candidates.length > 0) {
+          const raw = (
+            await extractor.summarize({
+              system:
+                "You extract structured facts from chat logs. You reply with JSON only, never prose.",
+              user: buildExtractionPrompt(selection.candidates),
+            })
+          ).overview;
+          for (const candidate of parseCandidates(raw)) {
+            const { ok, reason } = validateCandidate(candidate, shown);
+            if (!ok) {
+              const key = reason ?? "unknown";
+              rejected[key] = (rejected[key] ?? 0) + 1;
+              continue;
+            }
+            accepted.push({ ...ok, sender: shown.get(ok.sourceMessageId)?.sender ?? "" });
           }
-          accepted.push({ ...ok, sender: shown.get(ok.sourceMessageId)?.sender ?? "" });
         }
-      }
 
-      process.stdout.write(
-        `window ${selection.windowTotal} · unattributable ${selection.unattributable} · ` +
-          `considered ${selection.candidates.length} · would-accept ${accepted.length}\n` +
-          `rejected: ${JSON.stringify(rejected)}\n\n`,
-      );
-      for (const a of accepted) {
-        // The citation prints with every row on purpose: a memory you cannot
-        // trace back to a message is exactly what this design forbids.
-        process.stdout.write(`  ${a.sender}: ${a.content}   (msg:${a.sourceMessageId})\n`);
+        process.stdout.write(
+          `window ${selection.windowTotal} · unattributable ${selection.unattributable} · ` +
+            `no-identity ${selection.withoutAuthorIdentity} · ` +
+            `considered ${selection.candidates.length} · would-accept ${accepted.length}\n` +
+            `rejected: ${JSON.stringify(rejected)}\n` +
+            // The narrowing differs between the two paths, so the dry run has to
+            // say what --write would leave out, or it is not a preview of it.
+            // Both reasons, separately. The narrowing drops rows for two unrelated
+            // causes, and one of them closes over time while the other does not.
+            `write-path narrowing: ${selection.withoutAuthorIdentity} no author identity, ` +
+            `${selection.misattributedSelfMessages} own message in a 1:1 chat` +
+            (options.write ? " (excluded from this run)\n" : " (would be excluded by --write)\n") +
+            // The cap keeps the NEWEST, so widening --hours to catch a backlog
+            // drops the oldest — the opposite of what widening it was for.
+            (selection.truncated
+              ? `WINDOW TRUNCATED at ${selection.candidates.length}: the oldest eligible messages ` +
+                `were dropped. Narrow --hours and run again to reach them.\n`
+              : "") +
+            "\n",
+        );
+        for (const a of accepted) {
+          // The citation prints with every row on purpose: a memory you cannot
+          // trace back to a message is exactly what this design forbids.
+          process.stdout.write(`  ${a.sender}: ${a.content}   (msg:${a.sourceMessageId})\n`);
+        }
+
+        if (!options.write) {
+          process.stdout.write("\nNothing was stored. Add --write to store it.\n");
+          return;
+        }
+
+        const results = await storeAccepted(pool, accepted, shown, groupId);
+        // Per candidate, with the id, because revoking takes one — and this run
+        // is the only moment where the id, the words, the citation and the author
+        // are all in hand at once. A bare "created: 3" would make finding those
+        // three a database query rather than a scroll back through this output.
+        for (const r of results) {
+          const id = r.memoryId === undefined ? "" : ` #${r.memoryId}`;
+          const why = r.error === undefined ? "" : ` — ${r.error}`;
+          process.stdout.write(`  [${r.outcome}${id}] ${r.candidate.content}${why}\n`);
+        }
+        process.stdout.write(`\nstored: ${JSON.stringify(tally(results))}\n`);
+        if (results.some((r) => r.outcome === "failed")) {
+          // Reported AFTER the per-candidate list, never instead of it: earlier
+          // candidates committed their own transactions, and an exit that hid
+          // them would leave beliefs on file that the run never mentioned.
+          process.exitCode = 1;
+        }
+      } catch (err) {
+        // `process.exitCode`, not `process.exit`: stdout to a pipe or file is
+        // asynchronous, and exiting outright can drop the list of what was
+        // already stored — the one record of beliefs now on file.
+        process.stderr.write(`Error: aida-memory failed: ${(err as Error).message}\n`);
+        process.exitCode = 1;
+      } finally {
+        await pool.end();
       }
-      process.stdout.write("\nNothing was stored.\n");
-    } catch (err) {
-      process.stderr.write(`Error: aida-memory failed: ${(err as Error).message}\n`);
-      process.exit(1);
-    } finally {
-      await pool.end();
-    }
-  });
+    },
+  );
 
 program
   .command("aida-measure")
