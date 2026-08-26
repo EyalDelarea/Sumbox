@@ -3,11 +3,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { recordAidaMessage } from "../db/repositories/aida-messages.js";
 import { upsertGroup } from "../db/repositories/groups.js";
 import { insertMessages } from "../db/repositories/messages.js";
-import { upsertParticipant } from "../db/repositories/participants.js";
+import { listGroupParticipants, upsertParticipant } from "../db/repositories/participants.js";
 import type { NormalizedMessage } from "../importer/types.js";
 import { createTestDatabase } from "../test/db.js";
 import {
   type CandidateMessage,
+  isIdentifiableAuthor,
   parseCandidates,
   selectCandidates,
   validateCandidate,
@@ -63,7 +64,7 @@ describe("selectCandidates (D7 exclusions)", () => {
     await recordAidaMessage(pool, { groupId: g, externalId: hers.externalId as string });
 
     const got = await selectCandidates(pool, g, SINCE, UNTIL);
-    expect(got.map((m) => m.content)).toEqual(["אני עובד בחברת סייבר"]);
+    expect(got.candidates.map((m) => m.content)).toEqual(["אני עובד בחברת סייבר"]);
   });
 
   // This is the property that makes the plant vector expensive: to teach her
@@ -78,7 +79,7 @@ describe("selectCandidates (D7 exclusions)", () => {
       reply,
     ]);
     await recordAidaMessage(pool, { groupId: g, externalId: reply.externalId as string });
-    expect(await selectCandidates(pool, g, SINCE, UNTIL)).toEqual([]);
+    expect((await selectCandidates(pool, g, SINCE, UNTIL)).candidates).toEqual([]);
   });
 
   it("keeps the owner's own messages — from_me is not an exclusion", async () => {
@@ -87,9 +88,118 @@ describe("selectCandidates (D7 exclusions)", () => {
     const g = await upsertGroup(pool, { name: `z-${Math.random()}`, source: "import" });
     const p = await upsertParticipant(pool, `O-${Math.random()}`);
     await insertMessages(pool, [msg(g, p, { fromMe: true, textContent: "אני גר בתל אביב" })]);
-    expect((await selectCandidates(pool, g, SINCE, UNTIL)).map((m) => m.content)).toEqual([
-      "אני גר בתל אביב",
+    expect(
+      (await selectCandidates(pool, g, SINCE, UNTIL)).candidates.map((m) => m.content),
+    ).toEqual(["אני גר בתל אביב"]);
+  });
+
+  // ── #88 · the author must be an identifiable person ──────────────────────
+  //
+  // A group message arriving without a pushName and without a per-message
+  // participant key resolves its sender name to the CHAT'S OWN JID, and
+  // participants are keyed on display_name alone — so every such message from
+  // every such sender lands on one row. Measured on group 70 over 30 days: 259
+  // messages, 159 from_me and 100 from real different people, one "person".
+  //
+  // The roster already hides that row. Extraction did not, so the first thing
+  // memory would do on real data is form beliefs about someone who is not there.
+
+  it("excludes a message whose author is a JID-shaped participant", async () => {
+    const g = await upsertGroup(pool, { name: `j-${Math.random()}`, source: "import" });
+    const bucket = await upsertParticipant(pool, `120363406567322025@g.us`);
+    const real = await upsertParticipant(pool, `R-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, bucket, { textContent: "מאת אף אחד" }),
+      msg(g, real, { textContent: "אני גר בחיפה" }),
     ]);
+    const got = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect(got.candidates.map((m) => m.content)).toEqual(["אני גר בחיפה"]);
+  });
+
+  it("excludes a message on the Unknown placeholder participant", async () => {
+    const g = await upsertGroup(pool, { name: `u-${Math.random()}`, source: "import" });
+    const unknown = await upsertParticipant(pool, "Unknown");
+    await insertMessages(pool, [msg(g, unknown, { textContent: "אני עובד בבנק" })]);
+    expect((await selectCandidates(pool, g, SINCE, UNTIL)).candidates).toEqual([]);
+  });
+
+  // The historical case, and the reason this rule beats a content heuristic.
+  // `aida_messages` covers her replies but only 5 of 9 digest posts in group 70;
+  // digests posted before 2026-08-19 were never marked, so today she reads her
+  // own summaries as ordinary conversation. Every digest lands on a JID-shaped
+  // participant, so the author rule closes the gap with no backfill.
+  it("excludes an unmarked digest post through the author rule, not its shape", async () => {
+    const g = await upsertGroup(pool, { name: `d-${Math.random()}`, source: "import" });
+    const bucket = await upsertParticipant(pool, `120363406567322099@g.us`);
+    await insertMessages(pool, [
+      msg(g, bucket, {
+        fromMe: true,
+        textContent: "🕐 _מסכם מ־10.8_ 📝 *תקציר* הקבוצה תכננה טיול למונטנגרו",
+      }),
+    ]);
+    // Deliberately NOT recorded in aida_messages — that is the whole point.
+    expect((await selectCandidates(pool, g, SINCE, UNTIL)).candidates).toEqual([]);
+  });
+
+  it("keeps ordinary members and the owner, with the existing exclusions intact", async () => {
+    const g = await upsertGroup(pool, { name: `k-${Math.random()}`, source: "import" });
+    const member = await upsertParticipant(pool, `M-${Math.random()}`);
+    const owner = await upsertParticipant(pool, `W-${Math.random()}`);
+    const hers = msg(g, member, { textContent: "תכף תכף... my own reply" });
+    await insertMessages(pool, [
+      msg(g, member, { textContent: "אני לומדת רפואה" }),
+      msg(g, owner, { fromMe: true, textContent: "אני גר בתל אביב" }),
+      msg(g, member, { textContent: "@אידה מה קורה?" }),
+      hers,
+    ]);
+    await recordAidaMessage(pool, { groupId: g, externalId: hers.externalId as string });
+    const got = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect(got.candidates.map((m) => m.content).sort()).toEqual(
+      ["אני גר בתל אביב", "אני לומדת רפואה"].sort(),
+    );
+  });
+
+  // sender_jid is the identity a later slice attributes a memory to. It is
+  // NULLABLE on the column, and a null must never become an exclusion: a message
+  // with a resolved display name is from a real person whether or not the jid
+  // was captured. Getting this backwards silently guts the corpus.
+  it("carries the author's sender_jid, and keeps a candidate whose jid is null", async () => {
+    const g = await upsertGroup(pool, { name: `i-${Math.random()}`, source: "import" });
+    const withJid = await upsertParticipant(pool, `A-${Math.random()}`);
+    const noJid = await upsertParticipant(pool, `B-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, withJid, {
+        textContent: "יש לי כלב",
+        senderJid: "972501234567@s.whatsapp.net",
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      }),
+      msg(g, noJid, { textContent: "אין לי ג׳יד", sentAt: new Date("2026-05-01T11:00:00.000Z") }),
+    ]);
+    const got = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect(got.candidates.map((m) => [m.content, m.senderJid])).toEqual([
+      ["יש לי כלב", "972501234567@s.whatsapp.net"],
+      ["אין לי ג׳יד", null],
+    ]);
+  });
+
+  // A corpus that shrinks silently reads as a quiet group. The counts are how
+  // that stays visible; they describe the window BEFORE the cap and before the
+  // TS re-check, which is what makes them comparable run to run.
+  it("reports what the window held and what it lost to unattributable authorship", async () => {
+    const g = await upsertGroup(pool, { name: `c-${Math.random()}`, source: "import" });
+    const bucket = await upsertParticipant(pool, `120363406567322077@g.us`);
+    const real = await upsertParticipant(pool, `C-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, bucket, { textContent: "one" }),
+      msg(g, bucket, { textContent: "two" }),
+      msg(g, real, { textContent: "three" }),
+    ]);
+    const got = await selectCandidates(pool, g, SINCE, UNTIL);
+    expect({
+      windowTotal: got.windowTotal,
+      unattributable: got.unattributable,
+      kept: got.candidates.length,
+    }).toEqual({ windowTotal: 3, unattributable: 2, kept: 1 });
   });
 
   it("scopes to the group and the window", async () => {
@@ -101,9 +211,9 @@ describe("selectCandidates (D7 exclusions)", () => {
       msg(a, p, { textContent: "too old", sentAt: new Date("2026-04-01T10:00:00Z") }),
       msg(a, p, { textContent: "in window" }),
     ]);
-    expect((await selectCandidates(pool, a, SINCE, UNTIL)).map((m) => m.content)).toEqual([
-      "in window",
-    ]);
+    expect(
+      (await selectCandidates(pool, a, SINCE, UNTIL)).candidates.map((m) => m.content),
+    ).toEqual(["in window"]);
   });
 });
 
@@ -154,5 +264,69 @@ describe("parseCandidates", () => {
     expect(parseCandidates("I could not find anything useful")).toEqual([]);
     expect(parseCandidates("[not json")).toEqual([]);
     expect(parseCandidates('{"sourceMessageId":1}')).toEqual([]);
+  });
+});
+
+describe("the author rule and the roster", () => {
+  let pool: pg.Pool;
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  // The extractor's predicate is a COPY of the roster's, and a copy with a
+  // comment promising it matches drifts the moment either side is edited. This
+  // is the promise, executable: one fixture, both readers, and they must name
+  // the same people. #88 puts the roster explicitly out of scope, so importing
+  // one shared fragment is not an option here — this is what replaces it.
+  //
+  // Mutation-checked in both directions it is meant to catch:
+  //   - drop `<> 'Unknown'` from listGroupParticipants  -> RED
+  //   - drop it from BOTH the SQL and isIdentifiableAuthor -> RED
+  // It deliberately does NOT catch dropping it from this module's SQL alone:
+  // isIdentifiableAuthor still filters the row, so behaviour is unchanged. That
+  // is the belt-and-braces working, not a hole — but it means this test pins the
+  // OBSERVABLE rule, not the SQL text.
+  it("agrees with the roster on who is a person", async () => {
+    const g = await upsertGroup(pool, { name: `r-${Math.random()}`, source: "import" });
+    const real = await upsertParticipant(pool, `Dana-${Math.random()}`);
+    const bucket = await upsertParticipant(pool, `120363406567322055@g.us`);
+    const unknown = await upsertParticipant(pool, "Unknown");
+    await insertMessages(pool, [
+      msg(g, real, { textContent: "אני גרה בירושלים" }),
+      msg(g, bucket, { textContent: "מאת אף אחד" }),
+      msg(g, unknown, { textContent: "מאת לא ידוע" }),
+    ]);
+
+    // includeOwner: true — the roster @Aida actually builds, and the one that
+    // matches selectCandidates, which does not exclude from_me either.
+    const roster = (await listGroupParticipants(pool, g, 25, { includeOwner: true })).map(
+      (r) => r.name,
+    );
+    const senders = (await selectCandidates(pool, g, SINCE, UNTIL)).candidates.map((m) => m.sender);
+    expect(new Set(senders)).toEqual(new Set(roster));
+  });
+});
+
+describe("isIdentifiableAuthor", () => {
+  // Mirrors listGroupParticipants' predicate exactly. Kept as a pure function so
+  // the TS re-check beside the SQL is directly testable rather than only
+  // reachable through a database.
+  it("rejects the shapes that are not a person", () => {
+    expect(isIdentifiableAuthor("120363406567322025@g.us")).toBe(false);
+    expect(isIdentifiableAuthor("972501234567@s.whatsapp.net")).toBe(false);
+    expect(isIdentifiableAuthor("Unknown")).toBe(false);
+    expect(isIdentifiableAuthor("")).toBe(false);
+    expect(isIdentifiableAuthor("   ")).toBe(false);
+    expect(isIdentifiableAuthor(null)).toBe(false);
+  });
+
+  it("accepts an ordinary display name", () => {
+    expect(isIdentifiableAuthor("רועי")).toBe(true);
+    expect(isIdentifiableAuthor("Eyal")).toBe(true);
+    // Not a JID, and not the placeholder — a self-chosen name stays a name.
+    expect(isIdentifiableAuthor("unknown")).toBe(true);
   });
 });
