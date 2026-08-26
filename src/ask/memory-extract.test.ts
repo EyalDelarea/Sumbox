@@ -11,6 +11,7 @@ import {
   isIdentifiableAuthor,
   parseCandidates,
   selectCandidates,
+  toSemanticDraft,
   validateCandidate,
 } from "./memory-extract.js";
 
@@ -372,5 +373,61 @@ describe("isIdentifiableAuthor", () => {
     expect(isIdentifiableAuthor("Eyal")).toBe(true);
     // Not a JID, and not the placeholder — a self-chosen name stays a name.
     expect(isIdentifiableAuthor("unknown")).toBe(true);
+  });
+});
+
+/**
+ * The bridge #95 crosses: a candidate the extractor produced and the validator
+ * accepted, turned into something the memory repository will store.
+ *
+ * Pure, and tested without a model or a database, because what can go wrong here
+ * is attribution — a belief filed against the wrong person, or against nobody —
+ * and that does not need either to go wrong.
+ */
+describe("toSemanticDraft", () => {
+  const shown = (over: Partial<CandidateMessage> = {}): Map<number, CandidateMessage> =>
+    new Map([
+      [
+        7,
+        {
+          messageId: 7,
+          sender: "רוני",
+          senderJid: "972500000042@s.whatsapp.net",
+          content: "אני לא אוכלת בשר",
+          sentAt: new Date("2026-05-01T10:00:00.000Z"),
+          ...over,
+        },
+      ],
+    ]);
+
+  it("files the belief against the author of the message it cites", () => {
+    const draft = toSemanticDraft({ sourceMessageId: 7, content: "רוני לא אוכלת בשר" }, shown(), 3);
+    expect(draft).toEqual({
+      memoryType: "semantic",
+      groupId: 3,
+      subjectJid: "972500000042@s.whatsapp.net",
+      content: "רוני לא אוכלת בשר",
+      evidence: [{ messageId: 7, stance: "supports" }],
+    });
+  });
+
+  it("refuses a candidate whose author has no identity, rather than guessing one", () => {
+    // The alternative considered and rejected on #95: file it as `episodic`,
+    // whose subject is nullable. That keeps the row by calling a fact about a
+    // person an event, which corrupts the one thing four tables exist to say.
+    expect(
+      toSemanticDraft({ sourceMessageId: 7, content: "x" }, shown({ senderJid: null }), 3),
+    ).toBe(null);
+  });
+
+  it("refuses a candidate citing a message it was never shown", () => {
+    // The validator already rejects an invented id; this is the second line, and
+    // it is the one that holds if a future caller forgets to validate first.
+    expect(toSemanticDraft({ sourceMessageId: 999, content: "x" }, shown(), 3)).toBe(null);
+  });
+
+  it("cites the message as supporting — the prompt cannot express contradiction", () => {
+    const draft = toSemanticDraft({ sourceMessageId: 7, content: "y" }, shown(), 3);
+    expect(draft?.evidence).toEqual([{ messageId: 7, stance: "supports" }]);
   });
 });

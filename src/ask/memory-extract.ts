@@ -28,6 +28,7 @@
  */
 import type pg from "pg";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
+import type { MemoryDraft } from "../db/repositories/aida-memory.js";
 
 /**
  * Most messages handed to the extractor in one pass.
@@ -366,4 +367,52 @@ export function buildExtractionPrompt(messages: CandidateMessage[]): string {
     "",
     lines,
   ].join("\n");
+}
+
+/**
+ * Turn a validated candidate into something the memory repository will store.
+ *
+ * ALWAYS `semantic`, and that is a mapping rather than a choice. The prompt above
+ * has one hard rule — only what the speaker said about THEMSELVES — so every item
+ * it can emit is a durable fact about one person, which is exactly what the
+ * semantic table holds. Filing them anywhere else would mislabel them, and the
+ * other three tables stay empty until a slice writes a prompt that emits a type.
+ *
+ * THE SUBJECT IS THE AUTHOR, which only follows from that same rule: a
+ * self-statement is about whoever said it. The raw `sender_jid` is passed
+ * through; `createMemory` canonicalizes it, so one human reached by two WhatsApp
+ * identities stays one subject.
+ *
+ * Returns null rather than throwing on the two ways a candidate can fail to map:
+ *
+ *  - THE AUTHOR HAS NO IDENTITY. `semantic.subject_jid` is NOT NULL, and it should
+ *    be: a belief about a person that cannot say which person is not a belief
+ *    about a person. Filing it as `episodic` instead — whose subject is nullable —
+ *    would keep the row by calling a fact about someone an event, so it is
+ *    refused. The identity cannot be recovered either: it came from Baileys'
+ *    `key.participant` at ingest and was never written down, and a display name
+ *    cannot stand in because names collapse different people.
+ *  - THE CITED MESSAGE WAS NEVER SHOWN. `validateCandidate` already rejects an
+ *    invented id; this is the second line, and it is the one that still holds if a
+ *    future caller forgets to validate first.
+ *
+ * Both are ordinary outcomes to count, not errors — the reject rate is the signal
+ * for whether the extractor is good enough to trust.
+ */
+export function toSemanticDraft(
+  candidate: Candidate,
+  shown: ReadonlyMap<number, CandidateMessage>,
+  groupId: number,
+): MemoryDraft | null {
+  const source = shown.get(candidate.sourceMessageId);
+  if (!source?.senderJid) return null;
+  return {
+    memoryType: "semantic",
+    groupId,
+    subjectJid: source.senderJid,
+    content: candidate.content,
+    // The prompt cites exactly one id per item and cannot express disagreement,
+    // so every citation it produces supports the belief it came with.
+    evidence: [{ messageId: candidate.sourceMessageId, stance: "supports" }],
+  };
 }
