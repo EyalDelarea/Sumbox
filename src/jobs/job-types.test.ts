@@ -10,7 +10,6 @@ describe("JOB_DESCRIPTORS", () => {
       "analyze.video",
       "summarize.group",
       "summarize.total",
-      "memory.extract",
     ]);
     for (const t of ALL_JOB_TYPES) {
       expect(JOB_DESCRIPTORS[t]).toBeDefined();
@@ -26,24 +25,15 @@ describe("JOB_DESCRIPTORS", () => {
         "analyze.video",
         "summarize.group",
         "summarize.total",
-        // Shares the one local GPU, so it queues behind real work rather than
-        // starving a summary or an answer someone is waiting on.
-        "memory.extract",
       ]),
     );
     expect(JOB_DESCRIPTORS["import.file"].prefetch).toBe("concurrency");
   });
 
-  it("pins the Ollama serialization gate — the 5 Ollama-backed jobs, not audio/import", () => {
+  it("pins the Ollama serialization gate — the 4 Ollama-backed jobs, not audio/import", () => {
     const usesOllama = ALL_JOB_TYPES.filter((t) => JOB_DESCRIPTORS[t].usesOllama);
     expect(new Set(usesOllama)).toEqual(
-      new Set<JobType>([
-        "analyze.image",
-        "analyze.video",
-        "summarize.group",
-        "summarize.total",
-        "memory.extract",
-      ]),
+      new Set<JobType>(["analyze.image", "analyze.video", "summarize.group", "summarize.total"]),
     );
     expect(JOB_DESCRIPTORS["transcribe.voicenote"].usesOllama).toBe(false);
     expect(JOB_DESCRIPTORS["import.file"].usesOllama).toBe(false);

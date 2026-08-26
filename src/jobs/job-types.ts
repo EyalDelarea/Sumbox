@@ -34,10 +34,6 @@ export const JOB_DESCRIPTORS = {
   "analyze.video": { prefetch: "one", usesOllama: true, opLabel: "video" },
   "summarize.group": { prefetch: "one", usesOllama: true, opLabel: "summary" },
   "summarize.total": { prefetch: "one", usesOllama: true, opLabel: "summary" },
-  // @Aida's memory extraction. Ollama-bound like the summarizer, and prefetch
-  // "one" for the same reason: it shares the single local GPU, and a shadow-phase
-  // background job must never starve a summary or an answer someone is waiting on.
-  "memory.extract": { prefetch: "one", usesOllama: true, opLabel: "summary" },
 } as const satisfies Record<string, JobDescriptor>;
 
 export type JobType = keyof typeof JOB_DESCRIPTORS;
@@ -52,9 +48,6 @@ export interface JobPayloads {
   "analyze.video": { messageId: string };
   "summarize.group": { groupId: string };
   "summarize.total": { since: string };
-  /** The window is explicit so a re-run over the same span converges — the
-   *  observation dedupe key makes re-extraction idempotent. */
-  "memory.extract": { groupId: string; since: string; until: string };
 }
 
 export interface Job<T extends JobType = JobType> {
