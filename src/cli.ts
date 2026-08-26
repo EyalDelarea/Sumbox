@@ -760,7 +760,8 @@ program
             maxAttempts: 1,
           });
           process.stdout.write(
-            `considered ${r.considered} · proposed ${r.proposed} · accepted ${r.accepted}\n` +
+            `window ${r.windowTotal} · unattributable ${r.unattributable} · ` +
+              `considered ${r.considered} · proposed ${r.proposed} · accepted ${r.accepted}\n` +
               `rejected: ${JSON.stringify(r.rejected)}\n\n`,
           );
         }
