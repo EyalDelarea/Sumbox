@@ -112,6 +112,8 @@ async function getMemories(url: URL, res: http.ServerResponse, deps: ServerDeps)
         byHuman: r.correctionNote !== null,
         revoked: r.revokedAt !== null,
         superseded: r.supersededById !== null,
+        // So the UI can open the conversation on the message in one tap.
+        sourceMessageId: r.firstSourceMessageId,
       })),
     );
   } catch {

@@ -690,6 +690,15 @@ export type MemoryForReview = StoredMemory & {
   supersededById: number | null;
   /** Set when a human withdrew it. */
   revokedAt: Date | null;
+  /**
+   * The earliest message this belief cites, or null when every one has been
+   * deleted.
+   *
+   * Carried so the review surface can open the conversation on it in one tap. A
+   * belief you cannot check against what was actually said is the failure this
+   * whole design exists to prevent, so the check must not be a second request.
+   */
+  firstSourceMessageId: number | null;
 };
 
 export type ReviewFilter = {
@@ -738,12 +747,13 @@ export async function listMemoriesForReview(
       SELECT m.id, '${memoryType}'::text AS memory_type, m.content, ${subjects} AS subject_jids,
              ${facet} AS facet, m.observed_at, m.group_id, g.name AS group_name,
              m.correction_note, m.superseded_by_id, m.revoked_at,
-             e.supporting, e.contradicting
+             e.supporting, e.contradicting, e.first_source
         FROM ${table} m
         JOIN groups g ON g.id = m.group_id
         JOIN LATERAL (
           SELECT count(*) FILTER (WHERE stance = 'supports') AS supporting,
-                 count(*) FILTER (WHERE stance = 'contradicts') AS contradicting
+                 count(*) FILTER (WHERE stance = 'contradicts') AS contradicting,
+                 min(message_id) FILTER (WHERE stance = 'supports') AS first_source
             FROM aida_memory_evidence
            WHERE memory_type = '${memoryType}' AND memory_id = m.id
         ) e ON true
@@ -764,6 +774,7 @@ export async function listMemoriesForReview(
     revoked_at: Date | null;
     supporting: string;
     contradicting: string;
+    first_source: string | null;
   }>(
     `${branches.join("\n      UNION ALL")}
      ORDER BY observed_at DESC, memory_type ASC, id DESC
@@ -785,6 +796,8 @@ export async function listMemoriesForReview(
     correctionNote: r.correction_note,
     supersededById: r.superseded_by_id === null ? null : Number(r.superseded_by_id),
     revokedAt: r.revoked_at,
+    firstSourceMessageId:
+      r.first_source === null || r.first_source === undefined ? null : Number(r.first_source),
   }));
 }
 

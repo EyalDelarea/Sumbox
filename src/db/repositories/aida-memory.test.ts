@@ -927,6 +927,38 @@ describe("aida-memory", () => {
     expect(withWithdrawn.find((r) => r.id === gone.id)?.revokedAt).not.toBeNull();
   });
 
+  it("carries the message a belief cites, so the source is one tap away", async () => {
+    // Regression: the aggregate was computed in the lateral join and never
+    // selected in the outer branch, so it arrived `undefined`, became NaN, and
+    // serialized as null — a source-jump button that silently went nowhere while
+    // the evidence count beside it said there was something to open.
+    const g = await newGroup("review-source");
+    const m = await newMessage(g);
+    await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "יש מקור",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    const [row] = await listMemoriesForReview(pool, { groupId: g });
+    expect(row?.firstSourceMessageId).toBe(m);
+  });
+
+  it("has no source to open once every message it cited is gone", async () => {
+    const g = await newGroup("review-no-source");
+    const m = await newMessage(g);
+    await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "המקור נמחק",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    await pool.query(`DELETE FROM messages WHERE id = $1`, [m]);
+    const [row] = await listMemoriesForReview(pool, { groupId: g });
+    expect(row?.firstSourceMessageId, "kept, but unsupported").toBeNull();
+    expect(row?.supportingEvidence).toBe(0);
+  });
+
   it("narrows to one kind of belief when asked", async () => {
     const g = await newGroup("review-type");
     const m = await newMessage(g);
