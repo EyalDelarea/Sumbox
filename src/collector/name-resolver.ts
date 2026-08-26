@@ -12,25 +12,33 @@
  *   the most-recent participant display_name from stored messages in that group.
  *   groupSubject is NEVER called for non-@g.us JIDs.
  *
- * Each group is wrapped in try/catch so one failure (including a UNIQUE(name)
- * collision) never aborts the batch. Never throws.
+ * Each group is wrapped in try/catch so one failure never aborts the batch.
+ * A duplicate name is not a failure here — it is disambiguated with a suffix,
+ * except when the name is held by the chat's own lid/pn sibling, which is left
+ * nameless so merge.ts can still reconcile the pair. Never throws.
  */
 import type pg from "pg";
 import {
   listUnresolvedGroups,
   representativeSenderName,
   updateDisplayName,
+  updateDisplayNameDisambiguated,
 } from "../db/repositories/groups.js";
+import { siblingForJid } from "../db/repositories/identity-links.js";
 import { getLogger } from "../logging/log.js";
 
 const log = getLogger("name-resolver");
 
 /**
  * A UNIQUE(tenant_id, name) collision (Postgres `23505`) is the expected outcome
- * when two JIDs resolve to the same display name — the loser simply keeps its
- * JID-name and a later directory event may resolve it differently. These are
- * benign and high-volume, so they log at `debug`. Anything else (a DB outage, an
- * `XX002` corrupt-index error, …) is unexpected and must stay visible at `warn`.
+ * on the DIRECTORY paths below, where one contact is applied to several of its
+ * own JIDs: the second write is meant to fail, the loser keeps its JID-name, and
+ * a later event may resolve it differently. These are benign and high-volume, so
+ * they log at `debug`. Anything else (a DB outage, an `XX002` corrupt-index
+ * error, …) is unexpected and must stay visible at `warn`.
+ *
+ * The message-derived pass above does NOT reach here: there a collision means
+ * two different people share a display name, so it disambiguates instead.
  */
 function isBenignNameConflict(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "23505";
@@ -85,9 +93,21 @@ export async function resolveAllGroupNames(
       }
 
       if (name) {
-        const updated = await updateDisplayName(pool, whatsappId, name);
-        if (updated) {
+        // Message-derived names collide when two different people share a
+        // WhatsApp display name. Disambiguate rather than let 23505 drop the
+        // row back into the unresolved set, where the next connect — and every
+        // incoming message — retries the same doomed write. The sibling JID
+        // lets the repository tell a genuine stranger from this chat's own
+        // other identity, which must stay nameless for merge.ts to reconcile.
+        const sibling = await siblingForJid(pool, whatsappId).catch(() => null);
+        const outcome = await updateDisplayNameDisambiguated(pool, whatsappId, name, sibling);
+        if (outcome.status === "updated") {
           resolved++;
+        } else if (outcome.status === "unresolvable") {
+          // Every escalation step collided, including the JID-suffixed form.
+          // Pathological, and it leaves the row JID-named — the one case where
+          // the retry loop can still come back, so it must stay visible.
+          log.warn({ jid: whatsappId, name }, "display name could not be made unique");
         }
       }
     } catch (err) {

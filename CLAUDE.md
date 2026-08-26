@@ -20,6 +20,17 @@ available capability — don't read from it, write to it, or build on it. Removi
 the columns would mean reshaping primary keys and foreign keys across the whole
 schema for no gain.
 
+**One exception — `groups_tenant_name_unique` is load-bearing.** It carries a
+`tenant_id` in its name but it is a live invariant, not tenancy residue:
+`findGroupByName` (`src/db/repositories/groups.ts`) is `WHERE name = $1 LIMIT 1`
+with no ordering, and it is the chat lookup key for `src/cli.ts`,
+`src/summarization/prepare.ts`, `src/summarization/prepare-sumbox.ts`, and the
+web message/summary handlers. Uniqueness on `groups.name` is the only thing
+making that `LIMIT 1` deterministic. Dropping the constraint turns every one of
+those into an arbitrary pick between two chats. A duplicate display name must be
+disambiguated (see `updateDisplayNameDisambiguated`), never resolved by relaxing
+uniqueness.
+
 ## Stack
 
 - **Node ≥22**, TypeScript (ESM, `"type": "module"` — use `.js` import specifiers).

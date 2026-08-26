@@ -10,7 +10,9 @@ import path from "node:path";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { isDisplayNameUnresolved } from "../db/repositories/groups.js";
 import { recordLink } from "../db/repositories/identity-links.js";
+import { findMergeCandidates } from "../db/repositories/merge.js";
 import { InMemoryJobBus } from "../jobs/in-memory-bus.js";
 import { InMemoryJobRunRecorder } from "../jobs/job-run-recorder.js";
 import { createTestDatabase } from "../test/db.js";
@@ -1066,5 +1068,186 @@ describe("DB-first identity canonicalization (cold live bridge)", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].lid_jid).toBe(lid);
     expect(rows[0].source).toBe("message_alt");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Display-name resolution on 1:1 chats (#85 defect 2)
+// ---------------------------------------------------------------------------
+//
+// senderName comes from pushName, which on an OUTGOING message is the account
+// owner's own name. Resolving from it names the DM after yourself.
+
+describe("display-name resolution skips outgoing messages (#85)", () => {
+  let pool: pg.Pool;
+  let dataDir: string;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "sumbox-dn-test-"));
+  }, 120_000);
+
+  afterAll(async () => {
+    await pool?.end();
+    if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 30_000);
+
+  const nameOf = async (jid: string) => {
+    const { rows } = await pool.query<{ name: string }>(
+      `SELECT name FROM groups WHERE whatsapp_id = $1`,
+      [jid],
+    );
+    return rows[0]?.name ?? null;
+  };
+
+  it("does not name a 1:1 chat after the account owner on an outgoing message", async () => {
+    const jid = "972500000001@s.whatsapp.net";
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_FROMME_001",
+        remoteJid: jid,
+        fromMe: true,
+        pushName: "Eyal (me)",
+        text: "hi",
+      }),
+      { dataDir },
+    );
+
+    expect(await nameOf(jid)).toBe(jid);
+  });
+
+  it("names a 1:1 chat from an incoming message", async () => {
+    const jid = "972500000002@s.whatsapp.net";
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_INBOUND_001",
+        remoteJid: jid,
+        fromMe: false,
+        pushName: "דנה כהן",
+        text: "shalom",
+      }),
+      { dataDir },
+    );
+
+    expect(await nameOf(jid)).toBe("דנה כהן");
+  });
+
+  it("self-corrects: an outgoing message first, then the contact replies", async () => {
+    const jid = "972500000003@s.whatsapp.net";
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_ORDER_001",
+        remoteJid: jid,
+        // A distinct owner name: reusing one already taken by another chat
+        // would let the UNIQUE(name) constraint mask the defect instead of the
+        // guard preventing it.
+        fromMe: true,
+        pushName: "Eyal (owner, order case)",
+        text: "you there?",
+      }),
+      { dataDir },
+    );
+    expect(await nameOf(jid)).toBe(jid);
+
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_ORDER_002",
+        remoteJid: jid,
+        fromMe: false,
+        pushName: "רון לוי",
+        text: "yes",
+      }),
+      { dataDir },
+    );
+    expect(await nameOf(jid)).toBe("רון לוי");
+  });
+
+  it("disambiguates instead of retrying forever when a stranger holds the name (#85 defect 1)", async () => {
+    const first = "972500000010@s.whatsapp.net";
+    const second = "972500000020@s.whatsapp.net";
+
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_DUP_001", remoteJid: first, pushName: "יוסי", text: "a" }),
+      { dataDir },
+    );
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_DUP_002", remoteJid: second, pushName: "יוסי", text: "b" }),
+      { dataDir },
+    );
+
+    expect(await nameOf(first)).toBe("יוסי");
+    expect(await nameOf(second)).toBe("יוסי (~0020)");
+
+    // Resolved means the next message skips resolution entirely — this is the
+    // per-message doomed UPDATE that #85 is about.
+    expect(await isDisplayNameUnresolved(pool, second)).toBe(false);
+  });
+
+  it("leaves a chat nameless when its own lid/pn sibling holds the name (#85)", async () => {
+    // The duplicate-pair state findMergeCandidates exists for: two rows for one
+    // person, formed before the lid<->pn link was known. Once the link IS known
+    // the canonicalizer routes new messages into the existing row, so the pair
+    // can only be reconciled by merge.ts — and merge.ts only considers chats
+    // still named by their JID. Naming this one would strand it forever.
+    const pn = "972500000030@s.whatsapp.net";
+    const lid = "5550001112223@lid";
+
+    // 1. Both rows form while the identities are still unlinked. The lid chat's
+    //    first message carries no pushName, so it stays named by its JID.
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_SIB_001", remoteJid: pn, pushName: "נועה", text: "a" }),
+      { dataDir },
+    );
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_SIB_002", remoteJid: lid, pushName: "", text: "b" }),
+      { dataDir },
+    );
+    expect(await nameOf(pn)).toBe("נועה");
+    expect(await nameOf(lid)).toBe(lid);
+
+    // 2. The link is learned, and the lid chat finally sees a pushName.
+    await recordLink(pool, { lidJid: lid, pnJid: pn, source: "message_alt" });
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({ id: "DN_SIB_003", remoteJid: lid, pushName: "נועה", text: "c" }),
+      { dataDir },
+    );
+
+    // Not suffixed — left nameless, so the merge path can still claim it.
+    expect(await nameOf(lid)).toBe(lid);
+    expect(await isDisplayNameUnresolved(pool, lid)).toBe(true);
+
+    const candidates = await findMergeCandidates(pool, {
+      lidForPn: async (j) => (j === pn ? lid : null),
+      pnForLid: async (j) => (j === lid ? pn : null),
+    });
+    expect(candidates.map((c) => c.name)).toContain("נועה");
+  });
+
+  it("still resolves a @g.us group subject on an outgoing message", async () => {
+    // The fromMe guard is scoped to non-@g.us chats: a group subject comes from
+    // the session, not from pushName, so it is unaffected by who spoke.
+    const jid = "900111222-333@g.us";
+    await handleIncomingMessage(
+      pool,
+      makeFakeWATextMessage({
+        id: "DN_GUS_001",
+        remoteJid: jid,
+        fromMe: true,
+        pushName: "Eyal (me)",
+        text: "hi group",
+      }),
+      { dataDir, groupSubject: async () => "צוות פיתוח" },
+    );
+
+    expect(await nameOf(jid)).toBe("צוות פיתוח");
   });
 });
