@@ -168,6 +168,43 @@ describe("purgeUnselectedChats", () => {
     expect(await count("summary_group_marks", "group_id = $1", [included])).toBe(1);
   });
 
+  it("purges @Aida's memories of a chat, and their evidence, with the chat", async () => {
+    // Third instance of the same trap: group-keyed, but the group row survives the
+    // unselected purge so ON DELETE CASCADE never fires. The classification guard
+    // below only checks that the tables are LISTED — it cannot notice a missing
+    // DELETE, which is exactly how aida_messages drifted. This pins execution.
+    //
+    // A memory is an interpretation of what people in the chat said about each
+    // other, so it outliving the purged conversation is worse than a stray row.
+    const unselected = await newGroup("mem-drop");
+    const included = await newGroup("mem-keep");
+    await includeGroup(included);
+    for (const g of [unselected, included]) {
+      const m = await newMessage(g);
+      await admin.query(
+        `INSERT INTO aida_episodic_memories (group_id, content, content_hash, observed_at)
+         VALUES ($1, 'קרה משהו', $2, now())`,
+        [g, `h-${g}`],
+      );
+      const { rows } = await admin.query<{ id: string }>(
+        `SELECT id FROM aida_episodic_memories WHERE group_id = $1`,
+        [g],
+      );
+      await admin.query(
+        `INSERT INTO aida_memory_evidence (memory_type, memory_id, message_id, stance, observed_at)
+         VALUES ('episodic', $1, $2, 'supports', now())`,
+        [rows[0]?.id, m],
+      );
+    }
+
+    await purgeUnselectedChats(admin);
+
+    expect(await count("aida_episodic_memories", "group_id = $1", [unselected])).toBe(0);
+    expect(await count("aida_episodic_memories", "group_id = $1", [included])).toBe(1);
+    // The ledger carries no group_id — it goes with the messages it cites.
+    expect(await count("aida_memory_evidence", "true", [])).toBe(1);
+  });
+
   it("with olderThanDays, spares unselected chats that had recent activity", async () => {
     const dormant = await newGroup("dormant");
     const active = await newGroup("active");

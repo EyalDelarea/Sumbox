@@ -144,6 +144,15 @@ export const UNSELECTED_PURGE_GROUP_TABLES = [
   "todos",
   "dismissed_sources",
   "imports",
+  // What @Aida came to believe about this chat. Derived from its messages and
+  // scoped to it, so it dies with it — the same call the aida_messages/summaries
+  // precedent above makes. The group row SURVIVES the unselected purge, so these
+  // tables' ON DELETE CASCADE never fires and they are deleted explicitly below.
+  // Their evidence rows carry no group_id and go with the messages they cite.
+  "aida_episodic_memories",
+  "aida_semantic_memories",
+  "aida_relational_memories",
+  "aida_self_state_memories",
 ];
 
 /**
@@ -242,6 +251,18 @@ export async function purgeUnselectedChats(
   // @Aida's marker rows (which carry the asker's question verbatim) outlived
   // the purged conversation. The behavioral test now pins list to execution.
   await client.query(`DELETE FROM aida_messages WHERE group_id = ANY($1::bigint[])`, ids);
+  // Her memories of these chats. Same trap as the two above — group-keyed, and the
+  // group row survives — and the same fix, with a behavioral test pinning the list
+  // to actual execution rather than trusting the classification alone. The evidence
+  // ledger has no group_id and cascades from `messages`, deleted just above.
+  for (const table of [
+    "aida_episodic_memories",
+    "aida_semantic_memories",
+    "aida_relational_memories",
+    "aida_self_state_memories",
+  ]) {
+    await client.query(`DELETE FROM ${table} WHERE group_id = ANY($1::bigint[])`, ids);
+  }
   await client.query(`DELETE FROM summaries WHERE group_id = ANY($1::bigint[])`, ids);
   // `imports` is RESTRICT → groups (which we keep), so it never cascades — delete it
   // explicitly. messages.import_id is SET NULL and messages are already gone, so order is
