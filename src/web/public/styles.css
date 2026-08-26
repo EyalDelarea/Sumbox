@@ -4480,3 +4480,26 @@ h2.dg-sec{ margin:14px 2px 0; }
    reason chips need an explicit guard to stay hidden until 👎. */
 .sum-reason-chip[hidden] { display: none; }
 
+
+/* ── Memory review ──────────────────────────────────────────────────────────
+   Built on .cmd-row so a belief reads like every other list row in the app.
+   Only what the shared row has no vocabulary for is added here: a tag strip, an
+   action strip, and a text button. No new colours — the tokens are the app's. */
+.mem-row { align-items: flex-start; }
+.mem-row .cmd-row__name { white-space: normal; line-height: 1.5; }
+.mem-row__tags { display: flex; flex-wrap: wrap; gap: 6px; margin-block-end: 6px; }
+.mem-row__acts { display: flex; align-items: center; gap: 10px; margin-block-start: 8px; }
+.mem-row__sep { color: var(--line); }
+.mem-link {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font: 600 12px "Heebo"; color: var(--accent-ink);
+}
+.mem-link:disabled { color: var(--muted); cursor: default; }
+.mem-link--warn { color: var(--warn-ink); }
+.mem-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-block: 12px; }
+.mem-filter {
+  font: 600 12px "Heebo"; color: var(--ink-2);
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 6px 12px;
+}
+.mem-toggle { display: flex; align-items: center; gap: 6px; font: 600 12px "Heebo"; color: var(--ink-2); }
