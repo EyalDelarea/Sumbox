@@ -28,7 +28,6 @@
  */
 import type pg from "pg";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
-import type { MemoryDraft } from "../db/repositories/aida-memory.js";
 
 /**
  * Most messages handed to the extractor in one pass.
@@ -79,6 +78,17 @@ export type CandidateSelection = {
    * the number go down.
    */
   withoutAuthorIdentity: number;
+  /**
+   * The window held more eligible messages than the cap allowed, so the oldest
+   * were dropped.
+   *
+   * Worth reporting because the cap inverts the operator's intent in exactly the
+   * case they reach for it: `ORDER BY sent_at DESC` keeps the NEWEST, so widening
+   * `--hours` to catch a backlog drops the older part — the very messages an
+   * earlier run did not cover. Without this, the counts do not close against each
+   * other and nothing says why.
+   */
+  truncated: boolean;
 };
 
 /** How to narrow a window beyond the D7 exclusions and the author rule. */
@@ -160,8 +170,67 @@ const AUTHOR_IS_A_PERSON = `
       AND p.display_name NOT LIKE '%@%'
       AND p.display_name <> 'Unknown'`;
 
+/**
+ * Does this message carry a usable author identity?
+ *
+ * As SQL. {@link hasAuthorIdentity} is its TypeScript twin, and the two must say
+ * the same thing — three predicates that disagreed is exactly the bug this shape
+ * exists to prevent.
+ *
+ * THE EMPTY STRING IS NOT AN IDENTITY, and on this data it is the common case
+ * rather than an edge one. `message-mapper.ts` resolves a group message's author
+ * from its per-message participant key; a 1:1 chat has none, so those rows land
+ * with `''`. Measured on the live database: 2157 messages carry `sender_jid = ''`
+ * and every one is in a 1:1 chat, against zero in group chats. A predicate
+ * written as `IS NOT NULL` therefore narrows nothing on more than half the chats
+ * — and every candidate it admits dies later, in a different counter, while the
+ * line reporting what was skipped still reads zero.
+ */
+const AUTHOR_HAS_IDENTITY = `btrim(coalesce(m.sender_jid, '')) <> ''`;
+
+/**
+ * In a 1:1 chat, is this message's `sender_jid` actually somebody else's?
+ *
+ * Yes, for every message the owner sent. `message-mapper.ts` derives the author
+ * from the per-message participant key, and a 1:1 chat has none — so it falls
+ * back to the chat's remote JID, which is the OTHER person. Measured on the live
+ * database, over messages that carry a real jid:
+ *
+ *   group chat, from_me   →   1 distinct jid over 783 rows   (the owner. correct)
+ *   1:1 chat,   from_me   →  36 distinct jids over 923 rows  (the other party)
+ *
+ * So attributing a belief to `sender_jid` on those rows would file what the owner
+ * said about themselves against the person they were talking to. That is the one
+ * error the design says revoking cannot undo — the belief was already wrong about
+ * someone — so the rows are refused rather than repaired.
+ *
+ * Today they are already excluded upstream: their participant is JID-shaped, so
+ * the author rule drops them. That is a correlation in Baileys' behaviour, not an
+ * invariant — a pushName arriving with no participant key would pass the author
+ * rule and carry a real, wrong jid — which is why this does not rely on it.
+ *
+ * Group chats are untouched: there the fallback never fires and `from_me` is the
+ * owner's own identity, which is why #88 kept those messages deliberately.
+ *
+ * `from_me` is NULLABLE, hence the COALESCE. Without it `NOT (NULL AND true)` is
+ * NULL, the row fails the WHERE, and every message that never recorded a
+ * direction would vanish from the corpus — a narrowing far wider than the one
+ * intended, and silent. The same NULL-in-a-boolean trap the memory schema's
+ * empty-array CHECK hit; worth catching by running it rather than reading it.
+ */
+const AUTHOR_IS_NOT_THE_OTHER_PARTY = `NOT (coalesce(m.from_me, false) AND coalesce(g.whatsapp_id, '') NOT LIKE '%@g.us')`;
+
+/**
+ * The TypeScript twin of {@link AUTHOR_HAS_IDENTITY}, kept pure so the two can be
+ * tested against the same cases.
+ */
+export function hasAuthorIdentity(senderJid: string | null | undefined): boolean {
+  return (senderJid ?? "").trim() !== "";
+}
+
 const FROM_WINDOW = `
     FROM messages m
+    JOIN groups g ON g.id = m.group_id
     LEFT JOIN participants p ON p.id = m.participant_id
     LEFT JOIN aida_messages a
       ON a.group_id = m.group_id AND a.external_id = m.external_id`;
@@ -201,7 +270,13 @@ export async function selectCandidates(
   opts: SelectOptions = {},
 ): Promise<CandidateSelection> {
   const limit = opts.limit ?? MAX_CANDIDATES;
-  const identityClause = opts.requireAuthorIdentity ? "AND m.sender_jid IS NOT NULL" : "";
+  // Both clauses apply only to a caller that will ATTRIBUTE the message to its
+  // author. The dry run keeps the wider corpus: #88 established that a missing
+  // identity is not a reason to disbelieve a message, and slice 4's episodic
+  // memories — whose subject is nullable — can hold what this narrowing drops.
+  const identityClause = opts.requireAuthorIdentity
+    ? `AND ${AUTHOR_HAS_IDENTITY} AND ${AUTHOR_IS_NOT_THE_OTHER_PARTY}`
+    : "";
   const { rows } = await client.query<{
     id: string;
     sender: string | null;
@@ -237,7 +312,7 @@ export async function selectCandidates(
     `
     SELECT count(*) AS window_total,
            count(*) FILTER (WHERE NOT (${AUTHOR_IS_A_PERSON})) AS unattributable,
-           count(*) FILTER (WHERE (${AUTHOR_IS_A_PERSON}) AND m.sender_jid IS NULL)
+           count(*) FILTER (WHERE (${AUTHOR_IS_A_PERSON}) AND NOT (${AUTHOR_HAS_IDENTITY}))
              AS without_identity
     ${FROM_WINDOW}
     WHERE ${D7_EXCLUSIONS}
@@ -264,6 +339,7 @@ export async function selectCandidates(
     windowTotal: Number(counts[0]?.window_total ?? 0),
     unattributable: Number(counts[0]?.unattributable ?? 0),
     withoutAuthorIdentity: Number(counts[0]?.without_identity ?? 0),
+    truncated: rows.length === limit,
   };
 }
 
@@ -367,52 +443,4 @@ export function buildExtractionPrompt(messages: CandidateMessage[]): string {
     "",
     lines,
   ].join("\n");
-}
-
-/**
- * Turn a validated candidate into something the memory repository will store.
- *
- * ALWAYS `semantic`, and that is a mapping rather than a choice. The prompt above
- * has one hard rule — only what the speaker said about THEMSELVES — so every item
- * it can emit is a durable fact about one person, which is exactly what the
- * semantic table holds. Filing them anywhere else would mislabel them, and the
- * other three tables stay empty until a slice writes a prompt that emits a type.
- *
- * THE SUBJECT IS THE AUTHOR, which only follows from that same rule: a
- * self-statement is about whoever said it. The raw `sender_jid` is passed
- * through; `createMemory` canonicalizes it, so one human reached by two WhatsApp
- * identities stays one subject.
- *
- * Returns null rather than throwing on the two ways a candidate can fail to map:
- *
- *  - THE AUTHOR HAS NO IDENTITY. `semantic.subject_jid` is NOT NULL, and it should
- *    be: a belief about a person that cannot say which person is not a belief
- *    about a person. Filing it as `episodic` instead — whose subject is nullable —
- *    would keep the row by calling a fact about someone an event, so it is
- *    refused. The identity cannot be recovered either: it came from Baileys'
- *    `key.participant` at ingest and was never written down, and a display name
- *    cannot stand in because names collapse different people.
- *  - THE CITED MESSAGE WAS NEVER SHOWN. `validateCandidate` already rejects an
- *    invented id; this is the second line, and it is the one that still holds if a
- *    future caller forgets to validate first.
- *
- * Both are ordinary outcomes to count, not errors — the reject rate is the signal
- * for whether the extractor is good enough to trust.
- */
-export function toSemanticDraft(
-  candidate: Candidate,
-  shown: ReadonlyMap<number, CandidateMessage>,
-  groupId: number,
-): MemoryDraft | null {
-  const source = shown.get(candidate.sourceMessageId);
-  if (!source?.senderJid) return null;
-  return {
-    memoryType: "semantic",
-    groupId,
-    subjectJid: source.senderJid,
-    content: candidate.content,
-    // The prompt cites exactly one id per item and cannot express disagreement,
-    // so every citation it produces supports the belief it came with.
-    evidence: [{ messageId: candidate.sourceMessageId, stance: "supports" }],
-  };
 }

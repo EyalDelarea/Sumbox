@@ -718,9 +718,29 @@ program
       const { createDbClient } = await import("./db/client.js");
       const { selectCandidates, buildExtractionPrompt, parseCandidates, validateCandidate } =
         await import("./ask/memory-extract.js");
-      const { storeAccepted } = await import("./ask/memory-write.js");
+      const { storeAccepted, tally } = await import("./ask/memory-write.js");
       const { OllamaSummarizer } = await import("./summarization/summarizer.js");
+
+      // Validated for the reason the --runs guard 120 lines below records:
+      // Number("abc") is NaN, and an unvalidated one there produced a green
+      // security report from a suite that never executed. Here the cost is worse
+      // — --hours 0 or a negative makes `since >= until`, which matches nothing
+      // and prints as a clean empty window, so a typo reads as "she learned
+      // nothing" from the one command in this project that writes.
       const groupId = Number(options.group);
+      const hours = Number(options.hours ?? 24);
+      if (!Number.isInteger(groupId) || groupId <= 0) {
+        process.stderr.write(
+          `Error: --group must be a positive group id, got "${options.group}"\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (!Number.isFinite(hours) || hours <= 0) {
+        process.stderr.write(`Error: --hours must be a positive number, got "${options.hours}"\n`);
+        process.exitCode = 1;
+        return;
+      }
       const pool = createDbClient();
       try {
         const config = loadConfig();
@@ -734,7 +754,7 @@ program
           numPredict: config.summarization.numPredict,
         });
         const until = new Date();
-        const since = new Date(until.getTime() - Number(options.hours ?? 24) * 3600_000);
+        const since = new Date(until.getTime() - hours * 3600_000);
 
         // --write narrows to messages carrying an author identity: everything the
         // shipped prompt emits is a self-statement, and a semantic memory's subject
@@ -768,8 +788,21 @@ program
 
         process.stdout.write(
           `window ${selection.windowTotal} · unattributable ${selection.unattributable} · ` +
+            `no-identity ${selection.withoutAuthorIdentity} · ` +
             `considered ${selection.candidates.length} · would-accept ${accepted.length}\n` +
-            `rejected: ${JSON.stringify(rejected)}\n\n`,
+            `rejected: ${JSON.stringify(rejected)}\n` +
+            // The narrowing differs between the two paths, so the dry run has to
+            // say what --write would leave out, or it is not a preview of it.
+            (options.write
+              ? "no-identity messages were NOT sent to the model on this run\n"
+              : `--write would consider ${selection.withoutAuthorIdentity} fewer (no author identity)\n`) +
+            // The cap keeps the NEWEST, so widening --hours to catch a backlog
+            // drops the oldest — the opposite of what widening it was for.
+            (selection.truncated
+              ? `WINDOW TRUNCATED at ${selection.candidates.length}: the oldest eligible messages ` +
+                `were dropped. Narrow --hours and run again to reach them.\n`
+              : "") +
+            "\n",
         );
         for (const a of accepted) {
           // The citation prints with every row on purpose: a memory you cannot
@@ -782,18 +815,29 @@ program
           return;
         }
 
-        const tally = await storeAccepted(pool, accepted, shown, groupId);
-        process.stdout.write(
-          `\nstored: ${JSON.stringify(tally)}\n` +
-            // Not a fact about this run — a fact about how far a historical gap
-            // has closed. `sender_jid` capture landed mid-July 2026; before that
-            // nothing recorded it, and those identities are not recoverable.
-            `skipped ${selection.withoutAuthorIdentity} message(s) in this window for having ` +
-            `no author identity — they were never sent to the model\n`,
-        );
+        const results = await storeAccepted(pool, accepted, shown, groupId);
+        // Per candidate, with the id, because revoking takes one — and this run
+        // is the only moment where the id, the words, the citation and the author
+        // are all in hand at once. A bare "created: 3" would make finding those
+        // three a database query rather than a scroll back through this output.
+        for (const r of results) {
+          const id = r.memoryId === undefined ? "" : ` #${r.memoryId}`;
+          const why = r.error === undefined ? "" : ` — ${r.error}`;
+          process.stdout.write(`  [${r.outcome}${id}] ${r.candidate.content}${why}\n`);
+        }
+        process.stdout.write(`\nstored: ${JSON.stringify(tally(results))}\n`);
+        if (results.some((r) => r.outcome === "failed")) {
+          // Reported AFTER the per-candidate list, never instead of it: earlier
+          // candidates committed their own transactions, and an exit that hid
+          // them would leave beliefs on file that the run never mentioned.
+          process.exitCode = 1;
+        }
       } catch (err) {
+        // `process.exitCode`, not `process.exit`: stdout to a pipe or file is
+        // asynchronous, and exiting outright can drop the list of what was
+        // already stored — the one record of beliefs now on file.
         process.stderr.write(`Error: aida-memory failed: ${(err as Error).message}\n`);
-        process.exit(1);
+        process.exitCode = 1;
       } finally {
         await pool.end();
       }

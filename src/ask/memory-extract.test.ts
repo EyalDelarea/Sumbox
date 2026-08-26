@@ -11,7 +11,6 @@ import {
   isIdentifiableAuthor,
   parseCandidates,
   selectCandidates,
-  toSemanticDraft,
   validateCandidate,
 } from "./memory-extract.js";
 
@@ -208,6 +207,42 @@ describe("selectCandidates (D7 exclusions)", () => {
     expect(narrow.candidates.map((m) => m.content)).toEqual(["יש לי ג׳יד"]);
   });
 
+  // The empty string is not null, and on this data it is the COMMON case: 2157
+  // messages carry `sender_jid = ''`, every one of them in a 1:1 chat, because
+  // the mapper resolves a group's per-message participant key but a DM's is
+  // absent. `IS NOT NULL` admits them, so a narrowing written that way narrows
+  // nothing on more than half the chats — and every candidate then dies later,
+  // in a different counter, with the skip line still reading zero.
+  it("treats an empty sender_jid as no identity, exactly as a null one", async () => {
+    const g = await upsertGroup(pool, { name: `es-${Math.random()}`, source: "import" });
+    const real = await upsertParticipant(pool, `EA-${Math.random()}`);
+    const blank = await upsertParticipant(pool, `EB-${Math.random()}`);
+    const spaces = await upsertParticipant(pool, `EC-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, real, {
+        textContent: "יש לי ג׳יד",
+        senderJid: "972500000042@s.whatsapp.net",
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      }),
+      msg(g, blank, {
+        textContent: "ג׳יד ריק",
+        senderJid: "",
+        sentAt: new Date("2026-05-01T11:00:00.000Z"),
+      }),
+      msg(g, spaces, {
+        textContent: "ג׳יד רווחים",
+        senderJid: "   ",
+        sentAt: new Date("2026-05-01T12:00:00.000Z"),
+      }),
+    ]);
+
+    const narrow = await selectCandidates(pool, g, SINCE, UNTIL, { requireAuthorIdentity: true });
+    expect(narrow.candidates.map((m) => m.content)).toEqual(["יש לי ג׳יד"]);
+    // And the count must agree with the narrowing, or the printed skip line
+    // contradicts the run it describes.
+    expect(narrow.withoutAuthorIdentity).toBe(2);
+  });
+
   // The narrowing is a LOSS, and a loss nobody counts is a corpus that shrinks
   // silently. Reported either way so the closing gap stays watchable from the
   // dry run too — measured on group 70 it fell from 100% to 17% in two months.
@@ -225,6 +260,59 @@ describe("selectCandidates (D7 exclusions)", () => {
       (await selectCandidates(pool, g, SINCE, UNTIL, { requireAuthorIdentity: true }))
         .withoutAuthorIdentity,
     ).toBe(2);
+  });
+
+  // The mis-attribution the design calls unrecoverable. In a 1:1 chat the mapper
+  // has no per-message participant key and falls back to the chat's remote jid —
+  // so the OWNER'S OWN messages carry the other person's identity. Measured live:
+  // 36 distinct jids across 923 from_me rows in 1:1 chats, against exactly 1
+  // across 783 in group chats. Attributing on those rows would file what Eyal
+  // said about himself against whoever he was talking to.
+  it("refuses the owner's own messages in a 1:1 chat, where the jid is the other person's", async () => {
+    const dm = await upsertGroup(pool, { name: `dm-${Math.random()}`, source: "live" });
+    await pool.query(`UPDATE groups SET whatsapp_id = $2 WHERE id = $1`, [
+      dm,
+      `972500000077@s.whatsapp.net`,
+    ]);
+    const them = await upsertParticipant(pool, `DM-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(dm, them, {
+        textContent: "אני גר בחיפה",
+        senderJid: "972500000077@s.whatsapp.net",
+        fromMe: false,
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      }),
+      // Eyal's own message — carrying THEIR jid, which is the bug.
+      msg(dm, them, {
+        textContent: "אני עובד באינטל",
+        senderJid: "972500000077@s.whatsapp.net",
+        fromMe: true,
+        sentAt: new Date("2026-05-01T11:00:00.000Z"),
+      }),
+    ]);
+
+    const narrow = await selectCandidates(pool, dm, SINCE, UNTIL, { requireAuthorIdentity: true });
+    expect(narrow.candidates.map((m) => m.content)).toEqual(["אני גר בחיפה"]);
+    // The dry run still sees both — slice 4 can hold them without attributing.
+    expect((await selectCandidates(pool, dm, SINCE, UNTIL)).candidates).toHaveLength(2);
+  });
+
+  it("keeps the owner's own messages in a GROUP chat, where the jid really is theirs", async () => {
+    const grp = await upsertGroup(pool, { name: `gc-${Math.random()}`, source: "live" });
+    await pool.query(`UPDATE groups SET whatsapp_id = $2 WHERE id = $1`, [
+      grp,
+      `120363000000000001@g.us`,
+    ]);
+    const me = await upsertParticipant(pool, `GC-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(grp, me, {
+        textContent: "אני עובד באינטל",
+        senderJid: "972500000099@s.whatsapp.net",
+        fromMe: true,
+      }),
+    ]);
+    const narrow = await selectCandidates(pool, grp, SINCE, UNTIL, { requireAuthorIdentity: true });
+    expect(narrow.candidates.map((m) => m.content)).toEqual(["אני עובד באינטל"]);
   });
 
   // A corpus that shrinks silently reads as a quiet group. The counts are how
@@ -373,61 +461,5 @@ describe("isIdentifiableAuthor", () => {
     expect(isIdentifiableAuthor("Eyal")).toBe(true);
     // Not a JID, and not the placeholder — a self-chosen name stays a name.
     expect(isIdentifiableAuthor("unknown")).toBe(true);
-  });
-});
-
-/**
- * The bridge #95 crosses: a candidate the extractor produced and the validator
- * accepted, turned into something the memory repository will store.
- *
- * Pure, and tested without a model or a database, because what can go wrong here
- * is attribution — a belief filed against the wrong person, or against nobody —
- * and that does not need either to go wrong.
- */
-describe("toSemanticDraft", () => {
-  const shown = (over: Partial<CandidateMessage> = {}): Map<number, CandidateMessage> =>
-    new Map([
-      [
-        7,
-        {
-          messageId: 7,
-          sender: "רוני",
-          senderJid: "972500000042@s.whatsapp.net",
-          content: "אני לא אוכלת בשר",
-          sentAt: new Date("2026-05-01T10:00:00.000Z"),
-          ...over,
-        },
-      ],
-    ]);
-
-  it("files the belief against the author of the message it cites", () => {
-    const draft = toSemanticDraft({ sourceMessageId: 7, content: "רוני לא אוכלת בשר" }, shown(), 3);
-    expect(draft).toEqual({
-      memoryType: "semantic",
-      groupId: 3,
-      subjectJid: "972500000042@s.whatsapp.net",
-      content: "רוני לא אוכלת בשר",
-      evidence: [{ messageId: 7, stance: "supports" }],
-    });
-  });
-
-  it("refuses a candidate whose author has no identity, rather than guessing one", () => {
-    // The alternative considered and rejected on #95: file it as `episodic`,
-    // whose subject is nullable. That keeps the row by calling a fact about a
-    // person an event, which corrupts the one thing four tables exist to say.
-    expect(
-      toSemanticDraft({ sourceMessageId: 7, content: "x" }, shown({ senderJid: null }), 3),
-    ).toBe(null);
-  });
-
-  it("refuses a candidate citing a message it was never shown", () => {
-    // The validator already rejects an invented id; this is the second line, and
-    // it is the one that holds if a future caller forgets to validate first.
-    expect(toSemanticDraft({ sourceMessageId: 999, content: "x" }, shown(), 3)).toBe(null);
-  });
-
-  it("cites the message as supporting — the prompt cannot express contradiction", () => {
-    const draft = toSemanticDraft({ sourceMessageId: 7, content: "y" }, shown(), 3);
-    expect(draft?.evidence).toEqual([{ messageId: 7, stance: "supports" }]);
   });
 });
