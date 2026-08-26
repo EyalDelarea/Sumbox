@@ -793,9 +793,11 @@ program
             `rejected: ${JSON.stringify(rejected)}\n` +
             // The narrowing differs between the two paths, so the dry run has to
             // say what --write would leave out, or it is not a preview of it.
-            (options.write
-              ? "no-identity messages were NOT sent to the model on this run\n"
-              : `--write would consider ${selection.withoutAuthorIdentity} fewer (no author identity)\n`) +
+            // Both reasons, separately. The narrowing drops rows for two unrelated
+            // causes, and one of them closes over time while the other does not.
+            `write-path narrowing: ${selection.withoutAuthorIdentity} no author identity, ` +
+            `${selection.misattributedSelfMessages} own message in a 1:1 chat` +
+            (options.write ? " (excluded from this run)\n" : " (would be excluded by --write)\n") +
             // The cap keeps the NEWEST, so widening --hours to catch a backlog
             // drops the oldest — the opposite of what widening it was for.
             (selection.truncated

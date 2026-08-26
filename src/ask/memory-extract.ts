@@ -70,23 +70,29 @@ export type CandidateSelection = {
   /**
    * Of the messages an identifiable person wrote, how many carry no `sender_jid`.
    *
-   * Reported whether or not the selection was narrowed, because it is the number
-   * that says how far a historical gap has closed rather than anything about this
-   * run. `sender_jid` capture landed mid-July 2026; measured on group 70, the
-   * share without one fell from 100% before that to 17% in August. A caller that
-   * narrows is losing exactly these; a caller that does not still wants to watch
-   * the number go down.
+   * Reported whether or not the caller narrowed, because it measures how far a
+   * historical gap has closed, not what this run did: capture landed mid-July
+   * 2026, and on group 70 the share without one went 100% → 55% → 17% over three
+   * months.
    */
   withoutAuthorIdentity: number;
   /**
-   * The window held more eligible messages than the cap allowed, so the oldest
-   * were dropped.
+   * How many the 1:1 self-message guard excludes — see
+   * {@link AUTHOR_IS_NOT_THE_OTHER_PARTY}.
    *
-   * Worth reporting because the cap inverts the operator's intent in exactly the
-   * case they reach for it: `ORDER BY sent_at DESC` keeps the NEWEST, so widening
-   * `--hours` to catch a backlog drops the older part — the very messages an
-   * earlier run did not cover. Without this, the counts do not close against each
-   * other and nothing says why.
+   * Counted separately from {@link withoutAuthorIdentity} because it is a
+   * different thing and does not close over time. Reported at all because
+   * `requireAuthorIdentity` narrows on BOTH, and a caller printing only the first
+   * would understate what it left out — the same disagreement between the skip
+   * line and the run that this whole predicate rework existed to fix.
+   */
+  misattributedSelfMessages: number;
+  /**
+   * The window held more than the cap allowed, so the oldest were dropped.
+   *
+   * Worth reporting because the cap inverts the operator's intent in the very
+   * case they reach for it: the newest are kept, so widening the window to catch
+   * a backlog drops the older part an earlier run did not cover.
    */
   truncated: boolean;
 };
@@ -96,18 +102,16 @@ export type SelectOptions = {
   /** Most messages to hand the extractor in one pass. */
   limit?: number;
   /**
-   * Drop messages carrying no `sender_jid`.
+   * Keep only messages whose author can be named — see
+   * {@link AUTHOR_HAS_IDENTITY} and {@link AUTHOR_IS_NOT_THE_OTHER_PARTY}.
    *
-   * OFF BY DEFAULT, and it has to be. A null jid is not a reason to disbelieve a
-   * message — a resolved display name is a real person whether or not the jid was
-   * captured (#88) — and slice 4's episodic memories have a nullable subject, so
+   * OFF BY DEFAULT, and it has to be: a missing jid is not a reason to disbelieve
+   * a message (#88), and slice 4's episodic memories have a nullable subject, so
    * those messages are usable there. Only a caller storing something whose subject
-   * is NOT NULL, like a semantic memory, needs this, and it asks for it explicitly
-   * rather than inheriting it.
+   * is NOT NULL needs this, and asks for it explicitly.
    *
-   * A WHERE clause rather than a stored mark on purpose: the gap is closing, so a
-   * persisted skip-list would go stale the moment a message gained a jid, while a
-   * predicate re-evaluates itself for free.
+   * A WHERE clause rather than a stored mark: the gap is closing, so a persisted
+   * skip-list would go stale the moment a message gained a jid.
    */
   requireAuthorIdentity?: boolean;
 };
@@ -171,52 +175,34 @@ const AUTHOR_IS_A_PERSON = `
       AND p.display_name <> 'Unknown'`;
 
 /**
- * Does this message carry a usable author identity?
+ * Does this message carry a usable author identity? {@link hasAuthorIdentity} is
+ * the TypeScript twin; the two must agree, since three predicates that disagreed
+ * is the bug this shape exists to prevent.
  *
- * As SQL. {@link hasAuthorIdentity} is its TypeScript twin, and the two must say
- * the same thing — three predicates that disagreed is exactly the bug this shape
- * exists to prevent.
- *
- * THE EMPTY STRING IS NOT AN IDENTITY, and on this data it is the common case
- * rather than an edge one. `message-mapper.ts` resolves a group message's author
- * from its per-message participant key; a 1:1 chat has none, so those rows land
- * with `''`. Measured on the live database: 2157 messages carry `sender_jid = ''`
- * and every one is in a 1:1 chat, against zero in group chats. A predicate
- * written as `IS NOT NULL` therefore narrows nothing on more than half the chats
- * — and every candidate it admits dies later, in a different counter, while the
- * line reporting what was skipped still reads zero.
+ * THE EMPTY STRING IS NOT AN IDENTITY, and here it is the common case, not an
+ * edge one: a 1:1 chat has no per-message participant key, so those rows land
+ * with `''`. Measured live, 2157 messages carry one, every one in a 1:1 chat. A
+ * predicate written as `IS NOT NULL` narrows nothing on more than half the chats.
  */
 const AUTHOR_HAS_IDENTITY = `btrim(coalesce(m.sender_jid, '')) <> ''`;
 
 /**
  * In a 1:1 chat, is this message's `sender_jid` actually somebody else's?
  *
- * Yes, for every message the owner sent. `message-mapper.ts` derives the author
- * from the per-message participant key, and a 1:1 chat has none — so it falls
- * back to the chat's remote JID, which is the OTHER person. Measured on the live
- * database, over messages that carry a real jid:
+ * Yes, for every message the owner sent. A 1:1 chat has no per-message
+ * participant key, so `message-mapper.ts` falls back to the chat's remote JID —
+ * the OTHER person. Measured over messages carrying a real jid: group chats hold
+ * 1 distinct jid across 783 `from_me` rows (the owner, correct); 1:1 chats hold
+ * 36 across 923. Attributing on those would file what the owner said about
+ * themselves against whoever they were talking to — the one error the design says
+ * revoking cannot undo, so the rows are refused rather than repaired.
  *
- *   group chat, from_me   →   1 distinct jid over 783 rows   (the owner. correct)
- *   1:1 chat,   from_me   →  36 distinct jids over 923 rows  (the other party)
+ * The author rule already drops them today, but by a correlation in Baileys'
+ * behaviour rather than an invariant, which is why this does not rely on it.
+ * Group chats are untouched; there the fallback never fires.
  *
- * So attributing a belief to `sender_jid` on those rows would file what the owner
- * said about themselves against the person they were talking to. That is the one
- * error the design says revoking cannot undo — the belief was already wrong about
- * someone — so the rows are refused rather than repaired.
- *
- * Today they are already excluded upstream: their participant is JID-shaped, so
- * the author rule drops them. That is a correlation in Baileys' behaviour, not an
- * invariant — a pushName arriving with no participant key would pass the author
- * rule and carry a real, wrong jid — which is why this does not rely on it.
- *
- * Group chats are untouched: there the fallback never fires and `from_me` is the
- * owner's own identity, which is why #88 kept those messages deliberately.
- *
- * `from_me` is NULLABLE, hence the COALESCE. Without it `NOT (NULL AND true)` is
- * NULL, the row fails the WHERE, and every message that never recorded a
- * direction would vanish from the corpus — a narrowing far wider than the one
- * intended, and silent. The same NULL-in-a-boolean trap the memory schema's
- * empty-array CHECK hit; worth catching by running it rather than reading it.
+ * `from_me` is NULLABLE, hence the COALESCE: `NOT (NULL AND true)` is NULL, the
+ * row fails the WHERE, and every direction-less message vanishes silently.
  */
 const AUTHOR_IS_NOT_THE_OTHER_PARTY = `NOT (coalesce(m.from_me, false) AND coalesce(g.whatsapp_id, '') NOT LIKE '%@g.us')`;
 
@@ -271,9 +257,8 @@ export async function selectCandidates(
 ): Promise<CandidateSelection> {
   const limit = opts.limit ?? MAX_CANDIDATES;
   // Both clauses apply only to a caller that will ATTRIBUTE the message to its
-  // author. The dry run keeps the wider corpus: #88 established that a missing
-  // identity is not a reason to disbelieve a message, and slice 4's episodic
-  // memories — whose subject is nullable — can hold what this narrowing drops.
+  // author. The dry run keeps the wider corpus for slice 4, whose episodic
+  // memories have a nullable subject and can hold what this drops.
   const identityClause = opts.requireAuthorIdentity
     ? `AND ${AUTHOR_HAS_IDENTITY} AND ${AUTHOR_IS_NOT_THE_OTHER_PARTY}`
     : "";
@@ -293,12 +278,21 @@ export async function selectCandidates(
       ${identityClause}
     -- Newest first for the cap, then flipped back to chronological below: if a
     -- window has to be trimmed, losing the OLDEST messages is the right loss.
+    --
+    -- One MORE than the cap, so that "the window held more than we took" can be
+    -- told apart from "the window held exactly the cap". Comparing the row count
+    -- to the limit cannot: a window holding exactly the cap lost nothing and
+    -- would still report itself truncated, sending the operator off to narrow a
+    -- window that was already whole.
     ORDER BY m.sent_at DESC
-    LIMIT $4
+    LIMIT $4 + 1
     ) w ORDER BY w.sent_at
     `,
     [groupId, since, until, limit],
   );
+  const truncated = rows.length > limit;
+  // Ascending by now, so the surplus is at the FRONT — drop the oldest.
+  const capped = truncated ? rows.slice(rows.length - limit) : rows;
 
   // Counted separately rather than with a window function, because a window that
   // is ENTIRELY unattributable returns no rows to hang a count on — and that is
@@ -308,19 +302,23 @@ export async function selectCandidates(
     window_total: string;
     unattributable: string;
     without_identity: string;
+    misattributed_self: string;
   }>(
     `
     SELECT count(*) AS window_total,
            count(*) FILTER (WHERE NOT (${AUTHOR_IS_A_PERSON})) AS unattributable,
            count(*) FILTER (WHERE (${AUTHOR_IS_A_PERSON}) AND NOT (${AUTHOR_HAS_IDENTITY}))
-             AS without_identity
+             AS without_identity,
+           count(*) FILTER (WHERE (${AUTHOR_IS_A_PERSON}) AND (${AUTHOR_HAS_IDENTITY})
+                              AND NOT (${AUTHOR_IS_NOT_THE_OTHER_PARTY}))
+             AS misattributed_self
     ${FROM_WINDOW}
     WHERE ${D7_EXCLUSIONS}
     `,
     [groupId, since, until],
   );
 
-  const candidates = rows
+  const candidates = capped
     .map((r) => ({
       messageId: Number(r.id),
       sender: r.sender ?? "",
@@ -339,7 +337,8 @@ export async function selectCandidates(
     windowTotal: Number(counts[0]?.window_total ?? 0),
     unattributable: Number(counts[0]?.unattributable ?? 0),
     withoutAuthorIdentity: Number(counts[0]?.without_identity ?? 0),
-    truncated: rows.length === limit,
+    misattributedSelfMessages: Number(counts[0]?.misattributed_self ?? 0),
+    truncated,
   };
 }
 

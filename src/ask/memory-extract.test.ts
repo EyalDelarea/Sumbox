@@ -293,8 +293,35 @@ describe("selectCandidates (D7 exclusions)", () => {
 
     const narrow = await selectCandidates(pool, dm, SINCE, UNTIL, { requireAuthorIdentity: true });
     expect(narrow.candidates.map((m) => m.content)).toEqual(["אני גר בחיפה"]);
+    // Counted, and counted SEPARATELY. The narrowing drops rows for two unrelated
+    // reasons; a caller reporting only the identity one understates what it left
+    // out, which is the skip-line-disagrees-with-the-run bug in a new place.
+    expect(narrow.misattributedSelfMessages).toBe(1);
+    expect(narrow.withoutAuthorIdentity, "a different reason, a different count").toBe(0);
     // The dry run still sees both — slice 4 can hold them without attributing.
     expect((await selectCandidates(pool, dm, SINCE, UNTIL)).candidates).toHaveLength(2);
+  });
+
+  // The cap keeps the NEWEST, so widening --hours to reach a backlog drops the
+  // oldest — the opposite of what widening it was for. Untested, the flag that
+  // says so was wired to the output and never proven to fire.
+  it("says when the window held more than the cap allowed, and which end was lost", async () => {
+    const g = await upsertGroup(pool, { name: `tr-${Math.random()}`, source: "import" });
+    const p = await upsertParticipant(pool, `TR-${Math.random()}`);
+    await insertMessages(pool, [
+      msg(g, p, { textContent: "ישן", sentAt: new Date("2026-05-01T09:00:00.000Z") }),
+      msg(g, p, { textContent: "אמצע", sentAt: new Date("2026-05-01T10:00:00.000Z") }),
+      msg(g, p, { textContent: "חדש", sentAt: new Date("2026-05-01T11:00:00.000Z") }),
+    ]);
+
+    const capped = await selectCandidates(pool, g, SINCE, UNTIL, { limit: 2 });
+    expect(capped.truncated).toBe(true);
+    expect(
+      capped.candidates.map((m) => m.content),
+      "the oldest is what falls off",
+    ).toEqual(["אמצע", "חדש"]);
+
+    expect((await selectCandidates(pool, g, SINCE, UNTIL, { limit: 3 })).truncated).toBe(false);
   });
 
   it("keeps the owner's own messages in a GROUP chat, where the jid really is theirs", async () => {

@@ -1,26 +1,20 @@
 /**
  * memory-write.ts — turning what extraction produced into stored memories.
  *
- * The sibling of `memory-extract.ts`. That module decides what may be learned
- * from and checks the model's output against the messages it was shown; this one
- * decides who a belief is about and puts it away. Split because the two fail
- * differently — extraction fails by believing something untrue, storage fails by
- * attributing it to the wrong person or by losing it silently — and the
- * attribution step lives here, with the failure it can cause.
+ * The sibling of `memory-extract.ts`: that module decides what may be learned
+ * from, this one decides who a belief is about and puts it away. Split because
+ * they fail differently — extraction fails by believing something untrue, storage
+ * fails by attributing it to the wrong person or losing it silently.
  *
  * ONE MEMORY AT A TIME, THROUGH THE REPOSITORY. `createMemory` owns the
  * transaction that makes "a memory cannot exist without evidence" enforceable,
- * and it is the only door into those tables by design. A bulk insert here would
- * be the second door — it would not break a constraint, it would just quietly
- * stop holding the invariant.
+ * and is the only door into those tables. A bulk insert here would be a second
+ * door that quietly stops holding the invariant.
  *
- * EVERY CANDIDATE COMES BACK WITH AN OUTCOME AND, WHEN IT WAS STORED, AN ID.
- * That is not bookkeeping. The safety model for this feature is entirely
- * post-hoc: a bad belief is meant to be found and withdrawn afterwards, and
- * `revokeMemory` takes an id. This run is the only moment where the id, the
- * words, the citation and the author are all in hand at once, so a run that
- * reported "created: 3" and nothing else would make finding those three a
- * database query rather than a scroll back through the output.
+ * EVERY CANDIDATE COMES BACK WITH AN OUTCOME, AND AN ID WHEN IT WAS STORED. The
+ * safety model is entirely post-hoc and `revokeMemory` takes an id; this run is
+ * the only moment where the id, the words, the citation and the author are all in
+ * hand at once.
  */
 import type pg from "pg";
 import { createMemory, type MemoryDraft } from "../db/repositories/aida-memory.js";
@@ -30,19 +24,15 @@ import { type CandidateMessage, hasAuthorIdentity } from "./memory-extract.js";
 export type AcceptedCandidate = { sourceMessageId: number; content: string };
 
 /**
- * What happened to one candidate.
+ * What happened to one candidate. Two pairs look alike and are deliberately not:
  *
- * Every value is distinguishable on purpose. Two of them look like the same thing
- * and are not: `converged` means the belief was already on file, while
- * `converged_onto_revoked` means it was on file and a human had WITHDRAWN it, so
- * nothing was stored. Collapsing them would erase the only measure of how often
- * the extractor keeps re-proposing something already revoked — the signal that
- * revocation is not reaching the thing that forms beliefs.
+ * `converged` = already on file. `converged_onto_revoked` = already on file and
+ * WITHDRAWN by a human, so nothing was stored — the only measure of how often the
+ * extractor re-proposes something already revoked.
  *
- * Two more look alike and are not: `no_author_identity` is the expected,
- * closing historical gap, whereas `not_shown` means a candidate reached storage
- * citing a message the model was never given — a validation bypass. Reporting the
- * second under the first's name would file an alarm as routine.
+ * `no_author_identity` = the expected, closing historical gap. `not_shown` = a
+ * candidate reached storage citing a message the model was never given, which is
+ * a validation bypass and should not read as routine.
  */
 export type StoreOutcome =
   | "created"
@@ -65,24 +55,17 @@ export type StoreResult = {
 /**
  * Decide who a belief is about, and shape it for the repository.
  *
- * ALWAYS `semantic`, and that is a mapping rather than a choice. The extraction
- * prompt has one hard rule — only what the speaker said about THEMSELVES — so
- * every item it can emit is a durable fact about one person, which is exactly
- * what the semantic table holds. Filing them anywhere else would mislabel them,
- * and the other three tables stay empty until a slice writes a prompt that emits
- * a type.
+ * ALWAYS `semantic`, as a mapping rather than a choice: the prompt's one hard
+ * rule is *only what the speaker said about THEMSELVES*, so every item it emits
+ * is a durable fact about one person. The other three tables stay empty until a
+ * slice writes a prompt that emits a type.
  *
- * THE SUBJECT IS THE AUTHOR OF THE CITED MESSAGE, which follows from that same
- * rule and from nothing else. Worth stating plainly, because the ingest path does
- * not guarantee it in general: in a 1:1 chat `sender_jid` is derived from the
- * chat's remote party, so the owner's own messages there carry the OTHER
- * person's identity. Those rows are excluded upstream today — their participant
- * is JID-shaped, so the author rule drops them — but that is a correlation in
- * Baileys' behaviour, not an invariant, and a belief attributed to the wrong
- * person is the one error revoking cannot undo. Hence the explicit guard below.
+ * THE SUBJECT IS THE AUTHOR OF THE CITED MESSAGE, which follows from that rule
+ * and nothing else — the ingest path does not guarantee it in general, which is
+ * why `selectCandidates` refuses 1:1 self-messages before they reach here.
  *
  * The raw jid is passed through; `createMemory` canonicalizes it, so one human
- * reached by two WhatsApp identities stays one subject.
+ * under two WhatsApp identities stays one subject.
  */
 export function toSemanticDraft(
   candidate: AcceptedCandidate,
@@ -90,22 +73,14 @@ export function toSemanticDraft(
   groupId: number,
 ): { draft: MemoryDraft } | { rejected: "no_author_identity" | "not_shown" } {
   const source = shown.get(candidate.sourceMessageId);
-  if (!source) {
-    // `validateCandidate` already rejects an invented id, so reaching here means
-    // a caller skipped validation or built `shown` from a different window. An
-    // alarm, not the routine gap below — which is why it has its own outcome.
-    return { rejected: "not_shown" };
-  }
-  if (!hasAuthorIdentity(source.senderJid)) {
-    // `semantic.subject_jid` is NOT NULL, and it should be: a belief about a
-    // person that cannot say which person is not a belief about a person. Filing
-    // it as `episodic` instead — whose subject is nullable — would keep the row
-    // by calling a fact about someone an event. The identity is not recoverable
-    // either: it came from Baileys' `key.participant` at ingest and was never
-    // written down, and a display name cannot stand in because names collapse
-    // different people.
-    return { rejected: "no_author_identity" };
-  }
+  // `validateCandidate` already rejects an invented id, so reaching here means a
+  // caller skipped validation or built `shown` from another window.
+  if (!source) return { rejected: "not_shown" };
+  // `semantic.subject_jid` is NOT NULL and should be: a belief about a person
+  // that cannot say which person is not one. Filing it as `episodic` instead
+  // would keep the row by calling a fact about someone an event, and the identity
+  // is not recoverable — it was never written down.
+  if (!hasAuthorIdentity(source.senderJid)) return { rejected: "no_author_identity" };
   return {
     draft: {
       memoryType: "semantic",
@@ -123,16 +98,12 @@ export function toSemanticDraft(
  * Store every accepted candidate, and report what happened to each one.
  *
  * NOTHING THROWS OUT OF HERE. `createMemory` owns a transaction PER CANDIDATE, so
- * by the time a later one fails, earlier beliefs about named real people are
- * already committed. An exception unwinding past this loop would take the record
- * of them with it, and the caller would print an error and exit having stored
- * things it never mentioned. A failure is an outcome on one candidate, and the
- * run continues — the same reason an unattributable candidate does not abort it.
+ * a failure on the fourth leaves the first three committed — and an exception
+ * unwinding past this loop would take the record of them with it, leaving beliefs
+ * on file that the run never mentioned. Failure is an outcome on one candidate.
  *
- * Sequential rather than concurrent on purpose: each write is its own
- * transaction, and two candidates in one window can share a dedupe key, so
- * parallelism would turn ordinary convergence into lock contention on a job that
- * already waited on a model.
+ * Sequential, not concurrent: two candidates in one window can share a dedupe
+ * key, so parallelism would turn ordinary convergence into lock contention.
  */
 export async function storeAccepted(
   pool: pg.Pool,
@@ -170,12 +141,9 @@ export async function storeAccepted(
 }
 
 /**
- * Widen the repository's outcome into this module's.
- *
- * A switch rather than an if/else chain so that a new repository outcome is a
- * COMPILE error here. Written as a chain it would fall through to whichever
- * branch happened to be last, and the last one is the number this design says is
- * the one worth watching.
+ * Widen the repository's outcome into this module's. A switch, not a chain, so a
+ * new repository outcome is a COMPILE error rather than falling through to
+ * whichever branch is last — which here is the number worth watching.
  */
 function outcomeOf(outcome: "created" | "converged" | "converged_onto_revoked"): StoreOutcome {
   switch (outcome) {
