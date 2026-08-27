@@ -1098,7 +1098,79 @@ describe("aida-memory", () => {
       content: "תיקון",
       note: "מאוחר מדי",
     });
-    expect(outcome).toEqual({ ok: false, reason: "already_withdrawn" });
+    expect(outcome).toEqual({ ok: false, reason: "already_revoked" });
+  });
+
+  it("refuses a correction that collides with a DIFFERENT belief, touching neither", async () => {
+    // The serious one. `createMemory` COMMITS on the converge path, so deciding
+    // `duplicate` after calling it meant the original's whole evidence ledger had
+    // already been written onto whatever row it collided with. The dedupe key is
+    // (group, subject, content_hash), so that row need not be the original —
+    // `self_state` keys on just (group, facet, hash), which makes it easy to hit.
+    const g = await newGroup("correct-collide");
+    const m1 = await newMessage(g);
+    const m2 = await newMessage(g);
+    const a = await write({
+      memoryType: "self_state",
+      groupId: g,
+      facet: "behaviour",
+      content: "לענות בקצרה",
+      evidence: [{ messageId: m1, stance: "supports" }],
+    });
+    const b = await write({
+      memoryType: "self_state",
+      groupId: g,
+      facet: "behaviour",
+      content: "לענות בעברית",
+      evidence: [{ messageId: m2, stance: "supports" }],
+    });
+
+    // Retype A's wording into B's exact wording.
+    const outcome = await correctMemory(pool, {
+      memoryType: "self_state",
+      groupId: g,
+      memoryId: a.id,
+      content: "לענות בעברית",
+      note: "התנגשות",
+    });
+
+    expect(outcome).toEqual({ ok: false, reason: "duplicate" });
+    const all = await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true });
+    expect(all, "no third row was written").toHaveLength(2);
+    // The claim "nothing was written" has to be true of B's ledger too.
+    expect(
+      all.find((r) => r.id === b.id)?.supportingEvidence,
+      "the collided-onto belief keeps its own evidence, and only its own",
+    ).toBe(1);
+    expect(all.find((r) => r.id === a.id)?.supersededById, "and A is untouched").toBeNull();
+  });
+
+  it("tells a replaced belief apart from a withdrawn one", async () => {
+    const g = await newGroup("correct-superseded");
+    const original = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "גרסה ראשונה",
+      evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+    });
+    await correctMemory(pool, {
+      memoryType: "episodic",
+      groupId: g,
+      memoryId: original.id,
+      content: "גרסה שנייה",
+      note: "ניסוח",
+    });
+    // Correcting the REPLACED row would fork the chain into two live heads. The
+    // remedy differs from a withdrawn belief's, so the reason has to differ too.
+    expect(
+      await correctMemory(pool, {
+        memoryType: "episodic",
+        groupId: g,
+        memoryId: original.id,
+        content: "גרסה שלישית",
+        note: "מאוחר מדי",
+      }),
+    ).toEqual({ ok: false, reason: "already_superseded" });
   });
 
   it("refuses a correction that just restates the belief, and writes nothing", async () => {

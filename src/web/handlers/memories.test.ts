@@ -185,11 +185,41 @@ describe("/api/memories", () => {
     expect((await listMemoriesForReview(pool, { groupId: mine }))[0]?.revokedAt).toBeNull();
   });
 
-  it("reports nothing-to-withdraw rather than success", async () => {
+  it("tells an already-withdrawn belief apart from one that does not exist", async () => {
+    // Both used to be 404. Telling someone their belief does not exist when it is
+    // merely already withdrawn reads as data loss on a screen whose whole promise
+    // is that the record stays.
     const g = await newGroup("api-rev-twice");
     const id = await newMemory(g, "כבר בוטל");
     await post("/api/memories/revoke", ref(g, id));
-    expect((await post("/api/memories/revoke", ref(g, id))).status).toBe(404);
+
+    const again = await post("/api/memories/revoke", ref(g, id));
+    expect(again.status).toBe(409);
+    expect(again.json.error).toBe("already_revoked");
+
+    const missing = await post("/api/memories/revoke", ref(g, 999_999));
+    expect(missing.status).toBe(404);
+    expect(missing.json.error).toBe("not_found");
+  });
+
+  it("refuses an id with trailing garbage instead of targeting the row it prefixes", async () => {
+    // `parseInt` read "5x" as 5, so a malformed reference silently revoked a real
+    // belief. Digits only.
+    const g = await newGroup("api-strict-id");
+    const id = await newMemory(g, "לא לגעת");
+    const { status } = await post("/api/memories/revoke", {
+      memoryType: "episodic",
+      groupId: g,
+      memoryId: `${id}x`,
+    });
+    expect(status).toBe(400);
+    expect((await get(`?group=${g}`)).json[0].content, "and the belief is untouched").toBe(
+      "לא לגעת",
+    );
+  });
+
+  it("refuses a group filter with trailing garbage rather than widening the list", async () => {
+    expect((await get("?group=12abc")).status).toBe(400);
   });
 
   // ── Correcting ───────────────────────────────────────────────────────────

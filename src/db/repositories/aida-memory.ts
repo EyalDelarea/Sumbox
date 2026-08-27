@@ -819,7 +819,13 @@ export type CorrectionOutcome =
   | { ok: true; memoryId: number }
   | {
       ok: false;
-      reason: "not_found" | "already_withdrawn" | "no_evidence" | "duplicate" | "supersede_failed";
+      reason:
+        | "not_found"
+        | "already_revoked"
+        | "already_superseded"
+        | "no_evidence"
+        | "duplicate"
+        | "supersede_failed";
     };
 
 /**
@@ -878,11 +884,35 @@ export async function correctMemory(
   );
   const original = rows[0];
   if (!original) return { ok: false, reason: "not_found" };
-  if (original.revoked_at !== null || original.superseded_by_id !== null) {
-    // Correcting something already withdrawn or already replaced would fork the
-    // chain and leave two live heads. Withdraw or correct the head instead.
-    return { ok: false, reason: "already_withdrawn" };
+  // Told apart because the remedies differ: a withdrawn belief is finished, while
+  // a replaced one has a live head the user should be correcting instead.
+  if (original.revoked_at !== null) return { ok: false, reason: "already_revoked" };
+  if (original.superseded_by_id !== null) {
+    // Correcting a replaced row would fork the chain into two live heads.
+    return { ok: false, reason: "already_superseded" };
   }
+
+  // Decide `duplicate` BEFORE writing, not after. `createMemory` COMMITS on the
+  // converge path — it writes the inherited citations onto whatever row it
+  // collided with and returns "converged" — so refusing afterwards would report
+  // "nothing was written" about a transaction that had already landed.
+  //
+  // When the collision is with the original itself (someone "corrects" a belief
+  // to what it already says) the citations are the same rows and nothing moves.
+  // But the dedupe key is (group, subject, content_hash), so the collision can be
+  // with a DIFFERENT live belief — most easily a `self_state` row, whose key is
+  // just (group, facet, hash), or a subject-less `episodic` one. Then the
+  // original's whole evidence ledger, contradictions included, lands on somebody
+  // else's belief and permanently changes how it ranks at read time, while the
+  // caller is told the correction was refused.
+  const { rows: collision } = await pool.query<{ id: string }>(
+    `SELECT id FROM ${table}
+      WHERE group_id = $1 AND content_hash = $2
+        AND ${subjectColumn} IS NOT DISTINCT FROM $3
+        AND superseded_by_id IS NULL`,
+    [input.groupId, memoryContentHash(content), original.subject],
+  );
+  if (collision.length > 0) return { ok: false, reason: "duplicate" };
 
   const evidence = await listMemoryEvidence(pool, input);
   if (evidence.length === 0) {
@@ -910,12 +940,13 @@ export async function correctMemory(
   });
   if (written === null) return { ok: false, reason: "no_evidence" };
   if (written.outcome !== "created") {
-    // The correction's wording collided with a belief already on file — very
-    // often the original itself, when someone "corrects" it to what it already
-    // says. Superseding onto that would point a row at itself, and the cycle
-    // guard would then refuse, leaving the compensating revoke to withdraw a row
-    // that was never new. Refuse up front instead; nothing was written.
-    return { ok: false, reason: "duplicate" };
+    // The pre-check above should have caught this. Reaching here means a
+    // concurrent write took the dedupe slot between the check and the insert —
+    // rare, and not something to report as a tidy refusal, because citations may
+    // already have landed on a row this call did not create.
+    throw new Error(
+      `correctMemory: raced onto an existing ${input.memoryType} memory ${written.id}`,
+    );
   }
 
   const outcome = await supersedeMemory(pool, {
@@ -925,11 +956,23 @@ export async function correctMemory(
     replacedById: written.id,
   });
   if (outcome !== "superseded") {
-    await revokeMemory(pool, {
+    // The replacement is live and points at nothing, so the screen would show it
+    // beside the belief it was meant to replace. Withdrawing it is the whole
+    // reason this branch exists — so CHECK that it happened. Swallowing a failed
+    // or no-op revoke here would leave a live orphan carrying the user's wording
+    // and their correction note, while telling them the correction failed.
+    const undone = await revokeMemory(pool, {
       memoryType: input.memoryType,
       groupId: input.groupId,
       memoryId: written.id,
-    });
+    }).catch(() => 0);
+    if (undone === 0) {
+      throw new Error(
+        `correctMemory: supersede of ${input.memoryId} failed (${outcome}) and the ` +
+          `replacement ${written.id} could not be withdrawn — a live orphan correction ` +
+          `now exists on ${table}`,
+      );
+    }
     return { ok: false, reason: "supersede_failed" };
   }
   return { ok: true, memoryId: written.id };

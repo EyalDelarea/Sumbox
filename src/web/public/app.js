@@ -1990,7 +1990,16 @@ const obState = {
  * which is why neither button says מחק — a label claiming deletion over a row
  * that is still there would be the interface lying about what it did.
  */
-const memoryState = { rows: [], group: "", type: "", withdrawn: false, error: "", notice: "" };
+const memoryState = {
+  rows: [],
+  group: "",
+  type: "",
+  withdrawn: false,
+  error: "",
+  notice: "",
+  /** Bumped per request so a slow response cannot paint over a newer filter. */
+  seq: 0,
+};
 
 async function renderMemory() {
   teardownStream();
@@ -2001,14 +2010,25 @@ async function renderMemory() {
 }
 
 async function loadMemories() {
+  const seq = ++memoryState.seq;
   try {
-    memoryState.rows = await getMemories({
+    const rows = await getMemories({
       group: memoryState.group ? Number(memoryState.group) : undefined,
       type: memoryState.type || undefined,
       withdrawn: memoryState.withdrawn,
     });
+    // Two filter changes in quick succession can land out of order. Painting the
+    // older response would leave the list contradicting the controls above it.
+    if (seq !== memoryState.seq) return;
+    memoryState.rows = rows;
     memoryState.error = "";
   } catch {
+    if (seq !== memoryState.seq) return;
+    // The rows are DROPPED, not kept. Last-known state rendered as current is
+    // how a belief that was just withdrawn keeps its active buttons — and the
+    // next click on them fails with a message about a belief that "does not
+    // exist", which reads as data loss on a screen promising the record stays.
+    memoryState.rows = [];
     memoryState.error = "שגיאה בטעינת הזיכרונות.";
   }
   // `notice` is deliberately NOT cleared here. Every action reloads the list
@@ -2043,7 +2063,7 @@ function paintMemory() {
           <b>מה @אידה למדה מהצ׳אטים שלך</b>
           <p>כל שורה היא פרשנות שלה, לא ציטוט. אפשר לפתוח את ההודעות שממנה היא הסיקה, לתקן את הניסוח, או לבטל לגמרי. שום פעולה לא מוחקת — הרשומה נשארת.</p>
         </div>
-        <span class="badge accent" dir="ltr">${rows.filter((r) => !r.revoked && !r.superseded).length}</span>
+        ${memoryState.error ? "" : `<span class="badge accent" dir="ltr">${rows.filter((r) => !r.revoked && !r.superseded).length}</span>`}
       </div>
 
       <div class="mem-filters">
@@ -2065,8 +2085,14 @@ function paintMemory() {
       ${memoryState.notice ? `<p class="error-state">${escHtml(memoryState.notice)}</p>` : ""}
       <div class="cmds-list" id="mem-list">
         ${
+          // Only claim she has learned nothing when we actually KNOW that. On a
+          // failed load the list is empty because the request failed, and saying
+          // "nothing to review" at the moment the app cannot tell is how someone
+          // stops coming back to a screen they were told was empty.
           rows.length === 0
-            ? '<p class="empty-state">היא עדיין לא למדה כלום כאן. זיכרונות נוצרים מהודעות אמיתיות — אין מה לתקן עד שיהיו.</p>'
+            ? memoryState.error
+              ? ""
+              : '<p class="empty-state">היא עדיין לא למדה כלום כאן. זיכרונות נוצרים מהודעות אמיתיות — אין מה לתקן עד שיהיו.</p>'
             : rows.map(buildMemoryRow).join("")
         }
       </div>
@@ -2077,10 +2103,14 @@ function paintMemory() {
 function buildMemoryRow(r) {
   const withdrawn = r.revoked || r.superseded;
   const state = r.revoked ? "בוטל" : r.superseded ? "הוחלף" : "";
+  // The contradicting count shows in BOTH branches. A belief with no support and
+  // five messages against it is the most reviewable row on the screen, and
+  // reporting only "nothing supports this" would hide exactly that.
+  const against = r.contradictingEvidence > 0 ? `${r.contradictingEvidence} סותרות` : "";
   const evidence =
     r.supportingEvidence === 0
-      ? "אין הודעות שתומכות בזה"
-      : `${r.supportingEvidence} הודעות${r.contradictingEvidence > 0 ? ` · ${r.contradictingEvidence} סותרות` : ""}`;
+      ? ["אין הודעות שתומכות בזה", against].filter(Boolean).join(" · ")
+      : [`${r.supportingEvidence} הודעות`, against].filter(Boolean).join(" · ");
   return `
     <div class="cmd-row mem-row${withdrawn ? " cmd-row--off" : ""}" data-id="${r.id}" data-type="${r.memoryType}" data-group="${r.groupId}">
       <div class="cmd-row__body">
@@ -2148,7 +2178,8 @@ function openMemorySource(row) {
 /** Why the server refused a correction, in words rather than a code. */
 const CORRECTION_REFUSALS = {
   duplicate: "זה בדיוק מה שכתוב עכשיו — אין מה לתקן.",
-  already_withdrawn: "הזיכרון הזה כבר בוטל או הוחלף.",
+  already_revoked: "הזיכרון הזה כבר בוטל.",
+  already_superseded: "הזיכרון הזה כבר הוחלף — תקנו את הגרסה החדשה.",
   no_evidence: "כל ההודעות שהזיכרון נשען עליהן נמחקו — אפשר רק לבטל אותו.",
   not_found: "הזיכרון לא נמצא בצ׳אט הזה.",
   supersede_failed: "התיקון לא נשמר. שום דבר לא השתנה.",
@@ -2191,9 +2222,11 @@ async function confirmRevoke(ref, row) {
     memoryState.notice = "";
   } catch (err) {
     memoryState.notice =
-      err.message === "not_found"
-        ? "אין מה לבטל — הזיכרון כבר בוטל, או לא נמצא בצ׳אט הזה."
-        : `הביטול נכשל: ${err.message}. שום דבר לא השתנה.`;
+      err.message === "already_revoked"
+        ? "הזיכרון הזה כבר בוטל."
+        : err.message === "not_found"
+          ? "הזיכרון לא נמצא בצ׳אט הזה."
+          : `הביטול נכשל: ${err.message}. שום דבר לא השתנה.`;
   }
   await loadMemories();
 }

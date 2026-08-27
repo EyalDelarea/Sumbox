@@ -5,6 +5,7 @@ import {
   type MemoryType,
   revokeMemory,
 } from "../../db/repositories/aida-memory.js";
+import { getLogger } from "../../logging/log.js";
 import type { ServerDeps } from "./context.js";
 import { readJsonBody } from "./scopes.js";
 
@@ -30,7 +31,13 @@ import { readJsonBody } from "./scopes.js";
  * exists in all of them.
  */
 
-const MEMORY_TYPES: readonly MemoryType[] = ["episodic", "semantic", "relational", "self_state"];
+const MEMORY_TABLE: Record<MemoryType, string> = {
+  episodic: "aida_episodic_memories",
+  semantic: "aida_semantic_memories",
+  relational: "aida_relational_memories",
+  self_state: "aida_self_state_memories",
+};
+const MEMORY_TYPES = Object.keys(MEMORY_TABLE) as MemoryType[];
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -43,9 +50,16 @@ function parseMemoryType(raw: unknown): MemoryType | null {
     : null;
 }
 
+/**
+ * Strict: `parseInt` would read "12abc" as 12 and "1e3" as 1, so a malformed id
+ * would silently target a real row — a revoke aimed at row 5 by a caller that
+ * sent "5x". Digits only, and nothing else.
+ */
 function parsePositiveInt(raw: unknown): number | null {
-  const n = typeof raw === "number" ? raw : Number.parseInt(String(raw ?? ""), 10);
-  return Number.isInteger(n) && n > 0 ? n : null;
+  if (typeof raw === "number") return Number.isInteger(raw) && raw > 0 ? raw : null;
+  if (typeof raw !== "string" || !/^\d+$/.test(raw.trim())) return null;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
 export async function handleMemories(
@@ -116,7 +130,8 @@ async function getMemories(url: URL, res: http.ServerResponse, deps: ServerDeps)
         sourceMessageId: r.firstSourceMessageId,
       })),
     );
-  } catch {
+  } catch (err) {
+    getLogger("web").error({ err }, "memories: list failed");
     json(res, 500, { error: "Failed to load memories." });
   }
 }
@@ -154,7 +169,8 @@ async function postCorrect(
     });
     if (outcome.ok) return json(res, 200, { memoryId: outcome.memoryId });
     return json(res, outcome.reason === "not_found" ? 404 : 409, { error: outcome.reason });
-  } catch {
+  } catch (err) {
+    getLogger("web").error({ err, memoryType, groupId, memoryId }, "memories: correct failed");
     json(res, 500, { error: "Failed to correct memory." });
   }
 }
@@ -176,13 +192,37 @@ async function postRevoke(
   }
 
   try {
-    // Returns how many rows were stamped: the belief and everything it was later
-    // refined into. Zero means there was nothing to withdraw — an unknown id, a
-    // belief in another chat, or one already revoked.
+    // Returns how many rows were stamped. Zero has two very different meanings,
+    // and telling a user their belief does not exist when it is merely already
+    // withdrawn reads as data loss on a screen that promises the record stays.
     const revoked = await revokeMemory(deps.pool, { memoryType, groupId, memoryId });
-    if (revoked === 0) return json(res, 404, { error: "not_found" });
+    if (revoked === 0) {
+      const exists = await memoryExists(deps.pool, memoryType, groupId, memoryId);
+      return json(res, exists ? 409 : 404, {
+        error: exists ? "already_revoked" : "not_found",
+      });
+    }
     json(res, 200, { revoked });
-  } catch {
+  } catch (err) {
+    // Bound and logged, not swallowed: this is the cleanup path for a belief
+    // about a real person, and a failure here with no artifact anywhere is the
+    // failure the whole feature exists to prevent.
+    getLogger("web").error({ err, memoryType, groupId, memoryId }, "memories: revoke failed");
     json(res, 500, { error: "Failed to revoke memory." });
   }
+}
+
+/** Does this belief exist in this chat at all? Only used to explain a no-op revoke. */
+async function memoryExists(
+  pool: ServerDeps["pool"],
+  memoryType: MemoryType,
+  groupId: number,
+  memoryId: number,
+): Promise<boolean> {
+  const table = MEMORY_TABLE[memoryType];
+  const { rows } = await pool.query(`SELECT 1 FROM ${table} WHERE id = $1 AND group_id = $2`, [
+    memoryId,
+    groupId,
+  ]);
+  return rows.length > 0;
 }
