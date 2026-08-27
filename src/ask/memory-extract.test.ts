@@ -7,6 +7,7 @@ import { listGroupParticipants, upsertParticipant } from "../db/repositories/par
 import type { NormalizedMessage } from "../importer/types.js";
 import { createTestDatabase } from "../test/db.js";
 import {
+  buildExtractionPrompt,
   buildExtractionWindow,
   buildSubjectIndex,
   type CandidateMessage,
@@ -724,6 +725,38 @@ describe("validateCandidate", () => {
       sourceMessageIds: [2],
     };
     expect(validateCandidate(singleSourced, window).reason).toBe("uncorroborated");
+  });
+});
+
+// One name-space, pinned. The prompt shows a label and the index resolves one; if
+// they ever disagree every subject fails rule one at once and the run reports a
+// room nobody spoke in — a containment refusal that is really a rendering bug.
+// Three name-spaces that disagreed is how #67's guardrail bugs shipped.
+describe("the prompt's labels and the subject index", () => {
+  it("names people in the one name-space subjects resolve through", () => {
+    const aliases = new Map([["Dana Cohen", "דנה"]]);
+    const messages: CandidateMessage[] = [
+      {
+        messageId: 12,
+        sender: "Dana Cohen",
+        senderJid: "972500000042@s.whatsapp.net",
+        jidIsAuthors: true,
+        content: "אני עוברת לחיפה",
+        sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      },
+    ];
+    const prompt = buildExtractionPrompt(messages, aliases);
+    const label = prompt.match(/^\[12\] (.+?): /m)?.[1];
+
+    expect(label, "the operator's rendering, not the raw push name").toBe("דנה");
+    const window = buildExtractionWindow(messages, aliases);
+    expect(
+      validateCandidate(
+        { type: "semantic", subjects: [label], content: "עוברת לחיפה", sourceMessageIds: [12] },
+        window,
+      ).ok,
+      "a subject copied straight off the prompt must resolve",
+    ).not.toBeNull();
   });
 });
 

@@ -737,8 +737,16 @@ export function parseCandidates(text: string): unknown[] {
 /**
  * The extraction prompt. Lives beside the validator so the two version together.
  *
- * Every rule below is here because the previous version got it wrong on the real
- * group-70 corpus (986 messages, 20 accepted), not because it seemed prudent:
+ * WHAT THIS PROMPT IS AND IS NOT RESPONSIBLE FOR. It asks for four types of
+ * belief and it repeats the containment rules — but only to stop the model
+ * spending its output on candidates that will be refused. The GUARANTEE is
+ * `validateCandidate`, over what came back. Everything measured on this stack
+ * says a prompt rule does not bind: the probe prompt that produced the two
+ * sensitive rows on #83 said, in words, *if it would embarrass someone to read
+ * it, skip it*, and produced them anyway.
+ *
+ * Every rule below is here because a previous version got it wrong on the real
+ * group-70 corpus, not because it seemed prudent:
  *
  * - It answered in ENGLISH about a Hebrew corpus. A translated memory does not
  *   match the language she speaks or the words the group used, and this project
@@ -746,39 +754,75 @@ export function parseCandidates(text: string): unknown[] {
  * - 14 of 20 were ephemeral — "I am at gate 11", "taxi is on the way", "I am not
  *   at home". "Still true later" was too abstract to bite, so the rule is now
  *   stated as a concrete test with the actual failures as counter-examples.
- * - One row was third-person about someone else's interaction with her, which the
- *   "about THEMSELVES" rule already forbade in the abstract. Naming the failure
- *   shape works better than restating the principle.
+ * - 2 of 5 cited a message id that does not exist, so the ids are handed to it
+ *   in brackets and it is told to copy rather than compose them.
+ *
+ * INFERENCE IS THE POINT, not a loophole. A `semantic` memory drawn from how
+ * somebody behaves is unreachable under the shipped prompt's self-statement rule,
+ * and it is most of what a group chat actually carries — the whole reason three
+ * of the four tables have stayed empty.
+ *
+ * Names are rendered through `resolveSenderName`, the same name-space
+ * {@link buildSubjectIndex} resolves subjects in and the roster and the transcript
+ * both use. If the prompt showed one rendering and the index held another, every
+ * subject would fail rule one and the run would report a room nobody spoke in.
  */
-export function buildExtractionPrompt(messages: CandidateMessage[]): string {
+export function buildExtractionPrompt(
+  messages: CandidateMessage[],
+  aliases?: Map<string, string>,
+): string {
   const lines = messages
-    .map((m) => `[${m.messageId}] ${m.sender}: ${m.content.replace(/\s+/g, " ").slice(0, 300)}`)
+    .map(
+      (m) =>
+        `[${m.messageId}] ${labelOf(m, aliases)}: ${m.content.replace(/\s+/g, " ").slice(0, 300)}`,
+    )
     .join("\n");
   return [
-    "Below are messages from a group chat, each prefixed with its id in [brackets].",
+    "Below are messages from a group chat, each prefixed with its id in [brackets]",
+    "and the name of the person who wrote it.",
     "",
-    "Extract only DURABLE facts a person stated ABOUT THEMSELVES — things that will",
-    "still be true in six months.",
+    "Extract DURABLE observations about the people in this chat and about the chat",
+    "itself — things that will still matter in six months.",
     "",
-    "THE TEST: would this still be true in six months? If not, skip it.",
-    "  KEEP:  a job, where they live, a relationship, something they own, a",
-    "         long-running hobby, a recurring commitment.",
+    "THE FOUR KINDS:",
+    '  semantic    — a lasting pattern about ONE person. Stated ("I work at X") or',
+    '                inferred from how they behave ("always the one who organises").',
+    "  relational  — a lasting pattern BETWEEN two or more named people.",
+    "  episodic    — something that HAPPENED in this group and is worth remembering.",
+    "                It may be about nobody in particular; then leave subjects empty.",
+    "  self_state  — something about YOU, the assistant, that this chat established:",
+    '                facet "knowledge" for a fact you were told, facet "behaviour"',
+    "                for how you should act in this group.",
+    "",
+    "THE TEST: would this still matter in six months? If not, skip it.",
+    "  KEEP:  a job, where someone lives, a relationship, something they own, a",
+    "         long-running hobby, a recurring commitment, a habit they repeat.",
     "  SKIP:  where they are right now, what they are doing today, travel in",
     "         progress, an errand, a plan for this week, a mood, a joke.",
     "  Examples of what to SKIP: 'I am at gate 11', 'taxi is on the way',",
     "  'I am not at home', 'arriving at 13:00', 'I am returning soon'.",
     "",
     "HARD RULES:",
-    "- Write the fact in the SAME LANGUAGE as the message. Never translate.",
+    "- Write the observation in the SAME LANGUAGE as the messages. Never translate.",
     "  Copy names, places and numbers exactly as written.",
-    "- Only what the speaker said about THEMSELVES. If it is about another person,",
-    "  or about this bot, skip it entirely — no exceptions.",
-    "- Never an opinion, a judgement, an insult, or a guess about anyone.",
-    "- Every item MUST cite the id of the single message it came from.",
+    "- Name subjects EXACTLY as they appear before the colon above. A person who",
+    "  never wrote a message here cannot be a subject — not their relative, not",
+    "  their colleague, not somebody the chat is talking about.",
+    "- Cite the ids of the messages the observation came from, copied from the",
+    "  [brackets]. Never write an id that is not above.",
+    "- An observation about the person who WROTE the message needs one message.",
+    "  Anything else — about another person, between people, or about you — needs",
+    "  AT LEAST TWO messages written by TWO DIFFERENT people. If only one person",
+    "  ever said it, skip it.",
+    "- Never an opinion, a judgement, or an insult.",
     "- Most windows contain NOTHING durable. Returning [] is the normal, correct",
     "  answer — do not pad.",
     "",
-    'Reply with ONLY a JSON array: [{"sourceMessageId": 123, "content": "..."}]',
+    "Reply with ONLY a JSON array, each item:",
+    '  {"type":"semantic","subjects":["name"],"content":"...","sourceMessageIds":[12]}',
+    '  {"type":"relational","subjects":["a","b"],"content":"...","sourceMessageIds":[12,34]}',
+    '  {"type":"episodic","subjects":[],"content":"...","sourceMessageIds":[12]}',
+    '  {"type":"self_state","facet":"behaviour","content":"...","sourceMessageIds":[12,34]}',
     "",
     lines,
   ].join("\n");
