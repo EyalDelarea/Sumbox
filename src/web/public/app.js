@@ -1990,7 +1990,7 @@ const obState = {
  * which is why neither button says מחק — a label claiming deletion over a row
  * that is still there would be the interface lying about what it did.
  */
-const memoryState = { rows: [], group: "", type: "", withdrawn: false, error: "" };
+const memoryState = { rows: [], group: "", type: "", withdrawn: false, error: "", notice: "" };
 
 async function renderMemory() {
   teardownStream();
@@ -2011,6 +2011,10 @@ async function loadMemories() {
   } catch {
     memoryState.error = "שגיאה בטעינת הזיכרונות.";
   }
+  // `notice` is deliberately NOT cleared here. Every action reloads the list
+  // straight after running, so clearing it would wipe the one message saying the
+  // action failed before it was ever painted — the list would simply re-render
+  // unchanged, which reads as "nothing happened" rather than "it did not work".
   paintMemory();
 }
 
@@ -2058,6 +2062,7 @@ function paintMemory() {
       </div>
 
       ${memoryState.error ? `<p class="error-state">${escHtml(memoryState.error)}</p>` : ""}
+      ${memoryState.notice ? `<p class="error-state">${escHtml(memoryState.notice)}</p>` : ""}
       <div class="cmds-list" id="mem-list">
         ${
           rows.length === 0
@@ -2140,28 +2145,55 @@ function openMemorySource(row) {
   navigate("thread", { chat: row.groupName, aroundId: row.sourceMessageId });
 }
 
+/** Why the server refused a correction, in words rather than a code. */
+const CORRECTION_REFUSALS = {
+  duplicate: "זה בדיוק מה שכתוב עכשיו — אין מה לתקן.",
+  already_withdrawn: "הזיכרון הזה כבר בוטל או הוחלף.",
+  no_evidence: "כל ההודעות שהזיכרון נשען עליהן נמחקו — אפשר רק לבטל אותו.",
+  not_found: "הזיכרון לא נמצא בצ׳אט הזה.",
+  supersede_failed: "התיקון לא נשמר. שום דבר לא השתנה.",
+};
+
 async function promptCorrection(ref, row) {
   const content = window.prompt("הניסוח המתוקן:", row?.content ?? "");
-  if (content === null || content.trim() === "") return;
+  // null is Cancel — the user changed their mind, and saying anything about it
+  // would be noise. An empty box is a different thing: they meant to type.
+  if (content === null) return;
+  if (content.trim() === "") {
+    memoryState.notice = "לא נכתב ניסוח — שום דבר לא השתנה.";
+    return paintMemory();
+  }
   // Required, not optional: the reason is the ONLY thing marking a row as
   // written by you rather than by her, so an empty one would make your
   // correction look like her conclusion.
   const note = window.prompt("למה? (חובה — כך יסומן שהתיקון שלך)");
-  if (note === null || note.trim() === "") return;
+  if (note === null) return;
+  if (note.trim() === "") {
+    memoryState.notice = "תיקון חייב לומר למה. שום דבר לא השתנה.";
+    return paintMemory();
+  }
   try {
     await correctMemory({ ...ref, content: content.trim(), note: note.trim() });
+    memoryState.notice = "";
   } catch (err) {
-    memoryState.error = `התיקון נכשל: ${err.message}`;
+    memoryState.notice =
+      CORRECTION_REFUSALS[err.message] ?? `התיקון נכשל: ${err.message}. שום דבר לא השתנה.`;
   }
   await loadMemories();
 }
 
 async function confirmRevoke(ref, row) {
-  if (!window.confirm(`לבטל את "${row?.content ?? ""}"?\n\nהיא לא תשתמש בזה יותר. הרשומה נשארת.`)) return;
+  if (!window.confirm(`לבטל את "${row?.content ?? ""}"?\n\nהיא לא תשתמש בזה יותר. הרשומה נשארת.`)) {
+    return;
+  }
   try {
     await revokeMemory(ref);
+    memoryState.notice = "";
   } catch (err) {
-    memoryState.error = `הביטול נכשל: ${err.message}`;
+    memoryState.notice =
+      err.message === "not_found"
+        ? "אין מה לבטל — הזיכרון כבר בוטל, או לא נמצא בצ׳אט הזה."
+        : `הביטול נכשל: ${err.message}. שום דבר לא השתנה.`;
   }
   await loadMemories();
 }
