@@ -703,6 +703,9 @@ describe("validateCandidate", () => {
     expect(validateCandidate({ ...claim, sourceMessageIds: [] }, window).reason).toBe(
       "no-citations",
     );
+    // Absent, not empty. A model that stopped citing at all must not read in the
+    // counters as one citing something unparseable.
+    expect(validateCandidate({ ...claim }, window).reason).toBe("no-citations");
     expect(
       validateCandidate({ ...claim, content: "  ", sourceMessageIds: [1] }, window).reason,
     ).toBe("empty-content");

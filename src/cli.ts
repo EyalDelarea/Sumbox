@@ -782,7 +782,15 @@ program
               user: buildExtractionPrompt(selection.candidates),
             })
           ).overview;
-          for (const candidate of parseCandidates(raw)) {
+          const parsed = parseCandidates(raw);
+          // A reply that produced nothing parseable is NOT an empty window, and
+          // the two print identically unless one of them says so. `[]` is the
+          // normal answer here, so this fires only when the model said something
+          // and none of it survived the parse.
+          if (parsed.length === 0 && raw.trim() !== "" && raw.trim() !== "[]") {
+            refused.unparseable = 1;
+          }
+          for (const candidate of parsed) {
             const { ok, reason } = validateCandidate(candidate, window);
             if (!ok) {
               const key = reason ?? "unknown";

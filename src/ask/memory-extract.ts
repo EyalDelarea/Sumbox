@@ -517,8 +517,6 @@ export type RejectReason =
   | "wrong-subject-count"
   | "uncorroborated";
 
-export type Rejection = { candidate: unknown; reason: RejectReason };
-
 /**
  * The longest belief that may be stored.
  *
@@ -570,7 +568,13 @@ export function validateCandidate(
   if (memoryType === "self_state" && facet === undefined) return { ok: null, reason: "bad-facet" };
 
   // ── Citations. First, and first on purpose — see above.
-  const rawIds = Array.isArray(c.sourceMessageIds) ? c.sourceMessageIds : [c.sourceMessageIds];
+  //
+  // An ABSENT field is no citations, not a bad one. Both are refusals, but the
+  // counters are the output of this slice: a model that stopped citing at all
+  // must not read as a model citing something unparseable.
+  const cited = c.sourceMessageIds;
+  if (cited === undefined || cited === null) return { ok: null, reason: "no-citations" };
+  const rawIds = Array.isArray(cited) ? cited : [cited];
   const ids: number[] = [];
   for (const value of rawIds) {
     const id = typeof value === "number" ? value : Number(value);
