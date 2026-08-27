@@ -667,14 +667,25 @@ function subjectCountFits(memoryType: MemoryType, count: number): boolean {
 /**
  * Is this a claim that reaches past the person who made it?
  *
- * A claim about the speaker themselves is a REPORT and one citation is enough. A
- * claim about somebody else is an ASSERTION, and an assertion sourced from one
- * person saying it once is gossip. Relational memories are about two people by
+ * A claim about the speaker themselves is a REPORT and one citation is enough.
+ * Everything else is an ASSERTION, and an assertion sourced from one person
+ * saying it once is gossip. Relational memories are about two people by
  * definition; `self_state` is what @Aida believes about herself, which #83's Q7
  * already required a second voice for.
  *
- * An event about the group with no subject at all is nobody's private life, so it
- * stays at one.
+ * A SUBJECT-LESS MEMORY IS AN ASSERTION TOO, and #99 said otherwise — an event
+ * about the group is nobody's private life, so it could stay at one citation. The
+ * first run of this extractor against group 70 refuted that in four candidates.
+ * It proposed an `episodic` memory, `subjects: []`, one citation, whose content
+ * was a private conflict between two named people — one of whom never spoke in
+ * the window. Declaring no subject and putting the people in the PROSE walks past
+ * both containment rules at once, and it is the same failure this slice exists to
+ * answer, one level up: the structure only binds what the model declares.
+ *
+ * So the one-citation path belongs to a self-report and to nothing else. A real
+ * group event is discussed by more than one person and clears the bar; what it
+ * costs is an event only one person ever mentioned, which is the trade already
+ * accepted everywhere else here.
  */
 function needsCorroboration(
   memoryType: MemoryType,
@@ -684,7 +695,8 @@ function needsCorroboration(
 ): boolean {
   if (memoryType === "self_state" || memoryType === "relational") return true;
   const subject = subjects[0];
-  if (subject === undefined) return false;
+  // Nobody declared: nothing here says the words are about nobody. See above.
+  if (subject === undefined) return true;
   const key = subjectKey(subject.name);
   return !ids.every((id) => {
     const m = window.shown.get(id);
@@ -810,10 +822,12 @@ export function buildExtractionPrompt(
     "  their colleague, not somebody the chat is talking about.",
     "- Cite the ids of the messages the observation came from, copied from the",
     "  [brackets]. Never write an id that is not above.",
+    "- Anyone your words are about IS a subject. Do not write about a person you",
+    "  did not list in subjects.",
     "- An observation about the person who WROTE the message needs one message.",
-    "  Anything else — about another person, between people, or about you — needs",
-    "  AT LEAST TWO messages written by TWO DIFFERENT people. If only one person",
-    "  ever said it, skip it.",
+    "  EVERYTHING ELSE — about another person, between people, about the group, or",
+    "  about you — needs AT LEAST TWO messages written by TWO DIFFERENT people.",
+    "  If only one person ever said it, skip it.",
     "- Never an opinion, a judgement, or an insult.",
     "- Most windows contain NOTHING durable. Returning [] is the normal, correct",
     "  answer — do not pad.",

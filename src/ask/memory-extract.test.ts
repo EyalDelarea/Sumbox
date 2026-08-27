@@ -638,13 +638,33 @@ describe("validateCandidate", () => {
     expect(ok?.subjects, "a belief about her is about nobody in the room").toEqual([]);
   });
 
-  it("accepts an event about the group, about nobody, on one citation", () => {
-    const { ok } = validateCandidate(
-      { type: "episodic", content: "הקבוצה תכננה מפגש", subjects: [], sourceMessageIds: [1] },
-      window,
+  // The hole the first real run walked through. #99 gave a subject-less episodic
+  // memory the one-citation path, on the reasoning that an event about the group
+  // is nobody's private life. Measured on group 70, the extractor's fourth
+  // candidate was `episodic`, `subjects: []`, one citation, and its content was a
+  // private conflict between two named people — one of whom never spoke in the
+  // window. Declaring no subject and naming them in the PROSE walks past both
+  // rules at once.
+  it("refuses an event that declared no subject on one voice, and takes it on two", () => {
+    const event = { type: "episodic", content: "הקבוצה תכננה מפגש", subjects: [] };
+    expect(validateCandidate({ ...event, sourceMessageIds: [1] }, window).reason).toBe(
+      "uncorroborated",
     );
-    expect(ok?.memoryType).toBe("episodic");
+    const { ok } = validateCandidate({ ...event, sourceMessageIds: [1, 2] }, window);
+    expect(ok?.memoryType, "a real group event is discussed by more than one person").toBe(
+      "episodic",
+    );
     expect(ok?.subjects).toEqual([]);
+  });
+
+  it("refuses the private matter the real run smuggled past as a subject-less event", () => {
+    const smuggled = {
+      type: "episodic",
+      subjects: [],
+      content: "היה עימות בפרטי בין שני אנשים",
+      sourceMessageIds: [2],
+    };
+    expect(validateCandidate(smuggled, window).reason).toBe("uncorroborated");
   });
 
   it("refuses an invented citation, and counts it as its own thing", () => {
