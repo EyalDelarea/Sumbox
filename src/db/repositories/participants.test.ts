@@ -10,8 +10,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { NormalizedMessage } from "../../importer/types.js";
 import { createTestDatabase } from "../../test/db.js";
 import { upsertGroup } from "./groups.js";
+import { recordLink } from "./identity-links.js";
 import { insertMessages } from "./messages.js";
 import {
+  displayNamesForJids,
   listGroupParticipants,
   participantNamesForBiasing,
   upsertParticipant,
@@ -176,5 +178,83 @@ describe("participantNamesForBiasing", () => {
     const jid = await upsertParticipant(pool, `972500000000@s.whatsapp.net`);
     const { ids } = await insertMessages(pool, [msg(groupId, jid)]);
     expect(await participantNamesForBiasing(pool, ids[0]!)).toEqual([]);
+  });
+});
+
+/**
+ * Turning a stored identity back into a person's name — what the memories screen
+ * needs before it can say who a belief is about.
+ *
+ * The case that matters is the one where the bridge is MISSING: 68% of the lids
+ * in the live corpus were unlinked when this was written, and a resolver that
+ * crashed or leaked a raw JID there would have shipped looking fine on the one
+ * fully-linked group it was developed against.
+ */
+describe("displayNamesForJids", () => {
+  let pool: pg.Pool;
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+  }, 120_000);
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  async function spoke(name: string, jid: string, at = "2026-05-01T10:00:00.000Z") {
+    const g = await upsertGroup(pool, { name: `n-${Math.random()}`, source: "import" });
+    const p = await upsertParticipant(pool, name);
+    await insertMessages(pool, [msg(g, p, { senderJid: jid, sentAt: new Date(at) })]);
+    return g;
+  }
+
+  it("finds the name across the bridge, where the stored form has none of its own", async () => {
+    // The real shape: the belief is filed against the PHONE jid, and every
+    // message carrying a name arrived under the lid.
+    const lid = "4578552635558@lid";
+    const pn = "972542795343@s.whatsapp.net";
+    await spoke("Royi", lid);
+    await recordLink(pool, { lidJid: lid, pnJid: pn, source: "bridge" });
+
+    expect((await displayNamesForJids(pool, [pn])).get(pn)).toBe("Royi");
+  });
+
+  it("falls back to the phone number when the bridge is missing, never a raw JID", async () => {
+    const orphan = "972500000077@s.whatsapp.net";
+    expect((await displayNamesForJids(pool, [orphan])).get(orphan)).toBe("+972500000077");
+  });
+
+  it("labels an unbridged lid as an unknown participant rather than leaking it", async () => {
+    const lid = "999888777666@lid";
+    const label = (await displayNamesForJids(pool, [lid])).get(lid);
+    expect(label).not.toContain("@lid");
+    expect(label).toBe("משתתף לא ידוע");
+  });
+
+  it("never labels a subject with a placeholder participant row", async () => {
+    // The JID-shaped participant every unresolved sender collapses onto, and the
+    // Unknown row — the two the author rule exists to reject.
+    const jid = "972500000055@s.whatsapp.net";
+    await spoke("120363406567322025@g.us", jid);
+    await spoke("Unknown", jid);
+    expect((await displayNamesForJids(pool, [jid])).get(jid)).toBe("+972500000055");
+  });
+
+  it("prefers the most recent name, because push names change", async () => {
+    const jid = "972500000066@s.whatsapp.net";
+    await spoke("Old Name", jid, "2026-05-01T10:00:00.000Z");
+    await spoke("New Name", jid, "2026-06-01T10:00:00.000Z");
+    expect((await displayNamesForJids(pool, [jid])).get(jid)).toBe("New Name");
+  });
+
+  it("labels every jid it was asked about, in one query", async () => {
+    const known = "972500000088@s.whatsapp.net";
+    await spoke("דנה", known);
+    const labels = await displayNamesForJids(pool, [known, "972500000099@s.whatsapp.net", "  "]);
+    expect([...labels.keys()]).toHaveLength(2);
+    expect(labels.get(known)).toBe("דנה");
+    expect(labels.get("972500000099@s.whatsapp.net")).toBe("+972500000099");
+  });
+
+  it("asks nothing when there is nothing to ask about", async () => {
+    expect(await displayNamesForJids(pool, [])).toEqual(new Map());
   });
 });

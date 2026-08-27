@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { humanizeSender, resolveSenderName } from "../../summarization/sender-name.js";
 
 /**
  * Upsert a participant by display_name.
@@ -134,4 +135,77 @@ export async function upsertParticipants(
     }),
   );
   return new Map(entries);
+}
+
+// ── Identities → labels ───────────────────────────────────────────────────
+
+/**
+ * The name to show for a stored WhatsApp identity — a memory's subject.
+ *
+ * THE INDIRECTION IS THE WHOLE FUNCTION. A belief's subject is stored in its
+ * canonical form, which `createMemory` makes the PHONE jid wherever a link is
+ * known. Display names only ever arrive on messages, as `pushName` — and in a
+ * group, those messages carry the `@lid`. So the name and the identity we stored
+ * sit on opposite sides of `identity_links`, and a direct lookup on
+ * `messages.sender_jid` finds only the JID-shaped participant row the author rule
+ * exists to reject. Verified on the live DB: the phone form alone resolves to
+ * `972…@s.whatsapp.net`, and through the sibling to `Royi`.
+ *
+ * NEVER RETURNS A RAW JID. An identity with no name behind it falls back to
+ * `humanizeSender`, exactly as every other surface in this project does — the
+ * phone number for a phone jid, the unknown-participant label for anything else.
+ * A screen that showed a raw `@lid` would be showing an internal identifier as a
+ * person.
+ *
+ * The MOST RECENT name wins, because push names change and the current one is the
+ * one the operator will recognise.
+ *
+ * One query for the whole page: a review page carries up to two subjects a row,
+ * and a per-subject lookup would be dozens of round trips for one screen.
+ */
+export async function displayNamesForJids(
+  client: pg.Pool | pg.PoolClient,
+  jids: readonly string[],
+): Promise<Map<string, string>> {
+  const wanted = [...new Set(jids.map((j) => j.trim()).filter((j) => j !== ""))];
+  const labels = new Map<string, string>();
+  if (wanted.length === 0) return labels;
+
+  const { rows } = await client.query<{ jid: string; name: string | null }>(
+    `
+    WITH wanted AS (SELECT DISTINCT unnest($1::text[]) AS jid),
+    -- Both directions: the stored form is usually the phone jid, and the named
+    -- messages hang off the lid. siblingForJid's query, widened to a batch.
+    sibling AS (
+      SELECT w.jid,
+             max(CASE WHEN l.lid_jid = w.jid THEN l.pn_jid ELSE l.lid_jid END) AS other
+      FROM wanted w
+      LEFT JOIN identity_links l ON l.lid_jid = w.jid OR l.pn_jid = w.jid
+      GROUP BY w.jid
+    )
+    SELECT s.jid,
+           (SELECT p.display_name
+              FROM messages m
+              JOIN participants p ON p.id = m.participant_id
+             WHERE m.sender_jid IN (s.jid, s.other)
+               -- The author rule's own test for who is a person, so a belief's
+               -- subject can never be labelled with a placeholder row.
+               AND btrim(coalesce(p.display_name, '')) <> ''
+               AND p.display_name NOT LIKE '%@%'
+               AND p.display_name <> 'Unknown'
+             ORDER BY m.sent_at DESC
+             LIMIT 1) AS name
+    FROM sibling s
+    `,
+    [wanted],
+  );
+
+  for (const row of rows) {
+    labels.set(row.jid, row.name ? resolveSenderName(row.name) : humanizeSender(row.jid));
+  }
+  // A jid the query returned nothing for at all still gets a label, never a gap.
+  for (const jid of wanted) {
+    if (!labels.has(jid)) labels.set(jid, humanizeSender(jid));
+  }
+  return labels;
 }
