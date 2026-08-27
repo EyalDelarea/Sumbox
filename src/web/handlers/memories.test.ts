@@ -21,6 +21,7 @@ import {
   type MemoryType,
 } from "../../db/repositories/aida-memory.js";
 import { upsertGroup } from "../../db/repositories/groups.js";
+import { recordLink } from "../../db/repositories/identity-links.js";
 import { createTestDatabase } from "../../test/db.js";
 import type { ServerDeps } from "./context.js";
 import { handleMemories } from "./memories.js";
@@ -125,6 +126,22 @@ describe("/api/memories", () => {
     memoryId,
   });
 
+  /** A message from a named person, carrying the lid form the real corpus uses. */
+  async function newMessageFrom(groupId: number, name: string, lid: string): Promise<number> {
+    const { rows: p } = await pool.query<{ id: string }>(
+      `INSERT INTO participants (display_name) VALUES ($1)
+       ON CONFLICT (tenant_id, display_name) DO UPDATE SET display_name = EXCLUDED.display_name
+       RETURNING id`,
+      [name],
+    );
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO messages (group_id, source, message_type, text_content, sent_at, dedupe_key, sender_jid, participant_id)
+       VALUES ($1,'live','text','נאמר בצ׳אט', now(), $2, $3, $4) RETURNING id`,
+      [groupId, `dk-${randomUUID()}`, lid, Number(p[0]?.id)],
+    );
+    return Number(rows[0]?.id);
+  }
+
   // ── Reading ──────────────────────────────────────────────────────────────
 
   it("lists a belief with the chat it belongs to", async () => {
@@ -142,6 +159,49 @@ describe("/api/memories", () => {
       superseded: false,
     });
     expect(json.memories[0].groupName.length).toBeGreaterThan(0);
+  });
+
+  // Under the four-type extractor the subject is no longer the author of the
+  // message the card links to, so a card that cannot name it cannot be judged.
+  it("says who each belief is about, by name and across the bridge", async () => {
+    const g = await newGroup("api-subjects");
+    const lid = `${randomUUID().slice(0, 10)}@lid`;
+    const pn = `9725${Math.floor(Math.random() * 1e7)}@s.whatsapp.net`;
+    const messageId = await newMessageFrom(g, "רוני", lid);
+    await recordLink(pool, { lidJid: lid, pnJid: pn, source: "bridge" });
+    // Stored against the canonical PHONE form, while the name is on the lid.
+    await createMemory(pool, {
+      memoryType: "semantic",
+      groupId: g,
+      subjectJid: pn,
+      content: "לא אוכלת בשר",
+      evidence: [{ messageId, stance: "supports" }],
+    });
+
+    const { json } = await get(`?group=${g}`);
+    expect(json.memories[0].subjects).toEqual(["רוני"]);
+  });
+
+  it("names a subject nobody has a name for as a number, never as a raw JID", async () => {
+    const g = await newGroup("api-nameless");
+    const messageId = await newMessage(g);
+    await createMemory(pool, {
+      memoryType: "semantic",
+      groupId: g,
+      subjectJid: "972500000123@s.whatsapp.net",
+      content: "מישהו",
+      evidence: [{ messageId, stance: "supports" }],
+    });
+
+    const { json } = await get(`?group=${g}`);
+    expect(json.memories[0].subjects).toEqual(["+972500000123"]);
+  });
+
+  it("gives an event about nobody no subjects at all", async () => {
+    const g = await newGroup("api-nosubject");
+    await newMemory(g, "משהו קרה לקבוצה");
+    const { json } = await get(`?group=${g}`);
+    expect(json.memories[0].subjects).toEqual([]);
   });
 
   it("hides withdrawn beliefs until they are explicitly asked for", async () => {

@@ -5,6 +5,7 @@ import {
   type MemoryType,
   revokeMemory,
 } from "../../db/repositories/aida-memory.js";
+import { displayNamesForJids } from "../../db/repositories/participants.js";
 import { getLogger } from "../../logging/log.js";
 import type { ServerDeps } from "./context.js";
 import { readJsonBody } from "./scopes.js";
@@ -107,6 +108,15 @@ async function getMemories(url: URL, res: http.ServerResponse, deps: ServerDeps)
       memoryType,
       includeWithdrawn: url.searchParams.get("withdrawn") === "1",
     });
+    // One query for the page, not one per subject. A memory whose subject cannot
+    // be named still gets a label — `displayNamesForJids` never returns a raw JID
+    // — so the card can always say who it is about, even when that is a phone
+    // number nobody in the corpus has a name for.
+    const labels = await displayNamesForJids(
+      deps.pool,
+      page.rows.flatMap((r) => r.subjectJids),
+    );
+
     json(res, 200, {
       // Reported, not swallowed. The cap keeps the newest and nothing here is
       // ever deleted, so what it hides is the oldest — the set the withdrawn
@@ -118,6 +128,11 @@ async function getMemories(url: URL, res: http.ServerResponse, deps: ServerDeps)
         groupId: r.groupId,
         groupName: r.groupName,
         content: r.content,
+        // Named, not raw. Under the four-type extractor a belief's subject is no
+        // longer the author of the message the card links to — it can be someone
+        // who never wrote it, and a relational belief is about two people — so a
+        // card without this cannot be evaluated at all.
+        subjects: r.subjectJids.map((jid) => labels.get(jid) ?? jid),
         facet: r.facet,
         observedAt: r.observedAt.toISOString(),
         supportingEvidence: r.supportingEvidence,
