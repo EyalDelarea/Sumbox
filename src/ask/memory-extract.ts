@@ -1,12 +1,12 @@
 /**
- * memory-extract.ts — the write path for @Aida's memory (shadow phase).
+ * memory-extract.ts — what @Aida may learn from, and what she may believe.
  *
  * Runs off the answering path entirely, after a summary. Nothing here can slow
  * down or change a reply.
  *
  * The extractor is an LLM reading untrusted chat, so this module is built around
- * the assumption that it will sometimes be wrong or actively fooled. Two lines
- * of defence:
+ * the assumption that it will sometimes be wrong or actively fooled. Three lines
+ * of defence, none of them a prompt instruction:
  *
  *   1. SELECTION (`selectCandidates`) — the D7 cold-start exclusions, plus the
  *      author rule. Messages addressed to her, her own output, and anything whose
@@ -19,12 +19,26 @@
  *      replying to her mid-conversation do not retype it (#83).
  *      The author rule is the harder guarantee: a message she cannot attribute
  *      to a person is one she cannot form a belief from.
- *   2. VALIDATION (`validateCandidate`) — the model's output is checked against
- *      the messages it was actually shown. An invented id, or an id from another
+ *   2. CITATION (`validateCandidate`) — the model's output is checked against the
+ *      messages it was actually shown. An invented id, or an id from another
  *      group, is dropped and counted rather than repaired.
+ *   3. CONTAINMENT (`validateCandidate` again, #99) — two rules over what the
+ *      model DECLARED, both countable, neither asking anyone to judge what is
+ *      harmful. A subject must be someone who has spoken in this group, so a
+ *      person reconstructed from others discussing them cannot be believed about
+ *      at all. And the evidence bar scales with reach: a self-report needs one
+ *      citation, everything else needs two, from two distinct authors.
+ *
+ * WHAT THAT DOES AND DOES NOT BUY. The rules bind what the model declares. They
+ * make it expensive to file a belief AGAINST somebody, and they do not read the
+ * content: a self-report whose words are about a third party is a shape they
+ * cannot see, and the first real run proved the model will find such a shape
+ * when the declared route is closed. A judge over the content is a further
+ * slice's problem, and #99 rejected doing it with another prompt.
  *
  * Rejects are a signal, not an error: the reject rate tells us whether the
- * extractor is good enough for the read path to ever ship.
+ * extractor is good enough for the read path to ever ship, and every refusal
+ * reason is counted separately for that reason.
  */
 import type pg from "pg";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
