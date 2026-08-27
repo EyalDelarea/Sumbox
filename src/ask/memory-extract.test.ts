@@ -299,7 +299,16 @@ describe("selectCandidates (D7 exclusions)", () => {
     expect(narrow.misattributedSelfMessages).toBe(1);
     expect(narrow.withoutAuthorIdentity, "a different reason, a different count").toBe(0);
     // The dry run still sees both — slice 4 can hold them without attributing.
-    expect((await selectCandidates(pool, dm, SINCE, UNTIL)).candidates).toHaveLength(2);
+    const wide = await selectCandidates(pool, dm, SINCE, UNTIL);
+    expect(wide.candidates).toHaveLength(2);
+    // And it is TOLD which of the two carries a jid that is not its author's, so
+    // the four-type extractor can keep the message readable while refusing to
+    // take an identity from it. Filtering instead would take the row away from
+    // episodic memories, which can hold it honestly.
+    expect(wide.candidates.map((m) => [m.content, m.jidIsAuthors])).toEqual([
+      ["אני גר בחיפה", true],
+      ["אני עובד באינטל", false],
+    ]);
   });
 
   // The cap keeps the NEWEST, so widening --hours to reach a backlog drops the
@@ -340,6 +349,7 @@ describe("selectCandidates (D7 exclusions)", () => {
     ]);
     const narrow = await selectCandidates(pool, grp, SINCE, UNTIL, { requireAuthorIdentity: true });
     expect(narrow.candidates.map((m) => m.content)).toEqual(["אני עובד באינטל"]);
+    expect(narrow.candidates[0]?.jidIsAuthors, "in a group the fallback never fires").toBe(true);
   });
 
   // A corpus that shrinks silently reads as a quiet group. The counts are how

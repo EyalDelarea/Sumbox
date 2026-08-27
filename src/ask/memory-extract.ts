@@ -56,6 +56,22 @@ export type CandidateMessage = {
    * resolved display name is a real person whether or not a jid was recorded.
    */
   senderJid: string | null;
+  /**
+   * Is {@link senderJid} really THIS author's identity?
+   *
+   * False for the owner's own messages in a 1:1 chat, where the ingest path has no
+   * per-message participant key and falls back to the chat's remote JID — the
+   * OTHER person's. See {@link AUTHOR_IS_NOT_THE_OTHER_PARTY} for the measurement.
+   *
+   * Carried rather than filtered, because under the four-type extractor the two
+   * are no longer the same fix. Dropping the message would take it away from
+   * `episodic` memories too, whose subject is nullable and which can hold it
+   * honestly; and the damage is no longer confined to a memory citing this row —
+   * one poisoned jid entering the window's name index would misattribute every
+   * belief naming that person. So the message stays, and
+   * {@link buildSubjectIndex} takes identities only from rows where this is true.
+   */
+  jidIsAuthors: boolean;
   content: string;
   sentAt: Date;
 };
@@ -266,12 +282,14 @@ export async function selectCandidates(
     id: string;
     sender: string | null;
     sender_jid: string | null;
+    jid_is_authors: boolean;
     content: string;
     sent_at: Date;
   }>(
     `
     SELECT * FROM (
-    SELECT m.id, p.display_name AS sender, m.sender_jid, m.text_content AS content, m.sent_at
+    SELECT m.id, p.display_name AS sender, m.sender_jid, m.text_content AS content, m.sent_at,
+           ${AUTHOR_IS_NOT_THE_OTHER_PARTY} AS jid_is_authors
     ${FROM_WINDOW}
     WHERE ${D7_EXCLUSIONS}
       AND ${AUTHOR_IS_A_PERSON}
@@ -323,6 +341,7 @@ export async function selectCandidates(
       messageId: Number(r.id),
       sender: r.sender ?? "",
       senderJid: r.sender_jid,
+      jidIsAuthors: r.jid_is_authors,
       content: r.content,
       sentAt: r.sent_at,
     }))
