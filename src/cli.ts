@@ -698,8 +698,18 @@ program
   .option("--extract", "Run extraction over the window and print what would be learned")
   .option("--write", "Store what --extract would learn. The only path that writes a memory.")
   .option("--hours <n>", "Window size for --extract, in hours", "24")
+  .option(
+    "--until <iso>",
+    "End of the window (ISO date/time). Defaults to now — set it to walk back through history.",
+  )
   .action(
-    async (options: { group: string; extract?: boolean; write?: boolean; hours?: string }) => {
+    async (options: {
+      group: string;
+      extract?: boolean;
+      write?: boolean;
+      hours?: string;
+      until?: string;
+    }) => {
       // --extract alone is a DRY RUN and stays one: it is the measurement path that
       // produced the extraction numbers on #83, and slice 4 still needs it to see
       // what a window holds INCLUDING the messages --write narrows away.
@@ -735,6 +745,12 @@ program
       // nothing" from the one command in this project that writes.
       const groupId = Number(options.group);
       const hours = Number(options.hours ?? 24);
+      // A window that always ends NOW can only ever see the most recent messages,
+      // so the only way to cover a chat's history was to widen --hours — which the
+      // 300-candidate cap then trims from the OLD end, dropping exactly what
+      // widening it was meant to reach. Measured on group 70: 13,931 messages, of
+      // which one run reads about 300.
+      const until = options.until === undefined ? new Date() : new Date(options.until);
       if (!Number.isInteger(groupId) || groupId <= 0) {
         process.stderr.write(
           `Error: --group must be a positive group id, got "${options.group}"\n`,
@@ -744,6 +760,14 @@ program
       }
       if (!Number.isFinite(hours) || hours <= 0) {
         process.stderr.write(`Error: --hours must be a positive number, got "${options.hours}"\n`);
+        process.exitCode = 1;
+        return;
+      }
+      // An unparseable date is an Invalid Date, and every comparison against one
+      // is false — so the window would match nothing and print as a clean empty
+      // result. The same silent-zero failure --hours is validated against.
+      if (Number.isNaN(until.getTime())) {
+        process.stderr.write(`Error: --until must be an ISO date/time, got "${options.until}"\n`);
         process.exitCode = 1;
         return;
       }
@@ -759,7 +783,6 @@ program
           repeatPenalty: config.summarization.repeatPenalty,
           numPredict: config.summarization.numPredict,
         });
-        const until = new Date();
         const since = new Date(until.getTime() - hours * 3600_000);
 
         // NO NARROWING, on either path, and that is a change from slice 3a.
@@ -803,7 +826,8 @@ program
 
         const proposed = accepted.length + Object.values(refused).reduce((a, b) => a + b, 0);
         process.stdout.write(
-          `window ${selection.windowTotal} · unattributable ${selection.unattributable} · ` +
+          `${since.toISOString().slice(0, 16)} → ${until.toISOString().slice(0, 16)}\n` +
+            `window ${selection.windowTotal} · unattributable ${selection.unattributable} · ` +
             `no-identity ${selection.withoutAuthorIdentity} · ` +
             `considered ${selection.candidates.length} · ` +
             // Proposed, not just accepted. A run that accepts 3 of 8 is a different
