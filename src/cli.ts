@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import "dotenv/config";
+import type { ValidatedCandidate } from "./ask/memory-extract.js";
 import { GroupTurnQueue } from "./collector/group-turn-queue.js";
 import { loadConfig } from "./config.js";
 import { runImport } from "./importer/run-import.js";
@@ -716,8 +717,13 @@ program
         return;
       }
       const { createDbClient } = await import("./db/client.js");
-      const { selectCandidates, buildExtractionPrompt, parseCandidates, validateCandidate } =
-        await import("./ask/memory-extract.js");
+      const {
+        selectCandidates,
+        buildExtractionPrompt,
+        buildExtractionWindow,
+        parseCandidates,
+        validateCandidate,
+      } = await import("./ask/memory-extract.js");
       const { storeAccepted, tally } = await import("./ask/memory-write.js");
       const { OllamaSummarizer } = await import("./summarization/summarizer.js");
 
@@ -756,16 +762,17 @@ program
         const until = new Date();
         const since = new Date(until.getTime() - hours * 3600_000);
 
-        // --write narrows to messages carrying an author identity: everything the
-        // shipped prompt emits is a self-statement, and a semantic memory's subject
-        // is NOT NULL, so a jid-less message cannot produce a storable belief. Not
-        // sending them to the model at all beats extracting and discarding.
-        const selection = await selectCandidates(pool, groupId, since, until, {
-          requireAuthorIdentity: options.write === true,
-        });
-        const shown = new Map(selection.candidates.map((m) => [m.messageId, m]));
-        const rejected: Record<string, number> = {};
-        const accepted: { sourceMessageId: number; content: string; sender: string }[] = [];
+        // NO NARROWING, on either path, and that is a change from slice 3a.
+        // Then, every belief was a self-statement, so a message without an author
+        // identity could not produce a storable one and was better left out. Now
+        // an episodic memory's subject is nullable and a subject is named rather
+        // than inferred from authorship, so those messages carry real evidence.
+        // What the missing identity costs is paid at storage instead, per belief,
+        // and counted there.
+        const selection = await selectCandidates(pool, groupId, since, until);
+        const window = buildExtractionWindow(selection.candidates);
+        const refused: Record<string, number> = {};
+        const accepted: ValidatedCandidate[] = [];
 
         if (selection.candidates.length > 0) {
           const raw = (
@@ -776,28 +783,34 @@ program
             })
           ).overview;
           for (const candidate of parseCandidates(raw)) {
-            const { ok, reason } = validateCandidate(candidate, shown);
+            const { ok, reason } = validateCandidate(candidate, window);
             if (!ok) {
               const key = reason ?? "unknown";
-              rejected[key] = (rejected[key] ?? 0) + 1;
+              refused[key] = (refused[key] ?? 0) + 1;
               continue;
             }
-            accepted.push({ ...ok, sender: shown.get(ok.sourceMessageId)?.sender ?? "" });
+            accepted.push(ok);
           }
         }
 
+        const proposed = accepted.length + Object.values(refused).reduce((a, b) => a + b, 0);
         process.stdout.write(
           `window ${selection.windowTotal} · unattributable ${selection.unattributable} · ` +
             `no-identity ${selection.withoutAuthorIdentity} · ` +
-            `considered ${selection.candidates.length} · would-accept ${accepted.length}\n` +
-            `rejected: ${JSON.stringify(rejected)}\n` +
-            // The narrowing differs between the two paths, so the dry run has to
-            // say what --write would leave out, or it is not a preview of it.
-            // Both reasons, separately. The narrowing drops rows for two unrelated
-            // causes, and one of them closes over time while the other does not.
-            `write-path narrowing: ${selection.withoutAuthorIdentity} no author identity, ` +
-            `${selection.misattributedSelfMessages} own message in a 1:1 chat` +
-            (options.write ? " (excluded from this run)\n" : " (would be excluded by --write)\n") +
+            `considered ${selection.candidates.length} · ` +
+            // Proposed, not just accepted. A run that accepts 3 of 8 is a different
+            // signal from one that accepts 3 of 3, and printing only the accepts —
+            // which is what shipped — makes a careful run and a lucky one look the
+            // same.
+            `proposed ${proposed} · would-accept ${accepted.length}\n` +
+            // By reason, every run. The first refusal is the one counted and the
+            // order is fixed (citations → subjects → corroboration), so each of
+            // these is a floor rather than a total.
+            `refused: ${JSON.stringify(refused)}\n` +
+            // Kept in the corpus now, but they leave no identity behind, so a
+            // belief named against their author is refused at storage.
+            `identity-less: ${selection.withoutAuthorIdentity} no author identity, ` +
+            `${selection.misattributedSelfMessages} own message in a 1:1 chat\n` +
             // The cap keeps the NEWEST, so widening --hours to catch a backlog
             // drops the oldest — the opposite of what widening it was for.
             (selection.truncated
@@ -807,9 +820,14 @@ program
             "\n",
         );
         for (const a of accepted) {
-          // The citation prints with every row on purpose: a memory you cannot
-          // trace back to a message is exactly what this design forbids.
-          process.stdout.write(`  ${a.sender}: ${a.content}   (msg:${a.sourceMessageId})\n`);
+          // The citations print with every row on purpose: a memory you cannot
+          // trace back to messages is exactly what this design forbids — and for
+          // anything but a self-statement, how many there are IS the containment.
+          const about =
+            a.facet ?? (a.subjects.length > 0 ? a.subjects.map((x) => x.name).join(" · ") : "—");
+          process.stdout.write(
+            `  [${a.memoryType} · ${about}] ${a.content}   (msg:${a.citations.join(",")})\n`,
+          );
         }
 
         if (!options.write) {
@@ -817,7 +835,7 @@ program
           return;
         }
 
-        const results = await storeAccepted(pool, accepted, shown, groupId);
+        const results = await storeAccepted(pool, accepted, groupId);
         // Per candidate, with the id, because revoking takes one — and this run
         // is the only moment where the id, the words, the citation and the author
         // are all in hand at once. A bare "created: 3" would make finding those
@@ -825,7 +843,9 @@ program
         for (const r of results) {
           const id = r.memoryId === undefined ? "" : ` #${r.memoryId}`;
           const why = r.error === undefined ? "" : ` — ${r.error}`;
-          process.stdout.write(`  [${r.outcome}${id}] ${r.candidate.content}${why}\n`);
+          process.stdout.write(
+            `  [${r.outcome}${id}] ${r.candidate.memoryType}: ${r.candidate.content}${why}\n`,
+          );
         }
         process.stdout.write(`\nstored: ${JSON.stringify(tally(results))}\n`);
         if (results.some((r) => r.outcome === "failed")) {

@@ -2,9 +2,10 @@
  * memory-write.ts — turning what extraction produced into stored memories.
  *
  * The sibling of `memory-extract.ts`: that module decides what may be learned
- * from, this one decides who a belief is about and puts it away. Split because
- * they fail differently — extraction fails by believing something untrue, storage
- * fails by attributing it to the wrong person or losing it silently.
+ * from and what may be believed about whom, this one decides which identity a
+ * belief is filed against and puts it away. Split because they fail differently —
+ * extraction fails by believing something untrue, storage fails by attributing it
+ * to the wrong person or losing it silently.
  *
  * ONE MEMORY AT A TIME, THROUGH THE REPOSITORY. `createMemory` owns the
  * transaction that makes "a memory cannot exist without evidence" enforceable,
@@ -17,31 +18,42 @@
  * hand at once.
  */
 import type pg from "pg";
-import { createMemory, type MemoryDraft } from "../db/repositories/aida-memory.js";
-import { type CandidateMessage, hasAuthorIdentity } from "./memory-extract.js";
+import {
+  canonicalSubjectJid,
+  createMemory,
+  type MemoryDraft,
+} from "../db/repositories/aida-memory.js";
+import type { SubjectIdentity, ValidatedCandidate } from "./memory-extract.js";
 
-/** One candidate that passed validation, with the id of the message it cites. */
-export type AcceptedCandidate = { sourceMessageId: number; content: string };
+/** One candidate that cleared validation and containment. */
+export type AcceptedCandidate = ValidatedCandidate;
 
 /**
- * What happened to one candidate. Two pairs look alike and are deliberately not:
+ * What happened to one candidate. Several pairs look alike and are deliberately
+ * not:
  *
  * `converged` = already on file. `converged_onto_revoked` = already on file and
  * WITHDRAWN by a human, so nothing was stored — the only measure of how often the
  * extractor re-proposes something already revoked.
  *
- * `no_author_identity` = the expected, closing historical gap. `not_shown` = a
- * candidate reached storage citing a message the model was never given, which is
- * a validation bypass and should not read as routine.
+ * `no_author_identity` = the belief names somebody real who never left a
+ * WhatsApp identity behind; the expected, closing historical gap.
+ * `ambiguous_subject` = it names somebody who answers to two identities that do
+ * not resolve to one person, so filing it would pick one at random.
+ * `subjects_collapsed` = a relationship whose two people turned out to be one.
  */
 export type StoreOutcome =
   | "created"
   | "converged"
   | "converged_onto_revoked"
   | "no_author_identity"
-  | "not_shown"
+  | "ambiguous_subject"
+  | "subjects_collapsed"
   | "cited_nothing_real"
   | "failed";
+
+/** Why a candidate never became a draft. A subset of {@link StoreOutcome}. */
+export type DraftRejection = "no_author_identity" | "ambiguous_subject" | "subjects_collapsed";
 
 export type StoreResult = {
   candidate: AcceptedCandidate;
@@ -53,45 +65,99 @@ export type StoreResult = {
 };
 
 /**
+ * The one identity a named subject is filed against, or why there isn't one.
+ *
+ * A subject carries every identity it spoke under, and canonicalization is what
+ * collapses the ordinary case — the same human reaching the group as an `@lid`
+ * and as a phone JID — into one. What survives that and is still plural is a
+ * label two different people answer to, and there is no honest way to pick: this
+ * is exactly the mis-attribution the design calls unrecoverable, since revoking a
+ * belief cannot un-hold it about the wrong person.
+ */
+async function identityFor(
+  client: pg.Pool | pg.PoolClient,
+  subject: SubjectIdentity,
+): Promise<{ jid: string } | { rejected: DraftRejection }> {
+  const canonical = [
+    ...new Set(await Promise.all(subject.jids.map((j) => canonicalSubjectJid(client, j)))),
+  ];
+  const only = canonical[0];
+  if (only === undefined) return { rejected: "no_author_identity" };
+  if (canonical.length > 1) return { rejected: "ambiguous_subject" };
+  return { jid: only };
+}
+
+/**
  * Decide who a belief is about, and shape it for the repository.
  *
- * ALWAYS `semantic`, as a mapping rather than a choice: the prompt's one hard
- * rule is *only what the speaker said about THEMSELVES*, so every item it emits
- * is a durable fact about one person. The other three tables stay empty until a
- * slice writes a prompt that emits a type.
+ * THE SUBJECT IS THE PERSON THE MODEL NAMED, not the author of the cited message.
+ * That is the change slice 4a makes: the shipped prompt could only emit
+ * self-statements, so author and subject were the same person by construction.
+ * They are not any more, which is why `validateCandidate` refuses a name that
+ * never spoke here and holds a claim about anyone but the speaker to two voices
+ * before it ever reaches this function.
  *
- * THE SUBJECT IS THE AUTHOR OF THE CITED MESSAGE, which follows from that rule
- * and nothing else — the ingest path does not guarantee it in general, which is
- * why `selectCandidates` refuses 1:1 self-messages before they reach here.
- *
- * The raw jid is passed through; `createMemory` canonicalizes it, so one human
- * under two WhatsApp identities stays one subject.
+ * A NAMED SUBJECT WITH NO IDENTITY IS REFUSED, NOT DOWNGRADED. Storing it as an
+ * `episodic` memory with a null subject would keep the row by calling a fact
+ * about someone an event, and the identity is not recoverable — it was never
+ * written down. Only a candidate that named NOBODY becomes a subject-less
+ * episodic memory.
  */
-export function toSemanticDraft(
-  candidate: AcceptedCandidate,
-  shown: ReadonlyMap<number, CandidateMessage>,
+export async function toDraft(
+  client: pg.Pool | pg.PoolClient,
+  candidate: ValidatedCandidate,
   groupId: number,
-): { draft: MemoryDraft } | { rejected: "no_author_identity" | "not_shown" } {
-  const source = shown.get(candidate.sourceMessageId);
-  // `validateCandidate` already rejects an invented id, so reaching here means a
-  // caller skipped validation or built `shown` from another window.
-  if (!source) return { rejected: "not_shown" };
-  // `semantic.subject_jid` is NOT NULL and should be: a belief about a person
-  // that cannot say which person is not one. Filing it as `episodic` instead
-  // would keep the row by calling a fact about someone an event, and the identity
-  // is not recoverable — it was never written down.
-  if (!hasAuthorIdentity(source.senderJid)) return { rejected: "no_author_identity" };
-  return {
-    draft: {
-      memoryType: "semantic",
-      groupId,
-      subjectJid: (source.senderJid as string).trim(),
-      content: candidate.content,
-      // The prompt cites exactly one id per item and cannot express disagreement,
-      // so every citation it produces supports the belief it came with.
-      evidence: [{ messageId: candidate.sourceMessageId, stance: "supports" }],
-    },
-  };
+): Promise<{ draft: MemoryDraft } | { rejected: DraftRejection }> {
+  // The prompt cannot express disagreement, so every citation it produces
+  // supports the belief it came with. A `contradicts` stance is a human's to
+  // record, from the review surface.
+  const evidence = candidate.citations.map((messageId) => ({
+    messageId,
+    stance: "supports" as const,
+  }));
+  const base = { groupId, content: candidate.content, evidence };
+
+  const identities: string[] = [];
+  for (const subject of candidate.subjects) {
+    const resolved = await identityFor(client, subject);
+    if ("rejected" in resolved) return resolved;
+    identities.push(resolved.jid);
+  }
+
+  switch (candidate.memoryType) {
+    case "self_state":
+      return {
+        draft: {
+          ...base,
+          memoryType: "self_state",
+          // `validateCandidate` refuses a `self_state` without one, so an absent
+          // facet here means a caller skipped it. Default rather than throw: the
+          // gentler of the two is a memory filed as knowledge instead of a rule.
+          facet: candidate.facet ?? "knowledge",
+        },
+      };
+    case "episodic":
+      return {
+        draft: { ...base, memoryType: "episodic", subjectJid: identities[0] ?? null },
+      };
+    case "semantic": {
+      const subjectJid = identities[0];
+      // Unreachable through `validateCandidate`, which requires exactly one
+      // subject for a semantic memory — but `semantic.subject_jid` is NOT NULL and
+      // a belief about a person that cannot say which person is not one.
+      if (subjectJid === undefined) return { rejected: "no_author_identity" };
+      return { draft: { ...base, memoryType: "semantic", subjectJid } };
+    }
+    case "relational": {
+      // Canonicalization can COLLAPSE the pair — two lids linked to one phone JID,
+      // or a label two members share. A relationship between one person is not a
+      // relationship, and `createMemory` would throw on it; counted here instead,
+      // because it is a normal thing for a model reading a chat to propose.
+      const distinct = [...new Set(identities)];
+      if (distinct.length < 2) return { rejected: "subjects_collapsed" };
+      return { draft: { ...base, memoryType: "relational", subjectJids: distinct } };
+    }
+  }
 }
 
 /**
@@ -108,18 +174,17 @@ export function toSemanticDraft(
 export async function storeAccepted(
   pool: pg.Pool,
   accepted: readonly AcceptedCandidate[],
-  shown: ReadonlyMap<number, CandidateMessage>,
   groupId: number,
 ): Promise<StoreResult[]> {
   const results: StoreResult[] = [];
 
   for (const candidate of accepted) {
-    const mapped = toSemanticDraft(candidate, shown, groupId);
-    if ("rejected" in mapped) {
-      results.push({ candidate, outcome: mapped.rejected });
-      continue;
-    }
     try {
+      const mapped = await toDraft(pool, candidate, groupId);
+      if ("rejected" in mapped) {
+        results.push({ candidate, outcome: mapped.rejected });
+        continue;
+      }
       const written = await createMemory(pool, mapped.draft);
       if (written === null) {
         // Not an error: the cited message is not in this group — either invented,

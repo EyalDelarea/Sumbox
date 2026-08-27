@@ -28,6 +28,7 @@
  */
 import type pg from "pg";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
+import type { MemoryType, SelfStateFacet } from "../db/repositories/aida-memory.js";
 import { resolveSenderName } from "../summarization/sender-name.js";
 
 /**
@@ -427,13 +428,21 @@ export function subjectKey(name: string): string {
  * Two members aliased to one preferred name legitimately collapse into one entry
  * carrying both jids, which the write path then has to resolve or refuse.
  */
+/**
+ * The label a message's author appears under — the one the prompt renders and the
+ * one the index is keyed on. Shared so the two can never be computed differently.
+ */
+function labelOf(m: CandidateMessage, aliases?: Map<string, string>): string {
+  return aliases ? resolveSenderName(m.sender, aliases) : resolveSenderName(m.sender);
+}
+
 export function buildSubjectIndex(
   messages: Iterable<CandidateMessage>,
   aliases?: Map<string, string>,
 ): SubjectIndex {
   const index = new Map<string, SubjectIdentity>();
   for (const m of messages) {
-    const name = aliases ? resolveSenderName(m.sender, aliases) : resolveSenderName(m.sender);
+    const name = labelOf(m, aliases);
     const key = subjectKey(name);
     if (key === "") continue;
     const entry = index.get(key) ?? { name, jids: [] };
@@ -444,36 +453,265 @@ export function buildSubjectIndex(
   return index;
 }
 
-/** What the extractor is asked to produce, per message. */
-export type Candidate = { sourceMessageId: number; content: string };
+/**
+ * One window, in the shape the validator needs it.
+ *
+ * The two halves are built together and travel together on purpose: an index
+ * built over a different set of messages than `shown` would refuse subjects that
+ * did speak, or accept subjects that did not, and nothing downstream could tell.
+ */
+export type ExtractionWindow = {
+  /** The messages the model was shown, by id. */
+  shown: ReadonlyMap<number, CandidateMessage>;
+  /** Who spoke in them — see {@link buildSubjectIndex}. */
+  subjects: SubjectIndex;
+  /** The operator's name overrides, when a caller is injecting them. */
+  aliases?: Map<string, string> | undefined;
+};
 
-export type Rejection = { candidate: unknown; reason: string };
+export function buildExtractionWindow(
+  candidates: readonly CandidateMessage[],
+  aliases?: Map<string, string>,
+): ExtractionWindow {
+  return {
+    shown: new Map(candidates.map((m) => [m.messageId, m])),
+    subjects: buildSubjectIndex(candidates, aliases),
+    aliases,
+  };
+}
 
 /**
- * Check one extractor candidate against the messages it was shown.
+ * One belief the extractor proposed, after validation: a type, who it is about,
+ * what it says, and the messages behind it.
  *
- * Returns the accepted candidate or a reason. The reasons are deliberately
- * specific — "invented id" and "empty content" are different extractor bugs and
- * conflating them would hide which one is happening.
+ * `subjects` is resolved rather than as-named — every entry spoke in this window.
+ * It is empty for `self_state` (a belief about @Aida has no subject in the room)
+ * and may be empty for `episodic` (an event about the group is about nobody).
+ */
+export type ValidatedCandidate = {
+  memoryType: MemoryType;
+  /** `self_state` only, where it decides knowledge from a rule of behaviour. */
+  facet?: SelfStateFacet;
+  subjects: SubjectIdentity[];
+  content: string;
+  /** At least one, every one shown, deduped. */
+  citations: number[];
+};
+
+/**
+ * Why a candidate was refused. Every one is counted separately, because they are
+ * different things happening: an invented citation is the model hallucinating, an
+ * unknown subject is it reaching outside the room, and an uncorroborated one is it
+ * repeating what one person said about another.
+ */
+export type RejectReason =
+  | "not-an-object"
+  | "bad-type"
+  | "bad-facet"
+  | "bad-id"
+  | "invented-id"
+  | "no-citations"
+  | "empty-content"
+  | "too-long"
+  | "unknown-subject"
+  | "wrong-subject-count"
+  | "uncorroborated";
+
+export type Rejection = { candidate: unknown; reason: RejectReason };
+
+/**
+ * The longest belief that may be stored.
+ *
+ * Raised from the shipped 300 deliberately. That bound was sized for one-line
+ * self-statements ("works at X", "lives in Y"); an inferred `semantic` pattern or
+ * a `relational` one is a sentence about behaviour and is simply wordier. Left at
+ * 300 the four-type extractor would have its best output silently refused, and
+ * the run this slice has to report would read as model misbehaviour.
+ *
+ * Still bounded, because content is shown in a UI and a model that starts
+ * narrating has stopped extracting.
+ */
+export const MAX_CONTENT = 500;
+
+/**
+ * Check one extractor candidate against the window it was shown, and against
+ * #99's two containment rules.
+ *
+ * THE ORDER OF THE CHECKS IS PART OF THE OUTPUT. A candidate can fail several at
+ * once — an invented citation naming an out-of-room subject is one the real
+ * corpus produced — and the first failure is the one counted. Citations are
+ * checked FIRST so that the citation-hallucination rate stays comparable to the
+ * number measured on #83, then subjects, then corroboration. That makes every
+ * rate downstream of it a floor rather than a total, which is the honest
+ * direction and worth stating rather than discovering.
+ *
+ * Neither containment rule claims to detect harm. They raise the evidentiary cost
+ * of reaching beyond the speaker — a property of the citations, not of the words,
+ * and so not something the chat being read can talk its way around. That is the
+ * whole reason they live here and not in the prompt: the probe prompt measured on
+ * #83 forbade both sensitive rows in words and produced them anyway.
  */
 export function validateCandidate(
   raw: unknown,
-  shown: ReadonlyMap<number, CandidateMessage>,
-): {
-  ok: Candidate | null;
-  reason?: string;
-} {
+  window: ExtractionWindow,
+): { ok: ValidatedCandidate | null; reason?: RejectReason } {
   if (typeof raw !== "object" || raw === null) return { ok: null, reason: "not-an-object" };
-  const c = raw as { sourceMessageId?: unknown; content?: unknown };
-  const id = typeof c.sourceMessageId === "number" ? c.sourceMessageId : Number(c.sourceMessageId);
-  if (!Number.isInteger(id)) return { ok: null, reason: "bad-id" };
-  // The single most important check: the model may only cite what it was shown.
-  // Anything else is invented, and an invented id could point into another group.
-  if (!shown.has(id)) return { ok: null, reason: "invented-id" };
+  const c = raw as {
+    type?: unknown;
+    facet?: unknown;
+    subjects?: unknown;
+    content?: unknown;
+    sourceMessageIds?: unknown;
+  };
+
+  const memoryType = readType(c.type);
+  if (memoryType === null) return { ok: null, reason: "bad-type" };
+  const facet = memoryType === "self_state" ? readFacet(c.facet) : undefined;
+  if (memoryType === "self_state" && facet === undefined) return { ok: null, reason: "bad-facet" };
+
+  // ── Citations. First, and first on purpose — see above.
+  const rawIds = Array.isArray(c.sourceMessageIds) ? c.sourceMessageIds : [c.sourceMessageIds];
+  const ids: number[] = [];
+  for (const value of rawIds) {
+    const id = typeof value === "number" ? value : Number(value);
+    if (!Number.isInteger(id)) return { ok: null, reason: "bad-id" };
+    // The single most important check: the model may only cite what it was shown.
+    // Anything else is invented, and an invented id could point into another group.
+    if (!window.shown.has(id)) return { ok: null, reason: "invented-id" };
+    // Deduped BEFORE anything counts them. Two citations of one message is one
+    // message, and the corroboration bar below would otherwise be cleared by the
+    // model repeating an id — the cheapest possible way around it.
+    if (!ids.includes(id)) ids.push(id);
+  }
+  if (ids.length === 0) return { ok: null, reason: "no-citations" };
+
   const content = typeof c.content === "string" ? c.content.trim() : "";
   if (content.length === 0) return { ok: null, reason: "empty-content" };
-  if (content.length > 300) return { ok: null, reason: "too-long" };
-  return { ok: { sourceMessageId: id, content } };
+  if (content.length > MAX_CONTENT) return { ok: null, reason: "too-long" };
+
+  // ── Rule one: a subject must be someone who has spoken in this group.
+  const named = readSubjects(c.subjects);
+  const subjects: SubjectIdentity[] = [];
+  // A `self_state` memory is about @Aida, and its table has no subject column, so
+  // any name the model attached to one describes nobody it could be filed against.
+  // Dropped rather than refused: the belief is still hers, and rule two below
+  // still holds it to two voices.
+  if (memoryType !== "self_state") {
+    for (const name of named) {
+      const resolved = window.subjects.get(subjectKey(name));
+      if (resolved === undefined) return { ok: null, reason: "unknown-subject" };
+      if (!subjects.some((s) => subjectKey(s.name) === subjectKey(resolved.name))) {
+        subjects.push(resolved);
+      }
+    }
+  }
+  if (!subjectCountFits(memoryType, subjects.length)) {
+    return { ok: null, reason: "wrong-subject-count" };
+  }
+
+  // ── Rule two: the evidence bar scales with how far the claim reaches.
+  if (needsCorroboration(memoryType, subjects, ids, window) && !isCorroborated(ids, window)) {
+    return { ok: null, reason: "uncorroborated" };
+  }
+
+  return {
+    ok: { memoryType, ...(facet ? { facet } : {}), subjects, content, citations: ids },
+  };
+}
+
+const MEMORY_TYPES: readonly MemoryType[] = ["episodic", "semantic", "relational", "self_state"];
+
+function readType(value: unknown): MemoryType | null {
+  const t =
+    typeof value === "string"
+      ? value
+          .trim()
+          .toLowerCase()
+          .replace(/[\s-]+/g, "_")
+      : "";
+  return (MEMORY_TYPES as readonly string[]).includes(t) ? (t as MemoryType) : null;
+}
+
+/** Both spellings of the same word. The column stores the British one. */
+function readFacet(value: unknown): SelfStateFacet | undefined {
+  const f = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (f === "knowledge") return "knowledge";
+  if (f === "behaviour" || f === "behavior") return "behaviour";
+  return undefined;
+}
+
+function readSubjects(value: unknown): string[] {
+  const list = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+  return list.filter((v): v is string => typeof v === "string" && v.trim() !== "");
+}
+
+/**
+ * How many subjects each kind of belief is about. Not a preference — the schema
+ * says so: `semantic.subject_jid` is NOT NULL, `relational.subject_jids` carries a
+ * CHECK for two or more distinct, `episodic.subject_jid` is nullable, and
+ * `self_state` has no subject at all.
+ */
+function subjectCountFits(memoryType: MemoryType, count: number): boolean {
+  switch (memoryType) {
+    case "episodic":
+      return count <= 1;
+    case "semantic":
+      return count === 1;
+    case "relational":
+      return count >= 2;
+    case "self_state":
+      return count === 0;
+  }
+}
+
+/**
+ * Is this a claim that reaches past the person who made it?
+ *
+ * A claim about the speaker themselves is a REPORT and one citation is enough. A
+ * claim about somebody else is an ASSERTION, and an assertion sourced from one
+ * person saying it once is gossip. Relational memories are about two people by
+ * definition; `self_state` is what @Aida believes about herself, which #83's Q7
+ * already required a second voice for.
+ *
+ * An event about the group with no subject at all is nobody's private life, so it
+ * stays at one.
+ */
+function needsCorroboration(
+  memoryType: MemoryType,
+  subjects: readonly SubjectIdentity[],
+  ids: readonly number[],
+  window: ExtractionWindow,
+): boolean {
+  if (memoryType === "self_state" || memoryType === "relational") return true;
+  const subject = subjects[0];
+  if (subject === undefined) return false;
+  const key = subjectKey(subject.name);
+  return !ids.every((id) => {
+    const m = window.shown.get(id);
+    return m !== undefined && subjectKey(labelOf(m, window.aliases)) === key;
+  });
+}
+
+/**
+ * Two citations, from two DISTINCT authors.
+ *
+ * Authors, not messages: two citations from the same person is one person saying
+ * it twice, which is exactly the shape the rule exists to refuse. The subject
+ * being one of the two authors is not excluded and must not be — someone
+ * confirming what is said about them is the strongest corroboration there is.
+ *
+ * Authors are counted by LABEL, the same key subjects resolve through, so two
+ * people the operator aliased to one name count as one voice. Conservative in the
+ * safe direction: it can only make corroboration harder.
+ */
+function isCorroborated(ids: readonly number[], window: ExtractionWindow): boolean {
+  if (ids.length < 2) return false;
+  const authors = new Set<string>();
+  for (const id of ids) {
+    const m = window.shown.get(id);
+    if (m !== undefined) authors.add(subjectKey(labelOf(m, window.aliases)));
+  }
+  return authors.size >= 2;
 }
 
 /**

@@ -7,6 +7,7 @@ import { listGroupParticipants, upsertParticipant } from "../db/repositories/par
 import type { NormalizedMessage } from "../importer/types.js";
 import { createTestDatabase } from "../test/db.js";
 import {
+  buildExtractionWindow,
   buildSubjectIndex,
   type CandidateMessage,
   isIdentifiableAuthor,
@@ -470,44 +471,259 @@ describe("buildSubjectIndex", () => {
     ]);
   });
 
+  it("trims a padded jid, so one identity is not indexed as two", () => {
+    const index = buildSubjectIndex([
+      spoke(),
+      spoke({ messageId: 2, senderJid: " 972500000042@s.whatsapp.net " }),
+    ]);
+    expect(index.get(subjectKey("Royi"))?.jids).toEqual(["972500000042@s.whatsapp.net"]);
+  });
+
   it("finds a name the model retyped with different case or spacing", () => {
     const index = buildSubjectIndex([spoke({ sender: "Alex Goldin" })]);
     expect(index.get(subjectKey("  alex   goldin "))?.name).toBe("Alex Goldin");
   });
 });
 
+// #99's two containment rules, which is to say: what @Aida may believe about
+// somebody who is not the person speaking. Both are tested against candidates the
+// prompt could really return, including the two shapes measured on the real group
+// — a subject who was never in the room, and a private claim about a third party
+// that one person made once.
+//
+// Nothing here asserts prompt wording. The prompt is the thing this slice exists
+// to stop relying on.
 describe("validateCandidate", () => {
-  const shown = new Map<number, CandidateMessage>([
-    [10, { messageId: 10, sender: "Royi", content: "c", sentAt: new Date() }],
+  const ROYI = "4578552635558@lid";
+  const ALEX = "160782268526832@lid";
+  const EYAL = "17699644170401@lid";
+
+  function said(
+    messageId: number,
+    sender: string,
+    senderJid: string | null,
+    content = "…",
+  ): CandidateMessage {
+    return {
+      messageId,
+      sender,
+      senderJid,
+      jidIsAuthors: true,
+      content,
+      sentAt: new Date("2026-05-01T10:00:00.000Z"),
+    };
+  }
+
+  // Three people, each having spoken once.
+  const window = buildExtractionWindow([
+    said(1, "Royi", ROYI, "אני מתחיל תואר שני בסתיו"),
+    said(2, "Alex Goldin", ALEX, "רועי כל הזמן מתלונן על הלימודים"),
+    said(3, "Eyal", EYAL, "כן, רועי מדבר על זה כל הזמן"),
   ]);
 
-  it("accepts a candidate citing a shown message", () => {
-    expect(validateCandidate({ sourceMessageId: 10, content: " works at X " }, shown).ok).toEqual({
-      sourceMessageId: 10,
-      content: "works at X",
-    });
+  const claim = { type: "semantic", content: "לומד לתואר שני", subjects: ["Royi"] };
+
+  it("accepts a self-statement on one citation", () => {
+    // The subject IS the author of the message cited: a report, not an assertion.
+    const { ok } = validateCandidate({ ...claim, sourceMessageIds: [1] }, window);
+    expect(ok?.memoryType).toBe("semantic");
+    expect(ok?.subjects.map((s) => s.name)).toEqual(["Royi"]);
+    expect(ok?.citations).toEqual([1]);
   });
 
-  // The load-bearing check. A hallucinated id is the extractor's likeliest
-  // failure, and an id outside the shown set could point into another group —
-  // which is the one thing memory must never do.
-  it("rejects an id it was never shown", () => {
-    expect(validateCandidate({ sourceMessageId: 999, content: "x" }, shown)).toEqual({
-      ok: null,
-      reason: "invented-id",
-    });
+  it("refuses the same claim, once the subject is somebody other than the speaker", () => {
+    // Identical words, identical citation. What changed is how far it reaches.
+    const { ok, reason } = validateCandidate(
+      { ...claim, subjects: ["Alex Goldin"], sourceMessageIds: [1] },
+      window,
+    );
+    expect(ok).toBeNull();
+    expect(reason).toBe("uncorroborated");
+  });
+
+  it("refuses two citations from the same person — that is one voice, twice", () => {
+    const window2 = buildExtractionWindow([
+      said(1, "Royi", ROYI),
+      said(2, "Alex Goldin", ALEX),
+      said(4, "Alex Goldin", ALEX),
+    ]);
+    const { ok, reason } = validateCandidate({ ...claim, sourceMessageIds: [2, 4] }, window2);
+    expect(ok).toBeNull();
+    expect(reason).toBe("uncorroborated");
+  });
+
+  it("accepts a claim about somebody else once two different people have said it", () => {
+    const { ok } = validateCandidate({ ...claim, sourceMessageIds: [2, 3] }, window);
+    expect(ok?.citations).toEqual([2, 3]);
+  });
+
+  it("counts the subject's own words as one of the two voices", () => {
+    // Someone confirming what is said about them is the strongest corroboration
+    // there is; a rule that excluded the subject would refuse exactly that.
+    const { ok } = validateCandidate({ ...claim, sourceMessageIds: [1, 2] }, window);
+    expect(ok?.citations).toEqual([1, 2]);
+  });
+
+  it("cannot be cleared by citing one message twice", () => {
+    const { ok, reason } = validateCandidate(
+      { ...claim, subjects: ["Alex Goldin"], sourceMessageIds: [1, 1] },
+      window,
+    );
+    expect(ok).toBeNull();
+    expect(reason, "the cheapest possible way around the bar").toBe("uncorroborated");
+  });
+
+  // Measured on group 70: one of the five accepted memories was about a person
+  // who is not in the chat at all, reconstructed from other people discussing
+  // them. There is no identity to file it against and no way for them to argue
+  // with it.
+  it("refuses a subject who never spoke in this window", () => {
+    const { ok, reason } = validateCandidate(
+      { ...claim, subjects: ["אחותו של רועי"], sourceMessageIds: [2, 3] },
+      window,
+    );
+    expect(ok).toBeNull();
+    expect(reason).toBe("unknown-subject");
+  });
+
+  it("resolves a subject the model retyped in a different rendering", () => {
+    const { ok } = validateCandidate(
+      { ...claim, subjects: ["  alex   GOLDIN "], sourceMessageIds: [1, 3] },
+      window,
+    );
+    expect(
+      ok?.subjects.map((s) => s.name),
+      "canonical label, not the retyping",
+    ).toEqual(["Alex Goldin"]);
+  });
+
+  it("holds a relational memory to two voices, like any claim about somebody else", () => {
+    const relational = {
+      type: "relational",
+      content: "רועי ואלכס מתכננים דברים ביחד",
+      subjects: ["Royi", "Alex Goldin"],
+    };
+    expect(validateCandidate({ ...relational, sourceMessageIds: [1] }, window).reason).toBe(
+      "uncorroborated",
+    );
+    expect(
+      validateCandidate({ ...relational, sourceMessageIds: [1, 2] }, window).ok,
+    ).not.toBeNull();
+  });
+
+  it("refuses a relationship whose two subjects are the same person", () => {
+    const { ok, reason } = validateCandidate(
+      {
+        type: "relational",
+        content: "רועי ורועי",
+        subjects: ["Royi", "royi"],
+        sourceMessageIds: [1, 2],
+      },
+      window,
+    );
+    expect(ok).toBeNull();
+    expect(reason, "a relationship between one person is not a relationship").toBe(
+      "wrong-subject-count",
+    );
+  });
+
+  it("holds what she believes about herself to two voices too", () => {
+    const self = { type: "self_state", facet: "behaviour", content: "לענות בקצרה" };
+    expect(validateCandidate({ ...self, sourceMessageIds: [1] }, window).reason).toBe(
+      "uncorroborated",
+    );
+    const { ok } = validateCandidate({ ...self, sourceMessageIds: [1, 2] }, window);
+    expect(ok?.facet).toBe("behaviour");
+    expect(ok?.subjects, "a belief about her is about nobody in the room").toEqual([]);
+  });
+
+  it("accepts an event about the group, about nobody, on one citation", () => {
+    const { ok } = validateCandidate(
+      { type: "episodic", content: "הקבוצה תכננה מפגש", subjects: [], sourceMessageIds: [1] },
+      window,
+    );
+    expect(ok?.memoryType).toBe("episodic");
+    expect(ok?.subjects).toEqual([]);
+  });
+
+  it("refuses an invented citation, and counts it as its own thing", () => {
+    // Measured on the four-type probe: 2 of 5 accepted memories cited ids that do
+    // not exist. Kept separate from `uncorroborated` because they are different
+    // failures — one is the model hallucinating, the other is it repeating gossip.
+    expect(validateCandidate({ ...claim, sourceMessageIds: [999] }, window).reason).toBe(
+      "invented-id",
+    );
+    expect(validateCandidate({ ...claim, sourceMessageIds: [1, 999] }, window).reason).toBe(
+      "invented-id",
+    );
+  });
+
+  // A candidate can fail several rules at once, and the real corpus produces
+  // exactly that. The order is fixed — citations, then subjects, then
+  // corroboration — so the citation rate stays comparable to the number measured
+  // on #83 and everything after it reads as a floor.
+  it("counts the first failure only, in a fixed order", () => {
+    const both = { ...claim, subjects: ["מישהי שלא כאן"], sourceMessageIds: [999] };
+    expect(validateCandidate(both, window).reason).toBe("invented-id");
+    const subjectAndBar = { ...claim, subjects: ["מישהי שלא כאן"], sourceMessageIds: [1] };
+    expect(validateCandidate(subjectAndBar, window).reason).toBe("unknown-subject");
   });
 
   it("distinguishes its rejection reasons", () => {
-    // Conflating these would hide which extractor bug is actually happening.
-    expect(validateCandidate({ sourceMessageId: 10, content: "  " }, shown).reason).toBe(
-      "empty-content",
+    expect(validateCandidate("nope", window).reason).toBe("not-an-object");
+    expect(
+      validateCandidate({ ...claim, type: "gossip", sourceMessageIds: [1] }, window).reason,
+    ).toBe("bad-type");
+    expect(
+      validateCandidate({ type: "self_state", content: "x", sourceMessageIds: [1, 2] }, window)
+        .reason,
+    ).toBe("bad-facet");
+    expect(validateCandidate({ ...claim, sourceMessageIds: ["x"] }, window).reason).toBe("bad-id");
+    expect(validateCandidate({ ...claim, sourceMessageIds: [] }, window).reason).toBe(
+      "no-citations",
     );
-    expect(validateCandidate({ sourceMessageId: "no", content: "x" }, shown).reason).toBe("bad-id");
-    expect(validateCandidate("nope", shown).reason).toBe("not-an-object");
-    expect(validateCandidate({ sourceMessageId: 10, content: "x".repeat(301) }, shown).reason).toBe(
-      "too-long",
+    expect(
+      validateCandidate({ ...claim, content: "  ", sourceMessageIds: [1] }, window).reason,
+    ).toBe("empty-content");
+    expect(
+      validateCandidate({ ...claim, content: "x".repeat(501), sourceMessageIds: [1] }, window)
+        .reason,
+    ).toBe("too-long");
+    expect(
+      validateCandidate({ ...claim, subjects: [], sourceMessageIds: [1] }, window).reason,
+    ).toBe("wrong-subject-count");
+  });
+
+  it("takes both spellings of behaviour, and one id outside an array", () => {
+    // Small models produce both constantly, and refusing over an American 'o'
+    // would show up in the counters as a containment refusal.
+    const { ok } = validateCandidate(
+      { type: "self_state", facet: "behavior", content: "x", sourceMessageIds: [1, 2] },
+      window,
     );
+    expect(ok?.facet).toBe("behaviour");
+    expect(validateCandidate({ ...claim, sourceMessageIds: 1 }, window).ok?.citations).toEqual([1]);
+  });
+
+  // The two rows measured on group 70 that #99 exists to refuse. Neither rule
+  // claims to detect harm — both were single-sourced claims about someone other
+  // than the speaker, and that is what they are refused for.
+  it("refuses the two shapes measured on the real group", () => {
+    const outOfRoom = {
+      type: "semantic",
+      content: "יש לה סכסוך עם המשפחה",
+      subjects: ["אמא של אלכס"],
+      sourceMessageIds: [2],
+    };
+    expect(validateCandidate(outOfRoom, window).reason).toBe("unknown-subject");
+
+    const singleSourced = {
+      type: "relational",
+      content: "רועי ואלכס הסכימו לא לספר לאייל",
+      subjects: ["Royi", "Alex Goldin"],
+      sourceMessageIds: [2],
+    };
+    expect(validateCandidate(singleSourced, window).reason).toBe("uncorroborated");
   });
 });
 
