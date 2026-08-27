@@ -6,6 +6,7 @@ import { withTransaction } from "../db/transaction.js";
 import type { ServerDeps } from "./handlers/context.js";
 import { handleData } from "./handlers/data.js";
 import { handleGroups } from "./handlers/groups.js";
+import { handleMemories } from "./handlers/memories.js";
 import { handleMessages } from "./handlers/messages.js";
 import { handleScopeCategories } from "./handlers/scope-categories.js";
 import { handleScopes } from "./handlers/scopes.js";
@@ -118,6 +119,13 @@ function dispatchApi(
   if (url.pathname === "/api/summary-commands" && (req.method === "GET" || req.method === "PUT")) {
     if (req.method === "PUT" && blockCrossOrigin(req, res)) return;
     void handleSummaryCommands(url, req, res, deps);
+    return;
+  }
+  if (url.pathname.startsWith("/api/memories")) {
+    // The two writes withdraw or replace a belief, so they are CSRF-guarded like
+    // every other state-changing route; the list is read-only and is not.
+    if (req.method === "POST" && blockCrossOrigin(req, res)) return;
+    void handleMemories(url, req, res, deps);
     return;
   }
   if (url.pathname.startsWith("/api/data/")) {

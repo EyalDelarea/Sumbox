@@ -14,7 +14,7 @@
  * Teardown: EventSource is closed when leaving a streaming view
  */
 
-import { createScopeCategory, getGroups, getMessages, getScopeCategories, getScopes, getStatus, getSummaries, getSummaryCommands, putScopes, rateSummary, setSummaryTrigger, summarizeStream, toggleSummaryCommand } from "./lib/api.js";
+import { correctMemory, createScopeCategory, getGroups, getMemories, getMessages, getScopeCategories, getScopes, getStatus, getSummaries, getSummaryCommands, putScopes, rateSummary, revokeMemory, setSummaryTrigger, summarizeStream, toggleSummaryCommand } from "./lib/api.js";
 import { activeCount, filterScopes, groupByCategory, partitionRemoved, sectionCount } from "./lib/scopes.js";
 import { formatAgo, presetToSince, validateRangeInput } from "./lib/time.js";
 import { renderInline, renderMarkdown, toWhatsAppText } from "./lib/markdown.js";
@@ -69,6 +69,10 @@ const NAV = [
   { id: "sumbox", label: "עדכונים", icon: "inbox" },
   { id: "sources", label: "צ׳אטים", icon: "filter" },
   { id: "commands", label: "פקודות", icon: "send" },
+  // Top level, not nested under settings: post-hoc cleanup is the ENTIRE safety
+  // model for @Aida's memory, and burying the only surface that makes it
+  // possible would contradict the bargain that let memory be free-form at all.
+  { id: "memory", label: "זיכרון", icon: "sparkle" },
 ];
 
 /** Mobile bottom-nav: the most-used surfaces. */
@@ -81,6 +85,7 @@ const META = {
   thread: { title: "השיחה המלאה", sub: "ההודעה שהסיכום הצביע עליה" },
   sources: { title: "צ׳אטים", sub: "בחרו אילו שיחות מזינות את Sumbox" },
   commands: { title: "פקודות", sub: "ניהול פקודת /סיכום בקבוצות" },
+  memory: { title: "זיכרון", sub: "מה @אידה למדה — אפשר לתקן ואפשר לבטל" },
   total: { title: "סיכום כללי", sub: "מה קרה בכל הצ׳אטים" },
 };
 
@@ -125,6 +130,9 @@ function navigate(view, arg) {
   } else if (view === "commands") {
     history.pushState({ view: "commands" }, "", "#commands");
     renderCommands();
+  } else if (view === "memory") {
+    history.pushState({ view: "memory" }, "", "#memory");
+    renderMemory();
   } else {
     history.pushState({ view: "sumbox" }, "", "#sumbox");
     renderSumbox();
@@ -140,6 +148,8 @@ window.addEventListener("popstate", (e) => {
     renderDetail(state.group, false);
   } else if (state?.view === "total") {
     renderTotal(false);
+  } else if (state?.view === "memory") {
+    void renderMemory();
   } else if (state?.view === "sources") {
     renderSources();
   } else if (state?.view === "thread" && state.chat) {
@@ -1907,6 +1917,10 @@ function resolveInitialRoute() {
     history.replaceState({ view: "commands" }, "", hash);
     return { view: "commands" };
   }
+  if (hash === "#memory") {
+    history.replaceState({ view: "memory" }, "", hash);
+    return { view: "memory" };
+  }
   // Default landing surface is the daily summary feed (עדכונים).
   history.replaceState({ view: "sumbox" }, "", "#sumbox");
   return { view: "sumbox" };
@@ -1966,6 +1980,293 @@ const obState = {
   morningNotif: true,
   timers: [],
 };
+
+/**
+ * The memories screen — what @Aida believes, and the two things you can do
+ * about it.
+ *
+ * Neither action deletes. `תקן` writes your wording as a new belief and marks
+ * the old one replaced; `בטל` stamps a belief unusable. Both rows survive,
+ * which is why neither button says מחק — a label claiming deletion over a row
+ * that is still there would be the interface lying about what it did.
+ */
+const memoryState = {
+  rows: [],
+  group: "",
+  type: "",
+  withdrawn: false,
+  error: "",
+  notice: "",
+  /** Bumped per request so a slow response cannot paint over a newer filter. */
+  seq: 0,
+  /**
+   * Chats that have memories — fetched UNFILTERED, never derived from the rows
+   * on screen.
+   *
+   * Derived from the visible rows it erases its own options: pick a chat, then a
+   * type with nothing in it, the list empties, and the select falls back to "all
+   * chats" while the filter is still set to one — the screen reporting a state it
+   * is not in, with an empty message that reads as a global answer.
+   *
+   * Not `getGroups()` either: 473 chats, almost none of which have ever produced
+   * a memory, is a filter you cannot use.
+   */
+  chats: [],
+  truncated: false,
+};
+
+async function renderMemory() {
+  teardownStream();
+  setView("memory");
+  setAppbar("memory");
+  paneMain.innerHTML = `<div class="cmds-panel"><p class="thread-loading">טוען זיכרונות…</p></div>`;
+  await loadMemories();
+}
+
+/**
+ * Refresh the chat options from an unfiltered read.
+ *
+ * Separate from the list request on purpose — it must not narrow with the
+ * filters, or the control would delete the option that is currently selected.
+ * Withdrawn rows count: a chat whose only belief was revoked still belongs in
+ * the filter, because the toggle can reach it.
+ */
+async function loadMemoryChats() {
+  try {
+    const page = await getMemories({ withdrawn: true });
+    memoryState.chats = [
+      ...new Map(page.memories.map((r) => [r.groupId, r.groupName])).entries(),
+    ].map(([id, name]) => ({ id, name }));
+  } catch {
+    memoryState.chats = [];
+  }
+}
+
+async function loadMemories() {
+  const seq = ++memoryState.seq;
+  await loadMemoryChats();
+  try {
+    const page = await getMemories({
+      group: memoryState.group ? Number(memoryState.group) : undefined,
+      type: memoryState.type || undefined,
+      withdrawn: memoryState.withdrawn,
+    });
+    // Two filter changes in quick succession can land out of order. Painting the
+    // older response would leave the list contradicting the controls above it.
+    if (seq !== memoryState.seq) return;
+    memoryState.rows = page.memories;
+    memoryState.truncated = page.truncated;
+    memoryState.error = "";
+  } catch {
+    if (seq !== memoryState.seq) return;
+    // The rows are DROPPED, not kept. Last-known state rendered as current is
+    // how a belief that was just withdrawn keeps its active buttons — and the
+    // next click on them fails with a message about a belief that "does not
+    // exist", which reads as data loss on a screen promising the record stays.
+    memoryState.rows = [];
+    memoryState.truncated = false;
+    memoryState.error = "שגיאה בטעינת הזיכרונות.";
+  }
+  // `notice` is deliberately NOT cleared here. Every action reloads the list
+  // straight after running, so clearing it would wipe the one message saying the
+  // action failed before it was ever painted — the list would simply re-render
+  // unchanged, which reads as "nothing happened" rather than "it did not work".
+  paintMemory();
+}
+
+/** Academic names everywhere, in Hebrew for the UI — `observation` is retired. */
+const MEMORY_KIND_LABEL = {
+  episodic: "אירוע",
+  semantic: "תכונה",
+  relational: "יחס",
+  self_state: "על עצמה",
+};
+
+function paintMemory() {
+  const rows = memoryState.rows;
+  const chats = memoryState.chats;
+  paneMain.innerHTML = `
+    <div class="cmds-panel">
+      <div class="cmds-head">
+        <button class="back-btn" id="mem-back" aria-label="חזרה">
+          <span class="back-btn__arrow" aria-hidden="true">›</span> חזרה
+        </button>
+        <div class="cmds-head__title">זיכרון</div>
+      </div>
+      <div class="cmds-callout">
+        <span class="cmds-callout__ico" aria-hidden="true">${icon("sparkle", { size: 22 })}</span>
+        <div class="grow">
+          <b>מה @אידה למדה מהצ׳אטים שלך</b>
+          <p>כל שורה היא פרשנות שלה, לא ציטוט. אפשר לפתוח את ההודעות שממנה היא הסיקה, לתקן את הניסוח, או לבטל לגמרי. שום פעולה לא מוחקת — הרשומה נשארת.</p>
+        </div>
+        ${memoryState.error ? "" : `<span class="badge accent" dir="ltr">${rows.filter((r) => !r.revoked && !r.superseded).length}</span>`}
+      </div>
+
+      <div class="mem-filters">
+        <select id="mem-group" class="mem-filter" aria-label="סינון לפי צ׳אט">
+          <option value="">כל הצ׳אטים</option>
+          ${chats.map((c) => `<option value="${c.id}"${String(c.id) === memoryState.group ? " selected" : ""}>${escHtml(c.name)}</option>`).join("")}
+        </select>
+        <select id="mem-type" class="mem-filter" aria-label="סינון לפי סוג">
+          <option value="">כל הסוגים</option>
+          ${Object.entries(MEMORY_KIND_LABEL).map(([k, label]) => `<option value="${k}"${k === memoryState.type ? " selected" : ""}>${label}</option>`).join("")}
+        </select>
+        <label class="mem-toggle">
+          <input type="checkbox" id="mem-withdrawn"${memoryState.withdrawn ? " checked" : ""} />
+          <span>הצג גם מבוטלים</span>
+        </label>
+      </div>
+
+      ${memoryState.error ? `<p class="error-state">${escHtml(memoryState.error)}</p>` : ""}
+      ${memoryState.notice ? `<p class="error-state">${escHtml(memoryState.notice)}</p>` : ""}
+      ${memoryState.truncated ? '<p class="error-state">מוצגים רק הזיכרונות האחרונים. יש עוד — סננו לפי צ׳אט או סוג כדי להגיע אליהם.</p>' : ""}
+      <div class="cmds-list" id="mem-list">
+        ${
+          // Only claim she has learned nothing when we actually KNOW that. On a
+          // failed load the list is empty because the request failed, and saying
+          // "nothing to review" at the moment the app cannot tell is how someone
+          // stops coming back to a screen they were told was empty.
+          rows.length === 0
+            ? memoryState.error
+              ? ""
+              : '<p class="empty-state">היא עדיין לא למדה כלום כאן. זיכרונות נוצרים מהודעות אמיתיות — אין מה לתקן עד שיהיו.</p>'
+            : rows.map(buildMemoryRow).join("")
+        }
+      </div>
+    </div>`;
+  wireMemory();
+}
+
+function buildMemoryRow(r) {
+  const withdrawn = r.revoked || r.superseded;
+  const state = r.revoked ? "בוטל" : r.superseded ? "הוחלף" : "";
+  // The contradicting count shows in BOTH branches. A belief with no support and
+  // five messages against it is the most reviewable row on the screen, and
+  // reporting only "nothing supports this" would hide exactly that.
+  const against = r.contradictingEvidence > 0 ? `${r.contradictingEvidence} סותרות` : "";
+  const evidence =
+    r.supportingEvidence === 0
+      ? ["אין הודעות שתומכות בזה", against].filter(Boolean).join(" · ")
+      : [`${r.supportingEvidence} הודעות`, against].filter(Boolean).join(" · ");
+  return `
+    <div class="cmd-row mem-row${withdrawn ? " cmd-row--off" : ""}" data-id="${r.id}" data-type="${r.memoryType}" data-group="${r.groupId}">
+      <div class="cmd-row__body">
+        <div class="mem-row__tags">
+          <span class="badge">${escHtml(r.groupName)}</span>
+          <span class="badge accent">${MEMORY_KIND_LABEL[r.memoryType] ?? escHtml(r.memoryType)}</span>
+          ${r.byHuman ? '<span class="badge">תוקן על ידך</span>' : ""}
+          ${state ? `<span class="badge warn">${state}</span>` : ""}
+        </div>
+        <div class="cmd-row__name">${escHtml(r.content)}</div>
+        ${r.correctionNote ? `<div class="cmd-row__status">הסיבה שרשמת: ${escHtml(r.correctionNote)}</div>` : ""}
+        <div class="mem-row__acts">
+          <button class="mem-link" data-act="src" type="button"${r.sourceMessageId ? "" : " disabled"}>${evidence}</button>
+          ${
+            withdrawn
+              ? ""
+              : `<span class="mem-row__sep" aria-hidden="true">·</span>
+                 <button class="mem-link" data-act="correct" type="button">תקן</button>
+                 <button class="mem-link mem-link--warn" data-act="revoke" type="button">בטל</button>`
+          }
+        </div>
+      </div>
+    </div>`;
+}
+
+function wireMemory() {
+  document.getElementById("mem-back")?.addEventListener("click", () => navigate("sumbox"));
+  document.getElementById("mem-group")?.addEventListener("change", (e) => {
+    memoryState.group = e.target.value;
+    void loadMemories();
+  });
+  document.getElementById("mem-type")?.addEventListener("change", (e) => {
+    memoryState.type = e.target.value;
+    void loadMemories();
+  });
+  document.getElementById("mem-withdrawn")?.addEventListener("change", (e) => {
+    memoryState.withdrawn = e.target.checked;
+    void loadMemories();
+  });
+  for (const el of document.querySelectorAll("#mem-list [data-act]")) {
+    el.addEventListener("click", () => {
+      const row = el.closest(".mem-row");
+      const ref = {
+        memoryType: row.dataset.type,
+        groupId: Number(row.dataset.group),
+        memoryId: Number(row.dataset.id),
+      };
+      const data = memoryState.rows.find((r) => r.id === ref.memoryId && r.memoryType === ref.memoryType);
+      if (el.dataset.act === "src") return openMemorySource(data);
+      if (el.dataset.act === "correct") return void promptCorrection(ref, data);
+      if (el.dataset.act === "revoke") return void confirmRevoke(ref, data);
+    });
+  }
+}
+
+/** Jump to the conversation the belief came from — the existing thread view. */
+function openMemorySource(row) {
+  // Null when every message this belief cited has been deleted. The belief is
+  // kept — the record must show it lost its support — but there is nothing left
+  // to open, and the button says so rather than going nowhere.
+  if (!row?.sourceMessageId) return;
+  navigate("thread", { chat: row.groupName, aroundId: row.sourceMessageId });
+}
+
+/** Why the server refused a correction, in words rather than a code. */
+const CORRECTION_REFUSALS = {
+  duplicate: "זה בדיוק מה שכתוב עכשיו — אין מה לתקן.",
+  already_revoked: "הזיכרון הזה כבר בוטל.",
+  already_superseded: "הזיכרון הזה כבר הוחלף — תקנו את הגרסה החדשה.",
+  no_evidence: "כל ההודעות שהזיכרון נשען עליהן נמחקו — אפשר רק לבטל אותו.",
+  not_found: "הזיכרון לא נמצא בצ׳אט הזה.",
+  supersede_failed: "התיקון לא נשמר. שום דבר לא השתנה.",
+};
+
+async function promptCorrection(ref, row) {
+  const content = window.prompt("הניסוח המתוקן:", row?.content ?? "");
+  // null is Cancel — the user changed their mind, and saying anything about it
+  // would be noise. An empty box is a different thing: they meant to type.
+  if (content === null) return;
+  if (content.trim() === "") {
+    memoryState.notice = "לא נכתב ניסוח — שום דבר לא השתנה.";
+    return paintMemory();
+  }
+  // Required, not optional: the reason is the ONLY thing marking a row as
+  // written by you rather than by her, so an empty one would make your
+  // correction look like her conclusion.
+  const note = window.prompt("למה? (חובה — כך יסומן שהתיקון שלך)");
+  if (note === null) return;
+  if (note.trim() === "") {
+    memoryState.notice = "תיקון חייב לומר למה. שום דבר לא השתנה.";
+    return paintMemory();
+  }
+  try {
+    await correctMemory({ ...ref, content: content.trim(), note: note.trim() });
+    memoryState.notice = "";
+  } catch (err) {
+    memoryState.notice =
+      CORRECTION_REFUSALS[err.message] ?? `התיקון נכשל: ${err.message}. שום דבר לא השתנה.`;
+  }
+  await loadMemories();
+}
+
+async function confirmRevoke(ref, row) {
+  if (!window.confirm(`לבטל את "${row?.content ?? ""}"?\n\nהיא לא תשתמש בזה יותר. הרשומה נשארת.`)) {
+    return;
+  }
+  try {
+    await revokeMemory(ref);
+    memoryState.notice = "";
+  } catch (err) {
+    memoryState.notice =
+      err.message === "already_revoked"
+        ? "הזיכרון הזה כבר בוטל."
+        : err.message === "not_found"
+          ? "הזיכרון לא נמצא בצ׳אט הזה."
+          : `הביטול נכשל: ${err.message}. שום דבר לא השתנה.`;
+  }
+  await loadMemories();
+}
 
 function renderOnboardingFlow({ initialStatus = null, preview = false } = {}) {
   obState.step = 0;
@@ -2428,6 +2729,8 @@ async function boot() {
     renderSources();
   } else if (route.view === "commands") {
     renderCommands();
+  } else if (route.view === "memory") {
+    void renderMemory();
   } else {
     renderSumbox();
   }

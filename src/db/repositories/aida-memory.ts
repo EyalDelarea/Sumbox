@@ -75,6 +75,13 @@ export type MemoryDraft = MemorySubject & {
   content: string;
   /** At least one. An empty list is a caller bug, not a data outcome — see below. */
   evidence: readonly EvidenceDraft[];
+  /**
+   * Why a human wrote this row, when one did.
+   *
+   * Absent for anything the extractor produced, which is what makes its presence
+   * the only signal separating a human-written belief from an extracted one.
+   */
+  correctionNote?: string;
 };
 
 /**
@@ -317,13 +324,21 @@ export async function createMemory(
       return null;
     }
 
-    const columns = ["group_id", ...target.extraColumns, "content", "content_hash", "observed_at"];
+    const columns = [
+      "group_id",
+      ...target.extraColumns,
+      "content",
+      "content_hash",
+      "observed_at",
+      "correction_note",
+    ];
     const values = [
       draft.groupId,
       ...target.extraValues,
       content,
       contentHash,
       observedAt,
+      draft.correctionNote ?? null,
     ] as unknown[];
     const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
 
@@ -661,4 +676,333 @@ export async function listLiveMemories(
     supportingEvidence: Number(r.supporting),
     contradictingEvidence: Number(r.contradicting),
   }));
+}
+
+// ── The review surface ────────────────────────────────────────────────────
+
+/** A memory as the review screen shows it: across groups, withdrawal visible. */
+export type MemoryForReview = StoredMemory & {
+  groupId: number;
+  groupName: string;
+  /** Why a human overruled her. Null means the extractor wrote this row. */
+  correctionNote: string | null;
+  /** Set when a newer row replaced this one. */
+  supersededById: number | null;
+  /** Set when a human withdrew it. */
+  revokedAt: Date | null;
+  /**
+   * The earliest message this belief cites, or null when every one has been
+   * deleted.
+   *
+   * Carried so the review surface can open the conversation on it in one tap. A
+   * belief you cannot check against what was actually said is the failure this
+   * whole design exists to prevent, so the check must not be a second request.
+   */
+  firstSourceMessageId: number | null;
+};
+
+/** Rows plus whether the cap hid any. */
+export type MemoryReviewPage = {
+  rows: MemoryForReview[];
+  /**
+   * More memories exist than were returned.
+   *
+   * The cap keeps the NEWEST, and nothing in this schema is ever deleted, so the
+   * rows it hides are the OLDEST — which is exactly the set the withdrawn toggle
+   * exists to reach. A screen that truncated silently would quietly stop being
+   * the complete record it promises to be.
+   */
+  truncated: boolean;
+};
+
+export type ReviewFilter = {
+  /** One chat, or every chat when omitted. */
+  groupId?: number;
+  memoryType?: MemoryType;
+  /**
+   * Include rows a human already withdrew or replaced.
+   *
+   * A SEPARATE ARGUMENT rather than a default, because the screen's job is "what
+   * does she believe now" and a default that leaked a withdrawn belief into that
+   * would make the revoke button decorative. The rows are kept forever precisely
+   * so they can be read, so the option exists — it just has to be asked for.
+   */
+  includeWithdrawn?: boolean;
+  limit?: number;
+};
+
+/**
+ * Every memory the review screen needs, across chats.
+ *
+ * Distinct from {@link listLiveMemories}, which answers "what does @Aida believe
+ * in THIS chat" for the read path. This one answers "what is on file, and what
+ * did a human do about it", carries the chat's name so a belief is never read out
+ * of the context that produced it, and can reach withdrawn rows.
+ */
+export async function listMemoriesForReview(
+  client: pg.Pool | pg.PoolClient,
+  filter: ReviewFilter = {},
+): Promise<MemoryReviewPage> {
+  const limit = filter.limit ?? 200;
+  const types = filter.memoryType ? [filter.memoryType] : (Object.keys(TABLE_FOR) as MemoryType[]);
+  const withdrawal = filter.includeWithdrawn
+    ? ""
+    : "AND m.revoked_at IS NULL AND m.superseded_by_id IS NULL";
+
+  const branches = types.map((memoryType) => {
+    const table = TABLE_FOR[memoryType];
+    const subjects =
+      memoryType === "relational"
+        ? "m.subject_jids"
+        : memoryType === "semantic" || memoryType === "episodic"
+          ? "CASE WHEN m.subject_jid IS NULL THEN ARRAY[]::text[] ELSE ARRAY[m.subject_jid] END"
+          : "ARRAY[]::text[]";
+    const facet = memoryType === "self_state" ? "m.facet" : "NULL::text";
+    return `
+      SELECT m.id, '${memoryType}'::text AS memory_type, m.content, ${subjects} AS subject_jids,
+             ${facet} AS facet, m.observed_at, m.group_id, g.name AS group_name,
+             m.correction_note, m.superseded_by_id, m.revoked_at,
+             e.supporting, e.contradicting, e.first_source
+        FROM ${table} m
+        JOIN groups g ON g.id = m.group_id
+        JOIN LATERAL (
+          SELECT count(*) FILTER (WHERE stance = 'supports') AS supporting,
+                 count(*) FILTER (WHERE stance = 'contradicts') AS contradicting,
+                 min(message_id) FILTER (WHERE stance = 'supports') AS first_source
+            FROM aida_memory_evidence
+           WHERE memory_type = '${memoryType}' AND memory_id = m.id
+        ) e ON true
+       WHERE ($1::bigint IS NULL OR m.group_id = $1) ${withdrawal}`;
+  });
+
+  const { rows } = await client.query<{
+    id: string;
+    memory_type: MemoryType;
+    content: string;
+    subject_jids: string[];
+    facet: SelfStateFacet | null;
+    observed_at: Date;
+    group_id: string;
+    group_name: string;
+    correction_note: string | null;
+    superseded_by_id: string | null;
+    revoked_at: Date | null;
+    supporting: string;
+    contradicting: string;
+    first_source: string | null;
+  }>(
+    `${branches.join("\n      UNION ALL")}
+     ORDER BY observed_at DESC, memory_type ASC, id DESC
+     LIMIT $2`,
+    // One more than the cap, so "there are more" is distinguishable from "there
+    // are exactly this many" — see the same trick in `selectCandidates`.
+    [filter.groupId ?? null, limit + 1],
+  );
+
+  const truncated = rows.length > limit;
+  return {
+    truncated,
+    rows: (truncated ? rows.slice(0, limit) : rows).map((r) => ({
+      id: Number(r.id),
+      memoryType: r.memory_type,
+      content: r.content,
+      subjectJids: r.subject_jids,
+      facet: r.facet,
+      observedAt: r.observed_at,
+      supportingEvidence: Number(r.supporting),
+      contradictingEvidence: Number(r.contradicting),
+      groupId: Number(r.group_id),
+      groupName: r.group_name,
+      correctionNote: r.correction_note,
+      supersededById: r.superseded_by_id === null ? null : Number(r.superseded_by_id),
+      revokedAt: r.revoked_at,
+      firstSourceMessageId:
+        r.first_source === null || r.first_source === undefined ? null : Number(r.first_source),
+    })),
+  };
+}
+
+/** Which messages a memory cites, so a correction can inherit them. */
+export async function listMemoryEvidence(
+  client: pg.Pool | pg.PoolClient,
+  input: { memoryType: MemoryType; memoryId: number },
+): Promise<{ messageId: number; stance: EvidenceStance }[]> {
+  const { rows } = await client.query<{ message_id: string; stance: EvidenceStance }>(
+    `SELECT message_id, stance FROM aida_memory_evidence
+      WHERE memory_type = $1 AND memory_id = $2
+      ORDER BY observed_at, message_id`,
+    [input.memoryType, input.memoryId],
+  );
+  return rows.map((r) => ({ messageId: Number(r.message_id), stance: r.stance }));
+}
+
+export type CorrectionOutcome =
+  | { ok: true; memoryId: number }
+  | {
+      ok: false;
+      reason:
+        | "not_found"
+        | "already_revoked"
+        | "already_superseded"
+        | "no_evidence"
+        | "duplicate"
+        | "supersede_failed";
+    };
+
+/**
+ * Replace a belief with your own wording, and say why.
+ *
+ * WRITES A NEW ROW AND POINTS THE OLD ONE AT IT. The original is never edited —
+ * the record has to show what she thought, and when you stopped agreeing.
+ *
+ * THE CORRECTION INHERITS THE ORIGINAL'S CITATIONS, because it has none of its
+ * own: a correction is YOUR reading of the same messages she read. A correction
+ * learned from a later conversation is a different thing and belongs to the
+ * extractor, which can cite the message that changed it.
+ *
+ * THE NOTE IS REQUIRED. It is also the only thing distinguishing a human-written
+ * row from an extracted one, so an empty one would make your correction look like
+ * her conclusion — see the `correction-note` migration.
+ *
+ * NOT ONE TRANSACTION, and it cannot be: `createMemory` owns its own, which is
+ * what makes "no memory without evidence" enforceable. So if the supersede fails
+ * the new row is withdrawn again immediately, rather than left standing beside
+ * the belief it was meant to replace where the screen would show both.
+ */
+export async function correctMemory(
+  pool: pg.Pool,
+  input: {
+    memoryType: MemoryType;
+    groupId: number;
+    memoryId: number;
+    content: string;
+    note: string;
+  },
+): Promise<CorrectionOutcome> {
+  const content = input.content.trim();
+  const note = input.note.trim();
+  if (content.length === 0) throw new Error("correctMemory: content is empty");
+  if (note.length === 0) throw new Error("correctMemory: a correction must say why");
+
+  const table = TABLE_FOR[input.memoryType];
+  // The correction keeps the original's subject: it is the same claim about the
+  // same people, worded differently. Re-deriving it would be a second chance to
+  // attribute it to somebody else.
+  const subjectColumn =
+    input.memoryType === "relational"
+      ? "subject_jids"
+      : input.memoryType === "self_state"
+        ? "facet"
+        : "subject_jid";
+  const { rows } = await pool.query<{
+    revoked_at: Date | null;
+    superseded_by_id: string | null;
+    subject: string | string[] | null;
+  }>(
+    `SELECT revoked_at, superseded_by_id, ${subjectColumn} AS subject
+       FROM ${table} WHERE id = $1 AND group_id = $2`,
+    [input.memoryId, input.groupId],
+  );
+  const original = rows[0];
+  if (!original) return { ok: false, reason: "not_found" };
+  // Told apart because the remedies differ: a withdrawn belief is finished, while
+  // a replaced one has a live head the user should be correcting instead.
+  if (original.revoked_at !== null) return { ok: false, reason: "already_revoked" };
+  if (original.superseded_by_id !== null) {
+    // Correcting a replaced row would fork the chain into two live heads.
+    return { ok: false, reason: "already_superseded" };
+  }
+
+  // Decide `duplicate` BEFORE writing, not after. `createMemory` COMMITS on the
+  // converge path — it writes the inherited citations onto whatever row it
+  // collided with and returns "converged" — so refusing afterwards would report
+  // "nothing was written" about a transaction that had already landed.
+  //
+  // When the collision is with the original itself (someone "corrects" a belief
+  // to what it already says) the citations are the same rows and nothing moves.
+  // But the dedupe key is (group, subject, content_hash), so the collision can be
+  // with a DIFFERENT live belief — most easily a `self_state` row, whose key is
+  // just (group, facet, hash), or a subject-less `episodic` one. Then the
+  // original's whole evidence ledger, contradictions included, lands on somebody
+  // else's belief and permanently changes how it ranks at read time, while the
+  // caller is told the correction was refused.
+  const { rows: collision } = await pool.query<{ id: string }>(
+    `SELECT id FROM ${table}
+      WHERE group_id = $1 AND content_hash = $2
+        AND ${subjectColumn} IS NOT DISTINCT FROM $3
+        AND superseded_by_id IS NULL`,
+    [input.groupId, memoryContentHash(content), original.subject],
+  );
+  if (collision.length > 0) return { ok: false, reason: "duplicate" };
+
+  // ONLY THE SUPPORTING CITATIONS CARRY OVER. A stance is assigned relative to a
+  // particular wording: a message she recorded as CONTRADICTING her phrasing says
+  // nothing about yours, and is very often the message that prompted the
+  // correction. Copying it across would write the correction carrying evidence
+  // against itself, and rendering it would show contradictions of text that no
+  // longer exists on the live head. Re-stamping them as supporting would be worse
+  // — it would put an assertion in your mouth that you never made.
+  const evidence = (await listMemoryEvidence(pool, input)).filter((e) => e.stance === "supports");
+  if (evidence.length === 0) {
+    // Either every cited message has been deleted, or none of them supported the
+    // belief in the first place. In both cases a correction has nothing to stand
+    // on, and `createMemory` would refuse it. Revoking is the honest action on a
+    // belief that can no longer be checked against anything.
+    return { ok: false, reason: "no_evidence" };
+  }
+
+  const subject =
+    input.memoryType === "relational"
+      ? { memoryType: "relational" as const, subjectJids: original.subject as string[] }
+      : input.memoryType === "self_state"
+        ? { memoryType: "self_state" as const, facet: original.subject as SelfStateFacet }
+        : input.memoryType === "semantic"
+          ? { memoryType: "semantic" as const, subjectJid: original.subject as string }
+          : { memoryType: "episodic" as const, subjectJid: original.subject as string | null };
+
+  const written = await createMemory(pool, {
+    ...subject,
+    groupId: input.groupId,
+    content,
+    evidence,
+    correctionNote: note,
+  });
+  if (written === null) return { ok: false, reason: "no_evidence" };
+  if (written.outcome !== "created") {
+    // The pre-check above should have caught this. Reaching here means a
+    // concurrent write took the dedupe slot between the check and the insert —
+    // rare, and not something to report as a tidy refusal, because citations may
+    // already have landed on a row this call did not create.
+    throw new Error(
+      `correctMemory: raced onto an existing ${input.memoryType} memory ${written.id}`,
+    );
+  }
+
+  const outcome = await supersedeMemory(pool, {
+    memoryType: input.memoryType,
+    groupId: input.groupId,
+    memoryId: input.memoryId,
+    replacedById: written.id,
+  });
+  if (outcome !== "superseded") {
+    // The replacement is live and points at nothing, so the screen would show it
+    // beside the belief it was meant to replace. Withdrawing it is the whole
+    // reason this branch exists — so CHECK that it happened. Swallowing a failed
+    // or no-op revoke here would leave a live orphan carrying the user's wording
+    // and their correction note, while telling them the correction failed.
+    const undone = await revokeMemory(pool, {
+      memoryType: input.memoryType,
+      groupId: input.groupId,
+      memoryId: written.id,
+    }).catch(() => 0);
+    if (undone === 0) {
+      throw new Error(
+        `correctMemory: supersede of ${input.memoryId} failed (${outcome}) and the ` +
+          `replacement ${written.id} could not be withdrawn — a live orphan correction ` +
+          `now exists on ${table}`,
+      );
+    }
+    return { ok: false, reason: "supersede_failed" };
+  }
+  return { ok: true, memoryId: written.id };
 }

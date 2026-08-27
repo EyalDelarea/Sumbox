@@ -252,3 +252,67 @@ export function setSummaryTrigger(trigger) {
   });
 }
 
+
+/**
+ * Fetch what @Aida believes, across chats.
+ *
+ * `withdrawn` is opt-in, mirroring the server: the default answers "what does
+ * she believe now", and a default that included withdrawn beliefs would make
+ * the revoke button decorative.
+ *
+ * `truncated` says the cap hid older rows — reported rather than swallowed,
+ * because nothing here is ever deleted and the rows it hides are the oldest.
+ *
+ * @param {{group?: number, type?: string, withdrawn?: boolean}} [filter]
+ * @returns {Promise<{truncated: boolean, memories: Array<{id: number, memoryType: string,
+ *   groupId: number, groupName: string, content: string, facet: string|null, observedAt: string,
+ *   supportingEvidence: number, contradictingEvidence: number, correctionNote: string|null,
+ *   byHuman: boolean, revoked: boolean, superseded: boolean, sourceMessageId: number|null}>}>}
+ */
+export function getMemories(filter = {}) {
+  const q = new URLSearchParams();
+  if (filter.group) q.set("group", String(filter.group));
+  if (filter.type) q.set("type", filter.type);
+  if (filter.withdrawn) q.set("withdrawn", "1");
+  const qs = q.toString();
+  return fetch(`/api/memories${qs ? `?${qs}` : ""}`).then((r) => {
+    if (!r.ok) throw new Error(`getMemories ${r.status}`);
+    return r.json();
+  });
+}
+
+/**
+ * Replace a belief with your own wording, and say why.
+ *
+ * The note is REQUIRED. It is the only thing marking a row as human-written, so
+ * a correction without one would be indistinguishable from her own conclusion.
+ *
+ * @returns {Promise<{ memoryId: number }>}
+ */
+export function correctMemory({ memoryType, groupId, memoryId, content, note }) {
+  return fetch("/api/memories/correct", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ memoryType, groupId, memoryId, content, note }),
+  }).then(async (r) => {
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `correct ${r.status}`);
+    return r.json();
+  });
+}
+
+/**
+ * Withdraw a belief. It stops being usable; the row survives, because the
+ * record of a mistake has to outlive the mistake.
+ *
+ * @returns {Promise<{ revoked: number }>}
+ */
+export function revokeMemory({ memoryType, groupId, memoryId }) {
+  return fetch("/api/memories/revoke", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ memoryType, groupId, memoryId }),
+  }).then(async (r) => {
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `revoke ${r.status}`);
+    return r.json();
+  });
+}
