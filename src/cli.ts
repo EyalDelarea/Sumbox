@@ -724,7 +724,7 @@ program
         parseCandidates,
         validateCandidate,
       } = await import("./ask/memory-extract.js");
-      const { storeAccepted, tally } = await import("./ask/memory-write.js");
+      const { storeAccepted, tally, toDraft } = await import("./ask/memory-write.js");
       const { OllamaSummarizer } = await import("./summarization/summarizer.js");
 
       // Validated for the reason the --runs guard 120 lines below records:
@@ -833,8 +833,18 @@ program
           // anything but a self-statement, how many there are IS the containment.
           const about =
             a.facet ?? (a.subjects.length > 0 ? a.subjects.map((x) => x.name).join(" · ") : "—");
+          // A dry run that lists a belief --write will refuse is not a preview of
+          // --write. Measured on a real DM: three accepts in a chat where the
+          // named participants carry no identity, so every one dies at storage
+          // after the model has already done the work. Asked of `toDraft`, the
+          // very function --write uses, so the preview cannot drift from the run.
+          let caveat = "";
+          if (!options.write) {
+            const mapped = await toDraft(pool, a, groupId);
+            if ("rejected" in mapped) caveat = `   ⚠ --write would refuse: ${mapped.rejected}`;
+          }
           process.stdout.write(
-            `  [${a.memoryType} · ${about}] ${a.content}   (msg:${a.citations.join(",")})\n`,
+            `  [${a.memoryType} · ${about}] ${a.content}   (msg:${a.citations.join(",")})${caveat}\n`,
           );
         }
 

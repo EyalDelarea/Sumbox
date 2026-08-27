@@ -248,6 +248,41 @@ export class CollectorSession extends EventEmitter {
     });
   }
 
+  /**
+   * The members of a group, as WhatsApp reports them right now.
+   *
+   * Probed against three real groups (406 participants, Baileys 7.0.0-rc13):
+   * `id` and `phoneNumber` are populated for every single one, and `name` and
+   * `notify` for NONE of them. So this call is the lid↔phone bridge for a whole
+   * group at once — and it is not a source of display names. Those only ever
+   * arrive on messages, as `pushName`.
+   *
+   * NOT routed through {@link groupSubjectThrottle}. That throttle exists for the
+   * message-driven lazy subject fetch, where a burst from one group fires many
+   * concurrent lookups and a failure re-fires on the next message — a storm this
+   * has no shape to produce, since the roster sync runs once per group on connect
+   * and paces itself between groups. Its per-jid cooldown would also key on the
+   * same jid as a subject lookup while returning a different thing.
+   *
+   * Returns [] rather than throwing when the socket is down or the query fails:
+   * an unavailable roster is a bridge that stays as incomplete as it already is,
+   * which is a normal state here and not an error.
+   */
+  async groupParticipants(jid: string): Promise<{ id: string; phoneNumber?: string }[]> {
+    const sock = this.socket;
+    if (!sock) return [];
+    try {
+      const md = await sock.groupMetadata(jid);
+      return (md.participants ?? []).map((p) => ({
+        id: p.id,
+        ...(p.phoneNumber ? { phoneNumber: p.phoneNumber } : {}),
+      }));
+    } catch (err) {
+      collectorLog.warn({ jid, err }, "groupParticipants failed");
+      return [];
+    }
+  }
+
   /** Baileys' lid<->pn mapping store, or null if the socket isn't connected. */
   private lidMapping(): {
     getLIDForPN(pn: string): Promise<string | null>;

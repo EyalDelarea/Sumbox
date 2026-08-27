@@ -2137,6 +2137,26 @@ function paintMemory() {
   wireMemory();
 }
 
+/**
+ * Who the belief is about, first in the row.
+ *
+ * The most important thing on the card and, until now, the one thing it never
+ * said: under the four-type extractor the subject is no longer the author of the
+ * message the card links to, so "יחס" with no names is a row nobody can judge.
+ *
+ * <bdi> because a Latin name or a `+972…` fallback inside an RTL row otherwise
+ * flips its punctuation to the wrong side. One chip per person, so a relationship
+ * reads as two people rather than as one joined string.
+ *
+ * Nothing for a belief about nobody: `self_state` already says "על עצמה" in its
+ * kind badge, and a group event is about the group.
+ */
+function subjectBadges(r) {
+  return (r.subjects ?? [])
+    .map((name) => `<span class="badge badge--who"><bdi>${escHtml(name)}</bdi></span>`)
+    .join("");
+}
+
 function buildMemoryRow(r) {
   const withdrawn = r.revoked || r.superseded;
   const state = r.revoked ? "בוטל" : r.superseded ? "הוחלף" : "";
@@ -2152,6 +2172,7 @@ function buildMemoryRow(r) {
     <div class="cmd-row mem-row${withdrawn ? " cmd-row--off" : ""}" data-id="${r.id}" data-type="${r.memoryType}" data-group="${r.groupId}">
       <div class="cmd-row__body">
         <div class="mem-row__tags">
+          ${subjectBadges(r)}
           <span class="badge">${escHtml(r.groupName)}</span>
           <span class="badge accent">${MEMORY_KIND_LABEL[r.memoryType] ?? escHtml(r.memoryType)}</span>
           ${r.byHuman ? '<span class="badge">תוקן על ידך</span>' : ""}
