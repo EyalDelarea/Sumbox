@@ -888,14 +888,14 @@ describe("aida-memory", () => {
       evidence: [{ messageId: await newMessage(b), stance: "supports" }],
     });
 
-    const all = await listMemoriesForReview(pool);
+    const all = (await listMemoriesForReview(pool)).rows;
     const mine = all.filter((r) => r.groupId === a || r.groupId === b);
     expect(mine.map((r) => r.content).sort()).toEqual(["בקבוצה א", "בקבוצה ב"]);
     // The chat's name travels with the belief: a claim read out of the context
     // that produced it is not checkable.
     expect(mine.every((r) => r.groupName.length > 0)).toBe(true);
     // One chat only, when asked.
-    expect((await listMemoriesForReview(pool, { groupId: a })).map((r) => r.content)).toEqual([
+    expect((await listMemoriesForReview(pool, { groupId: a })).rows.map((r) => r.content)).toEqual([
       "בקבוצה א",
     ]);
   });
@@ -917,12 +917,16 @@ describe("aida-memory", () => {
     });
     await revokeMemory(pool, { memoryType: "episodic", groupId: g, memoryId: gone.id });
 
-    expect((await listMemoriesForReview(pool, { groupId: g })).map((r) => r.id)).toEqual([live.id]);
+    expect((await listMemoriesForReview(pool, { groupId: g })).rows.map((r) => r.id)).toEqual([
+      live.id,
+    ]);
 
-    const withWithdrawn = await listMemoriesForReview(pool, {
-      groupId: g,
-      includeWithdrawn: true,
-    });
+    const withWithdrawn = (
+      await listMemoriesForReview(pool, {
+        groupId: g,
+        includeWithdrawn: true,
+      })
+    ).rows;
     expect(withWithdrawn.map((r) => r.content).sort()).toEqual(["חי", "מבוטל"]);
     expect(withWithdrawn.find((r) => r.id === gone.id)?.revokedAt).not.toBeNull();
   });
@@ -940,7 +944,7 @@ describe("aida-memory", () => {
       content: "יש מקור",
       evidence: [{ messageId: m, stance: "supports" }],
     });
-    const [row] = await listMemoriesForReview(pool, { groupId: g });
+    const [row] = (await listMemoriesForReview(pool, { groupId: g })).rows;
     expect(row?.firstSourceMessageId).toBe(m);
   });
 
@@ -954,7 +958,7 @@ describe("aida-memory", () => {
       evidence: [{ messageId: m, stance: "supports" }],
     });
     await pool.query(`DELETE FROM messages WHERE id = $1`, [m]);
-    const [row] = await listMemoriesForReview(pool, { groupId: g });
+    const [row] = (await listMemoriesForReview(pool, { groupId: g })).rows;
     expect(row?.firstSourceMessageId, "kept, but unsupported").toBeNull();
     expect(row?.supportingEvidence).toBe(0);
   });
@@ -975,7 +979,8 @@ describe("aida-memory", () => {
       content: "תכונה",
       evidence: [{ messageId: m, stance: "supports" }],
     });
-    const semantic = await listMemoriesForReview(pool, { groupId: g, memoryType: "semantic" });
+    const semantic = (await listMemoriesForReview(pool, { groupId: g, memoryType: "semantic" }))
+      .rows;
     expect(semantic.map((r) => r.content)).toEqual(["תכונה"]);
   });
 
@@ -1001,13 +1006,13 @@ describe("aida-memory", () => {
     });
 
     expect(outcome.ok).toBe(true);
-    const live = await listMemoriesForReview(pool, { groupId: g });
+    const live = (await listMemoriesForReview(pool, { groupId: g })).rows;
     expect(live.map((r) => r.content)).toEqual(["גיא עבר לחיפה"]);
     // The reason is on the new row, and its presence is the ONLY thing marking
     // the row as human-written.
     expect(live[0]?.correctionNote).toBe("הוא אמר את זה בהודעה אחרת, היא הבינה לא נכון");
 
-    const all = await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true });
+    const all = (await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true })).rows;
     const kept = all.find((r) => r.id === original.id);
     expect(kept?.content, "the original is never rewritten").toBe("גיא גר בתל אביב");
     expect(kept?.supersededById).toBe(live[0]?.id);
@@ -1037,8 +1042,83 @@ describe("aida-memory", () => {
     });
 
     expect(outcome.ok).toBe(true);
-    const [live] = await listMemoriesForReview(pool, { groupId: g });
+    const [live] = (await listMemoriesForReview(pool, { groupId: g })).rows;
     expect(live?.supportingEvidence, "same messages, read differently").toBe(2);
+  });
+
+  it("does not carry a contradicting citation onto the correction", async () => {
+    // A stance belongs to a WORDING. A message she recorded as contradicting her
+    // phrasing says nothing about yours — and is very often the message that
+    // prompted the correction. Inherited, it would write the correction carrying
+    // evidence against itself; re-stamped as supporting, it would put an
+    // assertion in your mouth you never made. So only support carries over.
+    const g = await newGroup("correct-stances");
+    const forIt = await newMessage(g);
+    const against = await newMessage(g);
+    const original = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "גרסה שלה",
+      evidence: [
+        { messageId: forIt, stance: "supports" },
+        { messageId: against, stance: "contradicts" },
+      ],
+    });
+
+    expect(
+      (
+        await correctMemory(pool, {
+          memoryType: "episodic",
+          groupId: g,
+          memoryId: original.id,
+          content: "גרסה שלי",
+          note: "ההודעה השנייה דווקא תומכת בניסוח הזה",
+        })
+      ).ok,
+    ).toBe(true);
+
+    const [live] = (await listMemoriesForReview(pool, { groupId: g })).rows;
+    expect(live?.supportingEvidence).toBe(1);
+    expect(live?.contradictingEvidence, "her disagreement with her own wording").toBe(0);
+  });
+
+  it("refuses to correct a belief nothing supports, rather than inventing support", async () => {
+    const g = await newGroup("correct-unsupported");
+    const m = await newMessage(g);
+    const original = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "רק סתירות",
+      evidence: [{ messageId: m, stance: "contradicts" }],
+    });
+    expect(
+      await correctMemory(pool, {
+        memoryType: "episodic",
+        groupId: g,
+        memoryId: original.id,
+        content: "ניסוח אחר",
+        note: "אין על מה להישען",
+      }),
+    ).toEqual({ ok: false, reason: "no_evidence" });
+  });
+
+  it("says when the cap hid older memories instead of truncating silently", async () => {
+    // Nothing here is ever deleted, so the rows a cap hides are the OLDEST —
+    // exactly the set the withdrawn toggle exists to reach.
+    const g = await newGroup("review-cap");
+    const m = await newMessage(g);
+    for (const content of ["ראשון", "שני", "שלישי"]) {
+      await write({
+        memoryType: "episodic",
+        groupId: g,
+        content,
+        evidence: [{ messageId: m, stance: "supports" }],
+      });
+    }
+    const capped = await listMemoriesForReview(pool, { groupId: g, limit: 2 });
+    expect(capped.rows).toHaveLength(2);
+    expect(capped.truncated).toBe(true);
+    expect((await listMemoriesForReview(pool, { groupId: g, limit: 3 })).truncated).toBe(false);
   });
 
   it("refuses a correction with no reason, because the reason is the only mark", async () => {
@@ -1135,7 +1215,7 @@ describe("aida-memory", () => {
     });
 
     expect(outcome).toEqual({ ok: false, reason: "duplicate" });
-    const all = await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true });
+    const all = (await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true })).rows;
     expect(all, "no third row was written").toHaveLength(2);
     // The claim "nothing was written" has to be true of B's ledger too.
     expect(
@@ -1193,7 +1273,7 @@ describe("aida-memory", () => {
       note: "לא באמת תיקון",
     });
     expect(outcome).toEqual({ ok: false, reason: "duplicate" });
-    const all = await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true });
+    const all = (await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true })).rows;
     expect(all, "nothing was written and nothing was withdrawn").toHaveLength(1);
     expect(all[0]?.revokedAt).toBeNull();
   });

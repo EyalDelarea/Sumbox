@@ -102,15 +102,17 @@ async function getMemories(url: URL, res: http.ServerResponse, deps: ServerDeps)
   }
 
   try {
-    const rows = await listMemoriesForReview(deps.pool, {
+    const page = await listMemoriesForReview(deps.pool, {
       groupId,
       memoryType,
       includeWithdrawn: url.searchParams.get("withdrawn") === "1",
     });
-    json(
-      res,
-      200,
-      rows.map((r) => ({
+    json(res, 200, {
+      // Reported, not swallowed. The cap keeps the newest and nothing here is
+      // ever deleted, so what it hides is the oldest — the set the withdrawn
+      // toggle exists to reach.
+      truncated: page.truncated,
+      memories: page.rows.map((r) => ({
         id: r.id,
         memoryType: r.memoryType,
         groupId: r.groupId,
@@ -129,7 +131,7 @@ async function getMemories(url: URL, res: http.ServerResponse, deps: ServerDeps)
         // So the UI can open the conversation on the message in one tap.
         sourceMessageId: r.firstSourceMessageId,
       })),
-    );
+    });
   } catch (err) {
     getLogger("web").error({ err }, "memories: list failed");
     json(res, 500, { error: "Failed to load memories." });

@@ -260,11 +260,14 @@ export function setSummaryTrigger(trigger) {
  * she believe now", and a default that included withdrawn beliefs would make
  * the revoke button decorative.
  *
+ * `truncated` says the cap hid older rows — reported rather than swallowed,
+ * because nothing here is ever deleted and the rows it hides are the oldest.
+ *
  * @param {{group?: number, type?: string, withdrawn?: boolean}} [filter]
- * @returns {Promise<Array<{id: number, memoryType: string, groupId: number, groupName: string,
- *   content: string, facet: string|null, observedAt: string, supportingEvidence: number,
- *   contradictingEvidence: number, correctionNote: string|null, byHuman: boolean,
- *   revoked: boolean, superseded: boolean}>>}
+ * @returns {Promise<{truncated: boolean, memories: Array<{id: number, memoryType: string,
+ *   groupId: number, groupName: string, content: string, facet: string|null, observedAt: string,
+ *   supportingEvidence: number, contradictingEvidence: number, correctionNote: string|null,
+ *   byHuman: boolean, revoked: boolean, superseded: boolean, sourceMessageId: number|null}>}>}
  */
 export function getMemories(filter = {}) {
   const q = new URLSearchParams();

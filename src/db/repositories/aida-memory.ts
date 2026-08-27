@@ -701,6 +701,20 @@ export type MemoryForReview = StoredMemory & {
   firstSourceMessageId: number | null;
 };
 
+/** Rows plus whether the cap hid any. */
+export type MemoryReviewPage = {
+  rows: MemoryForReview[];
+  /**
+   * More memories exist than were returned.
+   *
+   * The cap keeps the NEWEST, and nothing in this schema is ever deleted, so the
+   * rows it hides are the OLDEST — which is exactly the set the withdrawn toggle
+   * exists to reach. A screen that truncated silently would quietly stop being
+   * the complete record it promises to be.
+   */
+  truncated: boolean;
+};
+
 export type ReviewFilter = {
   /** One chat, or every chat when omitted. */
   groupId?: number;
@@ -728,7 +742,8 @@ export type ReviewFilter = {
 export async function listMemoriesForReview(
   client: pg.Pool | pg.PoolClient,
   filter: ReviewFilter = {},
-): Promise<MemoryForReview[]> {
+): Promise<MemoryReviewPage> {
+  const limit = filter.limit ?? 200;
   const types = filter.memoryType ? [filter.memoryType] : (Object.keys(TABLE_FOR) as MemoryType[]);
   const withdrawal = filter.includeWithdrawn
     ? ""
@@ -779,26 +794,32 @@ export async function listMemoriesForReview(
     `${branches.join("\n      UNION ALL")}
      ORDER BY observed_at DESC, memory_type ASC, id DESC
      LIMIT $2`,
-    [filter.groupId ?? null, filter.limit ?? 200],
+    // One more than the cap, so "there are more" is distinguishable from "there
+    // are exactly this many" — see the same trick in `selectCandidates`.
+    [filter.groupId ?? null, limit + 1],
   );
 
-  return rows.map((r) => ({
-    id: Number(r.id),
-    memoryType: r.memory_type,
-    content: r.content,
-    subjectJids: r.subject_jids,
-    facet: r.facet,
-    observedAt: r.observed_at,
-    supportingEvidence: Number(r.supporting),
-    contradictingEvidence: Number(r.contradicting),
-    groupId: Number(r.group_id),
-    groupName: r.group_name,
-    correctionNote: r.correction_note,
-    supersededById: r.superseded_by_id === null ? null : Number(r.superseded_by_id),
-    revokedAt: r.revoked_at,
-    firstSourceMessageId:
-      r.first_source === null || r.first_source === undefined ? null : Number(r.first_source),
-  }));
+  const truncated = rows.length > limit;
+  return {
+    truncated,
+    rows: (truncated ? rows.slice(0, limit) : rows).map((r) => ({
+      id: Number(r.id),
+      memoryType: r.memory_type,
+      content: r.content,
+      subjectJids: r.subject_jids,
+      facet: r.facet,
+      observedAt: r.observed_at,
+      supportingEvidence: Number(r.supporting),
+      contradictingEvidence: Number(r.contradicting),
+      groupId: Number(r.group_id),
+      groupName: r.group_name,
+      correctionNote: r.correction_note,
+      supersededById: r.superseded_by_id === null ? null : Number(r.superseded_by_id),
+      revokedAt: r.revoked_at,
+      firstSourceMessageId:
+        r.first_source === null || r.first_source === undefined ? null : Number(r.first_source),
+    })),
+  };
 }
 
 /** Which messages a memory cites, so a correction can inherit them. */
@@ -914,11 +935,19 @@ export async function correctMemory(
   );
   if (collision.length > 0) return { ok: false, reason: "duplicate" };
 
-  const evidence = await listMemoryEvidence(pool, input);
+  // ONLY THE SUPPORTING CITATIONS CARRY OVER. A stance is assigned relative to a
+  // particular wording: a message she recorded as CONTRADICTING her phrasing says
+  // nothing about yours, and is very often the message that prompted the
+  // correction. Copying it across would write the correction carrying evidence
+  // against itself, and rendering it would show contradictions of text that no
+  // longer exists on the live head. Re-stamping them as supporting would be worse
+  // — it would put an assertion in your mouth that you never made.
+  const evidence = (await listMemoryEvidence(pool, input)).filter((e) => e.stance === "supports");
   if (evidence.length === 0) {
-    // Every message this belief was traced to has been deleted, so a correction
-    // has nothing to stand on and `createMemory` would refuse it. Revoking is the
-    // honest action on a belief that can no longer be checked against anything.
+    // Either every cited message has been deleted, or none of them supported the
+    // belief in the first place. In both cases a correction has nothing to stand
+    // on, and `createMemory` would refuse it. Revoking is the honest action on a
+    // belief that can no longer be checked against anything.
     return { ok: false, reason: "no_evidence" };
   }
 

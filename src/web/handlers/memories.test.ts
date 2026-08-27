@@ -132,8 +132,8 @@ describe("/api/memories", () => {
     await newMemory(g, "משהו קרה");
     const { status, json } = await get(`?group=${g}`);
     expect(status).toBe(200);
-    expect(json).toHaveLength(1);
-    expect(json[0]).toMatchObject({
+    expect(json.memories).toHaveLength(1);
+    expect(json.memories[0]).toMatchObject({
       content: "משהו קרה",
       memoryType: "episodic",
       groupId: g,
@@ -141,7 +141,7 @@ describe("/api/memories", () => {
       revoked: false,
       superseded: false,
     });
-    expect(json[0].groupName.length).toBeGreaterThan(0);
+    expect(json.memories[0].groupName.length).toBeGreaterThan(0);
   });
 
   it("hides withdrawn beliefs until they are explicitly asked for", async () => {
@@ -149,8 +149,11 @@ describe("/api/memories", () => {
     const id = await newMemory(g, "מבוטל");
     await post("/api/memories/revoke", ref(g, id));
 
-    expect((await get(`?group=${g}`)).json, "the default is what she believes NOW").toEqual([]);
-    const withdrawn = (await get(`?group=${g}&withdrawn=1`)).json;
+    expect(
+      (await get(`?group=${g}`)).json.memories,
+      "the default is what she believes NOW",
+    ).toEqual([]);
+    const withdrawn = (await get(`?group=${g}&withdrawn=1`)).json.memories;
     expect(withdrawn).toHaveLength(1);
     expect(withdrawn[0].revoked).toBe(true);
   });
@@ -170,7 +173,7 @@ describe("/api/memories", () => {
     expect(status).toBe(200);
     expect(json.revoked).toBe(1);
 
-    const all = await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true });
+    const all = (await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true })).rows;
     expect(all, "the row survives — the record outlives the mistake").toHaveLength(1);
     expect(all[0]?.revokedAt).not.toBeNull();
   });
@@ -182,7 +185,7 @@ describe("/api/memories", () => {
 
     const { status } = await post("/api/memories/revoke", ref(theirs, id));
     expect(status).toBe(404);
-    expect((await listMemoriesForReview(pool, { groupId: mine }))[0]?.revokedAt).toBeNull();
+    expect((await listMemoriesForReview(pool, { groupId: mine })).rows[0]?.revokedAt).toBeNull();
   });
 
   it("tells an already-withdrawn belief apart from one that does not exist", async () => {
@@ -213,7 +216,7 @@ describe("/api/memories", () => {
       memoryId: `${id}x`,
     });
     expect(status).toBe(400);
-    expect((await get(`?group=${g}`)).json[0].content, "and the belief is untouched").toBe(
+    expect((await get(`?group=${g}`)).json.memories[0].content, "and the belief is untouched").toBe(
       "לא לגעת",
     );
   });
@@ -236,12 +239,12 @@ describe("/api/memories", () => {
     expect(status).toBe(200);
     expect(json.memoryId).toBeGreaterThan(0);
 
-    const live = (await get(`?group=${g}`)).json;
+    const live = (await get(`?group=${g}`)).json.memories;
     expect(live).toHaveLength(1);
     expect(live[0]).toMatchObject({ content: "עבר לחיפה", byHuman: true });
     expect(live[0].correctionNote).toBe("היא הבינה לא נכון");
 
-    const all = (await get(`?group=${g}&withdrawn=1`)).json;
+    const all = (await get(`?group=${g}&withdrawn=1`)).json.memories;
     const original = all.find((r: { id: number }) => r.id === id);
     expect(original.content, "the original is never rewritten").toBe("גר בתל אביב");
     expect(original.superseded).toBe(true);
@@ -259,7 +262,7 @@ describe("/api/memories", () => {
       });
       expect(status).toBe(400);
     }
-    expect((await get(`?group=${g}`)).json[0].content, "and changes nothing").toBe("משהו");
+    expect((await get(`?group=${g}`)).json.memories[0].content, "and changes nothing").toBe("משהו");
   });
 
   it("refuses a correction naming a belief in another chat", async () => {
@@ -272,7 +275,7 @@ describe("/api/memories", () => {
       note: "לא אמור לעבוד",
     });
     expect(status).toBe(404);
-    expect((await get(`?group=${mine}`)).json[0].content).toBe("שלי");
+    expect((await get(`?group=${mine}`)).json.memories[0].content).toBe("שלי");
   });
 
   it("refuses a malformed memory reference on either write", async () => {

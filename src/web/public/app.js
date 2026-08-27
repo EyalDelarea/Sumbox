@@ -1999,6 +1999,20 @@ const memoryState = {
   notice: "",
   /** Bumped per request so a slow response cannot paint over a newer filter. */
   seq: 0,
+  /**
+   * Chats that have memories — fetched UNFILTERED, never derived from the rows
+   * on screen.
+   *
+   * Derived from the visible rows it erases its own options: pick a chat, then a
+   * type with nothing in it, the list empties, and the select falls back to "all
+   * chats" while the filter is still set to one — the screen reporting a state it
+   * is not in, with an empty message that reads as a global answer.
+   *
+   * Not `getGroups()` either: 473 chats, almost none of which have ever produced
+   * a memory, is a filter you cannot use.
+   */
+  chats: [],
+  truncated: false,
 };
 
 async function renderMemory() {
@@ -2009,10 +2023,30 @@ async function renderMemory() {
   await loadMemories();
 }
 
+/**
+ * Refresh the chat options from an unfiltered read.
+ *
+ * Separate from the list request on purpose — it must not narrow with the
+ * filters, or the control would delete the option that is currently selected.
+ * Withdrawn rows count: a chat whose only belief was revoked still belongs in
+ * the filter, because the toggle can reach it.
+ */
+async function loadMemoryChats() {
+  try {
+    const page = await getMemories({ withdrawn: true });
+    memoryState.chats = [
+      ...new Map(page.memories.map((r) => [r.groupId, r.groupName])).entries(),
+    ].map(([id, name]) => ({ id, name }));
+  } catch {
+    memoryState.chats = [];
+  }
+}
+
 async function loadMemories() {
   const seq = ++memoryState.seq;
+  await loadMemoryChats();
   try {
-    const rows = await getMemories({
+    const page = await getMemories({
       group: memoryState.group ? Number(memoryState.group) : undefined,
       type: memoryState.type || undefined,
       withdrawn: memoryState.withdrawn,
@@ -2020,7 +2054,8 @@ async function loadMemories() {
     // Two filter changes in quick succession can land out of order. Painting the
     // older response would leave the list contradicting the controls above it.
     if (seq !== memoryState.seq) return;
-    memoryState.rows = rows;
+    memoryState.rows = page.memories;
+    memoryState.truncated = page.truncated;
     memoryState.error = "";
   } catch {
     if (seq !== memoryState.seq) return;
@@ -2029,6 +2064,7 @@ async function loadMemories() {
     // next click on them fails with a message about a belief that "does not
     // exist", which reads as data loss on a screen promising the record stays.
     memoryState.rows = [];
+    memoryState.truncated = false;
     memoryState.error = "שגיאה בטעינת הזיכרונות.";
   }
   // `notice` is deliberately NOT cleared here. Every action reloads the list
@@ -2048,7 +2084,7 @@ const MEMORY_KIND_LABEL = {
 
 function paintMemory() {
   const rows = memoryState.rows;
-  const chats = [...new Map(rows.map((r) => [r.groupId, r.groupName])).entries()];
+  const chats = memoryState.chats;
   paneMain.innerHTML = `
     <div class="cmds-panel">
       <div class="cmds-head">
@@ -2069,7 +2105,7 @@ function paintMemory() {
       <div class="mem-filters">
         <select id="mem-group" class="mem-filter" aria-label="סינון לפי צ׳אט">
           <option value="">כל הצ׳אטים</option>
-          ${chats.map(([id, name]) => `<option value="${id}"${String(id) === memoryState.group ? " selected" : ""}>${escHtml(name)}</option>`).join("")}
+          ${chats.map((c) => `<option value="${c.id}"${String(c.id) === memoryState.group ? " selected" : ""}>${escHtml(c.name)}</option>`).join("")}
         </select>
         <select id="mem-type" class="mem-filter" aria-label="סינון לפי סוג">
           <option value="">כל הסוגים</option>
@@ -2083,6 +2119,7 @@ function paintMemory() {
 
       ${memoryState.error ? `<p class="error-state">${escHtml(memoryState.error)}</p>` : ""}
       ${memoryState.notice ? `<p class="error-state">${escHtml(memoryState.notice)}</p>` : ""}
+      ${memoryState.truncated ? '<p class="error-state">מוצגים רק הזיכרונות האחרונים. יש עוד — סננו לפי צ׳אט או סוג כדי להגיע אליהם.</p>' : ""}
       <div class="cmds-list" id="mem-list">
         ${
           // Only claim she has learned nothing when we actually KNOW that. On a
