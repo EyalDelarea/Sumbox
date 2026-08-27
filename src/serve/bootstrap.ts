@@ -388,6 +388,22 @@ export async function startServe(options: { port?: string; collect?: boolean }):
       session.on("connected", () => {
         log.collector.info("connected");
         logLifecycle("collector.connected");
+        // Fill the lid↔phone bridge from WhatsApp's own group rosters
+        // (fire-and-forget). ON CONNECT AND NOT ON A LOOP: the run is
+        // self-limiting — it visits only groups still holding an unlinked lid —
+        // so once the bridge is complete a reconnect costs one query and no
+        // WhatsApp calls at all. A member who joins mid-session stays unbridged
+        // until the next connect, which shows as a masked phone on the memories
+        // screen rather than as a wrong name.
+        import("../collector/roster-sync.js")
+          .then(({ syncGroupRosters }) =>
+            syncGroupRosters(pool, {
+              groupParticipants: (jid) => session.groupParticipants(jid),
+            }),
+          )
+          .catch((err) => {
+            log.collector.warn({ err }, "roster sync failed");
+          });
         // Proactive name resolution on connect (fire-and-forget).
         import("../collector/name-resolver.js")
           .then(({ resolveAllGroupNames }) =>
