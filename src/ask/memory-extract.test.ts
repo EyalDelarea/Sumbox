@@ -7,10 +7,12 @@ import { listGroupParticipants, upsertParticipant } from "../db/repositories/par
 import type { NormalizedMessage } from "../importer/types.js";
 import { createTestDatabase } from "../test/db.js";
 import {
+  buildSubjectIndex,
   type CandidateMessage,
   isIdentifiableAuthor,
   parseCandidates,
   selectCandidates,
+  subjectKey,
   validateCandidate,
 } from "./memory-extract.js";
 
@@ -384,6 +386,93 @@ describe("selectCandidates (D7 exclusions)", () => {
     expect(
       (await selectCandidates(pool, a, SINCE, UNTIL)).candidates.map((m) => m.content),
     ).toEqual(["in window"]);
+  });
+});
+
+// The first of #99's two containment rules rests entirely on this map: a subject
+// the model names must have spoken in the window, or the belief is refused. What
+// is tested here is therefore not a lookup helper — it is who @Aida is allowed to
+// form a belief about at all.
+describe("buildSubjectIndex", () => {
+  function spoke(overrides: Partial<CandidateMessage> = {}): CandidateMessage {
+    return {
+      messageId: 1,
+      sender: "Royi",
+      senderJid: "972500000042@s.whatsapp.net",
+      jidIsAuthors: true,
+      content: "hi",
+      sentAt: new Date("2026-05-01T10:00:00.000Z"),
+      ...overrides,
+    };
+  }
+
+  it("indexes a speaker under the label the prompt shows, with the identity behind it", () => {
+    const index = buildSubjectIndex([spoke()]);
+    expect(index.get(subjectKey("Royi"))).toEqual({
+      name: "Royi",
+      jids: ["972500000042@s.whatsapp.net"],
+    });
+  });
+
+  it("has no entry for somebody who never spoke in the window", () => {
+    const index = buildSubjectIndex([spoke()]);
+    expect(index.get(subjectKey("אחותו של רועי")), "the out-of-room subject").toBeUndefined();
+  });
+
+  it("keeps a speaker who left no identity, with an empty one rather than none", () => {
+    // Absent and identity-less are two different refusals: the first is a person
+    // who was never here, the second is a person who was, and can still be the
+    // subject of an episodic memory whose subject column is nullable.
+    const index = buildSubjectIndex([spoke({ senderJid: null })]);
+    expect(index.get(subjectKey("Royi"))).toEqual({ name: "Royi", jids: [] });
+  });
+
+  it("refuses to take an identity from a row whose jid is not its author's", () => {
+    // The owner's own message in a 1:1 chat. He spoke, so he is indexed; the jid
+    // on the row is the OTHER party's, so it contributes nothing.
+    const index = buildSubjectIndex([
+      spoke({ sender: "Eyal", senderJid: "972500000077@s.whatsapp.net", jidIsAuthors: false }),
+    ]);
+    expect(index.get(subjectKey("Eyal"))).toEqual({ name: "Eyal", jids: [] });
+  });
+
+  it("collects every distinct identity one label spoke under, once each", () => {
+    const index = buildSubjectIndex([
+      spoke({ messageId: 1 }),
+      spoke({ messageId: 2 }),
+      spoke({ messageId: 3, senderJid: "4578552635558@lid" }),
+    ]);
+    expect(index.get(subjectKey("Royi"))?.jids).toEqual([
+      "972500000042@s.whatsapp.net",
+      "4578552635558@lid",
+    ]);
+  });
+
+  // The reachable route to an ambiguous subject. Measured on group 70 every
+  // display name maps to exactly one jid, so natural duplication does not occur —
+  // but two members aliased to the same preferred name collapse into one entry,
+  // and then a belief naming it is about two people.
+  it("collapses two members the operator aliased to one name into one ambiguous entry", () => {
+    const aliases = new Map([
+      ["Royi", "רועי"],
+      ["Roy Levi", "רועי"],
+    ]);
+    const index = buildSubjectIndex(
+      [
+        spoke({ sender: "Royi" }),
+        spoke({ messageId: 2, sender: "Roy Levi", senderJid: "972500000043@s.whatsapp.net" }),
+      ],
+      aliases,
+    );
+    expect(index.get(subjectKey("רועי"))?.jids).toEqual([
+      "972500000042@s.whatsapp.net",
+      "972500000043@s.whatsapp.net",
+    ]);
+  });
+
+  it("finds a name the model retyped with different case or spacing", () => {
+    const index = buildSubjectIndex([spoke({ sender: "Alex Goldin" })]);
+    expect(index.get(subjectKey("  alex   goldin "))?.name).toBe("Alex Goldin");
   });
 });
 

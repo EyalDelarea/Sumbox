@@ -28,6 +28,7 @@
  */
 import type pg from "pg";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
+import { resolveSenderName } from "../summarization/sender-name.js";
 
 /**
  * Most messages handed to the extractor in one pass.
@@ -359,6 +360,88 @@ export async function selectCandidates(
     misattributedSelfMessages: Number(counts[0]?.misattributed_self ?? 0),
     truncated,
   };
+}
+
+// ── The window's name-space ───────────────────────────────────────────────
+
+/**
+ * A person a belief may be about: the label the extractor saw, and the
+ * identities that spoke under it.
+ */
+export type SubjectIdentity = {
+  /**
+   * The label exactly as {@link buildExtractionPrompt} rendered it — that is,
+   * `resolveSenderName`'s name-space, the same one `buildGroupRoster` and the
+   * transcript use. Three name-spaces that disagreed is how #67's guardrail bugs
+   * shipped, so there is one here and it is borrowed rather than invented.
+   */
+  name: string;
+  /**
+   * Distinct `sender_jid`s observed under that label, from messages whose jid is
+   * really their author's.
+   *
+   * MAY BE EMPTY, and empty is not the same as absent: a person with a resolved
+   * display name and no captured jid has spoken in this room without leaving an
+   * identity behind. They are a real subject for an `episodic` memory, and not a
+   * storable one for a `semantic` or `relational` belief, whose subject is NOT
+   * NULL. Two different refusals, so two different states.
+   */
+  jids: string[];
+};
+
+/** Every label that spoke in the window, keyed by {@link subjectKey}. */
+export type SubjectIndex = ReadonlyMap<string, SubjectIdentity>;
+
+/**
+ * The lookup key for a name the model returned.
+ *
+ * Insensitive to case and to internal whitespace, because the model RETYPES the
+ * label into its JSON rather than copying the bytes it was shown, and a subject
+ * refused over a doubled space would be counted as an out-of-room person — the
+ * one refusal reason this slice reports as a safety property.
+ *
+ * Deliberately nothing more than that. No prefix match, no fuzzy match: "Royi"
+ * and "Roy" are two people until proven otherwise, and the whole point of rule
+ * one is that a name matching nobody is a refusal rather than a near miss.
+ */
+export function subjectKey(name: string): string {
+  return name.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * Who spoke in this window, and under which identities.
+ *
+ * The first of #99's two containment rules is built on this map: a subject the
+ * model names must resolve here, or the belief is refused. A person reconstructed
+ * from others talking about them — a relative, a colleague, an ex — has no entry
+ * and cannot be the subject of anything.
+ *
+ * IDENTITIES COME ONLY FROM ROWS WHERE THE JID IS THE AUTHOR'S. In a 1:1 chat the
+ * owner's own messages carry the other party's jid, and one such row would file
+ * every belief naming the owner against whoever he was talking to. The row still
+ * puts its author's NAME in the index — they did speak — it just contributes no
+ * identity.
+ *
+ * `aliases` is injectable for tests; the default is the operator's `NAME_ALIASES`,
+ * because the prompt renders names through the same map and the two must agree.
+ * Two members aliased to one preferred name legitimately collapse into one entry
+ * carrying both jids, which the write path then has to resolve or refuse.
+ */
+export function buildSubjectIndex(
+  messages: Iterable<CandidateMessage>,
+  aliases?: Map<string, string>,
+): SubjectIndex {
+  const index = new Map<string, SubjectIdentity>();
+  for (const m of messages) {
+    const name = aliases ? resolveSenderName(m.sender, aliases) : resolveSenderName(m.sender);
+    const key = subjectKey(name);
+    if (key === "") continue;
+    const entry = index.get(key) ?? { name, jids: [] };
+    const jid = (m.senderJid ?? "").trim();
+    if (m.jidIsAuthors && jid !== "" && !entry.jids.includes(jid)) entry.jids.push(jid);
+    index.set(key, entry);
+  }
+  return index;
 }
 
 /** What the extractor is asked to produce, per message. */
