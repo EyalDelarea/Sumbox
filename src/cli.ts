@@ -5,6 +5,7 @@ import path from "node:path";
 import { Command } from "commander";
 import "dotenv/config";
 import type { ValidatedCandidate } from "./ask/memory-extract.js";
+import type { RepairRun } from "./ask/memory-repair-run.js";
 import { GroupTurnQueue } from "./collector/group-turn-queue.js";
 import { loadConfig } from "./config.js";
 import { runImport } from "./importer/run-import.js";
@@ -697,18 +698,34 @@ program
   .requiredOption("--group <id>", "Group id")
   .option("--extract", "Run extraction over the window and print what would be learned")
   .option("--write", "Store what --extract would learn. The only path that writes a memory.")
+  .option(
+    "--repair",
+    "Re-read every live belief against the messages it cites; corrects with --write",
+  )
   .option("--hours <n>", "Window size for --extract, in hours", "24")
   .option(
     "--until <iso>",
     "End of the window (ISO date/time). Defaults to now — set it to walk back through history.",
+  )
+  .option(
+    "--runs <n>",
+    "Passes over the beliefs, --repair only. Refused together with --write: repeats would stack supersedes.",
+    "1",
+  )
+  .option(
+    "--report <path>",
+    "Write every run's records as JSON, --repair only, for the human calibration pass",
   )
   .action(
     async (options: {
       group: string;
       extract?: boolean;
       write?: boolean;
+      repair?: boolean;
       hours?: string;
       until?: string;
+      runs?: string;
+      report?: string;
     }) => {
       // --extract alone is a DRY RUN and stays one: it is the measurement path that
       // produced the extraction numbers on #83, and slice 4 still needs it to see
@@ -719,10 +736,11 @@ program
       // cause a belief to be written behind your back. There is no confirmation
       // prompt either: everything it writes is revocable from the memories screen
       // (#96), and a prompt would only train the habit of dismissing it.
-      if (!options.extract) {
+      if (!options.extract && !options.repair) {
         process.stdout.write(
           "Nothing to show. Run with --extract to see what a window would produce,\n" +
-            "or --extract --write to store it.\n",
+            "or --extract --write to store it. Run with --repair to re-read the\n" +
+            "beliefs already on file against the messages they cite.\n",
         );
         return;
       }
@@ -745,6 +763,7 @@ program
       // nothing" from the one command in this project that writes.
       const groupId = Number(options.group);
       const hours = Number(options.hours ?? 24);
+      const runs = Number(options.runs ?? 1);
       // A window that always ends NOW can only ever see the most recent messages,
       // so the only way to cover a chat's history was to widen --hours — which the
       // 300-candidate cap then trims from the OLD end, dropping exactly what
@@ -760,6 +779,40 @@ program
       }
       if (!Number.isFinite(hours) || hours <= 0) {
         process.stderr.write(`Error: --hours must be a positive number, got "${options.hours}"\n`);
+        process.exitCode = 1;
+        return;
+      }
+      // Same NaN/zero trap as --hours above: an unvalidated --runs would run the
+      // repair loop zero times (or `for` on a NaN, also zero) and print as a
+      // clean, empty pass rather than the typo it is.
+      if (!Number.isInteger(runs) || runs <= 0) {
+        process.stderr.write(`Error: --runs must be a positive integer, got "${options.runs}"\n`);
+        process.exitCode = 1;
+        return;
+      }
+      // Both flags are --repair only. Silently ignoring them on --extract is the
+      // same silent-zero failure the comment above guards against: a typo'd
+      // `--extract --write --runs 3` would run extraction once, print nothing
+      // about --runs, and — with --report set — write no artifact at all.
+      // Compared against the raw string so an explicit `--runs 1` on --extract
+      // is also named, rather than passing by coincidence of matching the
+      // default.
+      if (!options.repair && (options.runs !== "1" || options.report !== undefined)) {
+        process.stderr.write("Error: --runs and --report apply to --repair only.\n");
+        process.exitCode = 1;
+        return;
+      }
+      // Repeated writes would stack supersedes: run two calibration passes with
+      // --write and the second repairs the FIRST run's rewrites rather than the
+      // original beliefs, which is a different pass than the one asked for and
+      // would corrupt the very chain a correction is supposed to leave readable.
+      // --runs > 1 is the dry-run calibration shape only.
+      if (options.repair && runs > 1 && options.write) {
+        process.stderr.write(
+          "Error: --runs > 1 cannot be combined with --write — repeated writes would " +
+            "stack supersedes onto each other's output. Run --runs without --write to " +
+            "calibrate, then --write once on its own.\n",
+        );
         process.exitCode = 1;
         return;
       }
@@ -783,6 +836,137 @@ program
           repeatPenalty: config.summarization.repeatPenalty,
           numPredict: config.summarization.numPredict,
         });
+        // ── --repair: re-read what is already on file ──────────────────────
+        //
+        // Runs BEFORE extraction and returns, because the two are different jobs
+        // on different inputs: extraction reads a window of messages, this reads
+        // beliefs. Sharing the command is worth it — they share a group, a model
+        // and the rule that nothing is written without --write — but sharing a
+        // run would mean repairing beliefs the same invocation had just written,
+        // which reports the pass on its own output.
+        if (options.repair) {
+          const { repairGroupMemories } = await import("./ask/memory-repair-run.js");
+          const model = {
+            // Q25: the SAME model extraction uses. If a narrow re-read fixes what
+            // open extraction got wrong, the asymmetry this pass rests on is real.
+            ask: async (prompt: string) =>
+              (
+                await extractor.summarize({
+                  system:
+                    "You check a claim against the messages it cites. You reply with one JSON object, never prose.",
+                  user: prompt,
+                })
+              ).overview,
+          };
+
+          // --runs > 1 is the calibration protocol: three DRY passes over the
+          // same stored beliefs, captured so a human — not a script, there is no
+          // automated pass/fail — can read across them. --write only ever runs
+          // once (refused above), so the loop and the report are additive: a
+          // plain `--repair --write` behaves exactly as it always has.
+          const allRuns: RepairRun[] = [];
+          for (let i = 1; i <= runs; i++) {
+            const run = await repairGroupMemories(pool, {
+              groupId,
+              model,
+              write: options.write === true,
+            });
+            allRuns.push(run);
+            const prefix = runs > 1 ? `run ${i}/${runs} ` : "";
+
+            // BEFORE AND AFTER, PER BELIEF, ALWAYS. The operator is the only gate
+            // this pass has — there is no automated pass/fail — so a summary line
+            // would be the whole verdict rendered unreadable. The citation goes
+            // out with it because a repair can only be judged against what it
+            // read.
+            for (const r of run.records) {
+              const head = `[${prefix}${r.memoryType} #${r.memoryId}]`;
+              process.stdout.write(`\n${head} ${r.before}\n`);
+              for (const c of r.cited) {
+                process.stdout.write(`    ← [${c.messageId}] ${c.author}: ${c.text}\n`);
+              }
+              const o = r.outcome;
+              if (o.kind === "kept") {
+                process.stdout.write(`  ✓ keep (${o.step}) — ${o.verdict.reason}\n`);
+              } else if (o.kind === "rewritten") {
+                const mark = o.written
+                  ? `✎ rewritten${o.newMemoryId ? ` #${o.newMemoryId}` : ""}`
+                  : "✎ would rewrite";
+                process.stdout.write(
+                  `  ${mark} → ${o.verdict.content}\n     (${o.verdict.reason})\n`,
+                );
+              } else if (o.kind === "flagged") {
+                // "would drop" was the verdict; a flag is what it is allowed to do
+                // with it. Printed as a question rather than an action, because
+                // that is what the operator has to answer.
+                process.stdout.write(
+                  `  ⚑ ${o.written ? "flagged for you" : "would flag"} — ${o.verdict.reason}\n`,
+                );
+              } else if (o.kind === "refused") {
+                process.stdout.write(
+                  `  ? refused (${o.reason}) — model said: ${o.reply.slice(0, 200)}\n`,
+                );
+              } else if (o.kind === "no_evidence") {
+                process.stdout.write(`  · no evidence — ${o.reason}\n`);
+              } else {
+                process.stdout.write(`  ! failed — ${o.error}\n`);
+              }
+            }
+            process.stdout.write(`\n${prefix}repair: ${JSON.stringify(run.tally)}\n`);
+          }
+
+          // Same convention as --extract's storeAccepted check below: only a
+          // TECHNICAL failure (the model call threw, or a write failed) trips
+          // this. `refused` is a normal verdict a repair pass can land on —
+          // extract's own model-refusal category (`refused` in its counts)
+          // never sets exitCode either — so it is printed above and left alone
+          // here. Checked after every record and tally line has already
+          // printed, never instead of them, for the same reason extract's
+          // check comes after its per-candidate list: an exit that hid them
+          // would leave beliefs the run touched unmentioned in its output.
+          if (allRuns.some((run) => run.records.some((r) => r.outcome.kind === "failed"))) {
+            process.exitCode = 1;
+          }
+
+          if (options.report) {
+            // Wrapped on its own, not left to the outer catch: by the time this
+            // runs, N passes of local model calls have already happened and
+            // every record has already printed to stdout. A bad --report path
+            // must name itself and still leave the process having reported
+            // everything it did — not read as `aida-memory failed` after the
+            // real work succeeded, and never lose the printed records to an
+            // exit that hides them (the same reasoning as the process.exitCode
+            // choice below).
+            const reportPath = options.report;
+            try {
+              const fsPromises = await import("node:fs/promises");
+              await fsPromises.writeFile(
+                reportPath,
+                JSON.stringify(
+                  {
+                    groupId,
+                    runs: allRuns,
+                    model: config.summarization.model,
+                    generatedAt: new Date().toISOString(),
+                  },
+                  null,
+                  2,
+                ),
+              );
+              process.stdout.write(`\nReport written to ${reportPath}\n`);
+            } catch (err) {
+              process.stderr.write(
+                `Error: --report could not be written to ${reportPath}: ${(err as Error).message}\n`,
+              );
+              process.exitCode = 1;
+            }
+          }
+          if (!options.write) {
+            process.stdout.write("Nothing was changed. Add --write to apply it.\n");
+          }
+          return;
+        }
+
         const since = new Date(until.getTime() - hours * 3600_000);
 
         // NO NARROWING, on either path, and that is a change from slice 3a.
