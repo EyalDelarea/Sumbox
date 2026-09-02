@@ -15,8 +15,11 @@ import type http from "node:http";
 import { PassThrough } from "node:stream";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { REPAIR_NOTE_PREFIX } from "../../ask/memory-repair-run.js";
 import {
+  correctMemory,
   createMemory,
+  flagMemory,
   listMemoriesForReview,
   type MemoryType,
 } from "../../db/repositories/aida-memory.js";
@@ -325,6 +328,29 @@ describe("/api/memories", () => {
     expect((await get(`?group=${g}`)).json.memories[0].content, "and changes nothing").toBe("משהו");
   });
 
+  // The prefix that marks a repair's note is a literal string `provenanceOf`
+  // matches on — a human whose own reason happened to start with it would
+  // otherwise be silently stored and rendered as the model's repair, not
+  // theirs. The endpoint is the only place that can make that impossible.
+  it("refuses a human correction note that starts with the repair prefix", async () => {
+    const g = await newGroup("api-correct-reserved");
+    const id = await newMemory(g, "משהו");
+
+    const { status, json } = await post("/api/memories/correct", {
+      ...ref(g, id),
+      content: "אחר",
+      note: `${REPAIR_NOTE_PREFIX} זו לא הודעה אמיתית מהמודל`,
+    });
+    expect(status).toBe(400);
+    expect(json.error).toBe("reserved_prefix");
+
+    const memories = (await get(`?group=${g}`)).json.memories;
+    expect(memories, "no supersede landed — still exactly the original row").toHaveLength(1);
+    expect(memories[0].content, "nothing written").toBe("משהו");
+    expect(memories[0].byHuman).toBe(false);
+    expect(memories[0].correctionNote).toBeNull();
+  });
+
   it("refuses a correction naming a belief in another chat", async () => {
     const mine = await newGroup("api-cor-mine");
     const theirs = await newGroup("api-cor-theirs");
@@ -349,5 +375,144 @@ describe("/api/memories", () => {
       });
       expect(status).toBe(400);
     }
+  });
+
+  // ── Provenance: human correction vs model repair vs neither ────────────────
+
+  it("marks a human correction as byHuman, with the note exposed", async () => {
+    const g = await newGroup("api-prov-human");
+    const id = await newMemory(g, "משהו");
+    const outcome = await correctMemory(pool, {
+      memoryType: "episodic",
+      groupId: g,
+      memoryId: id,
+      content: "תוקן",
+      note: "היא טעתה",
+    });
+    expect(outcome.ok).toBe(true);
+
+    const live = (await get(`?group=${g}`)).json.memories[0];
+    expect(live).toMatchObject({
+      byHuman: true,
+      correctionNote: "היא טעתה",
+      repairReason: null,
+    });
+  });
+
+  // This is the bug the feature exists to fix: a repair supersede used to render
+  // identically to a human's, because both are a non-null `correction_note`.
+  it("tells a model repair apart from a human correction on the same field", async () => {
+    const g = await newGroup("api-prov-repair");
+    const id = await newMemory(g, "משהו");
+    const outcome = await correctMemory(pool, {
+      memoryType: "episodic",
+      groupId: g,
+      memoryId: id,
+      content: "תוקן על ידה",
+      note: `${REPAIR_NOTE_PREFIX} המקור לא תומך בזה`,
+    });
+    expect(outcome.ok).toBe(true);
+
+    const live = (await get(`?group=${g}`)).json.memories[0];
+    expect(live).toMatchObject({
+      byHuman: false,
+      correctionNote: null,
+      repairReason: "המקור לא תומך בזה",
+    });
+  });
+
+  it("marks an untouched belief as neither human nor repair", async () => {
+    const g = await newGroup("api-prov-none");
+    await newMemory(g, "משהו");
+    const live = (await get(`?group=${g}`)).json.memories[0];
+    expect(live).toMatchObject({ byHuman: false, correctionNote: null, repairReason: null });
+  });
+
+  it("carries what a repair replaced alongside the reason it did", async () => {
+    const g = await newGroup("api-prov-repair-previous");
+    const id = await newMemory(g, "משהו ישן");
+    const outcome = await correctMemory(pool, {
+      memoryType: "episodic",
+      groupId: g,
+      memoryId: id,
+      content: "תוקן על ידה",
+      note: `${REPAIR_NOTE_PREFIX} המקור לא תומך בזה`,
+    });
+    expect(outcome.ok).toBe(true);
+
+    const live = (await get(`?group=${g}`)).json.memories[0];
+    expect(live).toMatchObject({
+      repairReason: "המקור לא תומך בזה",
+      previousContent: "משהו ישן",
+    });
+  });
+
+  // ── Flags ────────────────────────────────────────────────────────────────
+
+  it("carries an open flag's reason on the belief it doubts", async () => {
+    const g = await newGroup("api-flag-list");
+    const id = await newMemory(g, "מוטל בספק");
+    await flagMemory(pool, { memoryType: "episodic", memoryId: id, reason: "אין תמיכה בהודעות" });
+
+    const live = (await get(`?group=${g}`)).json.memories[0];
+    expect(live.flagReason).toBe("אין תמיכה בהודעות");
+    expect(typeof live.flaggedAt).toBe("string");
+  });
+
+  it("gives an unflagged belief a null flag reason", async () => {
+    const g = await newGroup("api-flag-none");
+    await newMemory(g, "בסדר גמור");
+    const live = (await get(`?group=${g}`)).json.memories[0];
+    expect(live.flagReason).toBeNull();
+    expect(live.flaggedAt).toBeNull();
+  });
+
+  it("dismisses an open flag, and the card stops carrying it", async () => {
+    const g = await newGroup("api-unflag");
+    const id = await newMemory(g, "מוטל בספק");
+    await flagMemory(pool, { memoryType: "episodic", memoryId: id, reason: "בדיקה" });
+
+    const { status, json } = await post("/api/memories/unflag", ref(g, id));
+    expect(status).toBe(200);
+    expect(json.cleared).toBe(1);
+
+    const live = (await get(`?group=${g}`)).json.memories[0];
+    expect(live.flagReason).toBeNull();
+    // The belief itself is untouched — unflag answers the doubt, it never
+    // withdraws or rewrites the row it was raised against.
+    expect(live.content).toBe("מוטל בספק");
+    expect(live.revoked).toBe(false);
+  });
+
+  it("refuses to unflag a belief that has no open flag", async () => {
+    const g = await newGroup("api-unflag-none");
+    const id = await newMemory(g, "אין ספק");
+    const { status, json } = await post("/api/memories/unflag", ref(g, id));
+    expect(status).toBe(404);
+    expect(json.error).toBe("not_flagged");
+  });
+
+  it("refuses to unflag a belief in another chat", async () => {
+    const mine = await newGroup("api-unflag-mine");
+    const theirs = await newGroup("api-unflag-theirs");
+    const id = await newMemory(mine, "שלי");
+    await flagMemory(pool, { memoryType: "episodic", memoryId: id, reason: "בדיקה" });
+
+    const { status, json } = await post("/api/memories/unflag", ref(theirs, id));
+    expect(status).toBe(404);
+    expect(json.error).toBe("not_found");
+
+    // And the flag is still there to answer, from the chat it actually belongs to.
+    const live = (await get(`?group=${mine}`)).json.memories[0];
+    expect(live.flagReason).toBe("בדיקה");
+  });
+
+  it("refuses a malformed memory reference on unflag too", async () => {
+    const { status } = await post("/api/memories/unflag", {
+      memoryType: "not-a-type",
+      groupId: 1,
+      memoryId: 1,
+    });
+    expect(status).toBe(400);
   });
 });
