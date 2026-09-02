@@ -3,6 +3,7 @@ import type pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestDatabase } from "../../test/db.js";
 import { createAdminPool } from "../client.js";
+import { createMemory, flagMemory } from "./aida-memory.js";
 import {
   deleteAllData,
   PURGE_EXCLUDED_TENANT_TABLES,
@@ -205,6 +206,34 @@ describe("purgeUnselectedChats", () => {
     expect(await count("aida_memory_evidence", "true", [])).toBe(1);
   });
 
+  it("purges the flags on a purged chat's memories, keeps a selected chat's flags", async () => {
+    // `aida_memory_flags` is a third satellite of the memory tables (alongside
+    // the evidence ledger the previous test covers) — it has no group_id and no
+    // FK at all, so nothing but an explicit clear, run before the memory row it
+    // points at is deleted, stops a flag outliving the belief it doubts.
+    const unselected = await newGroup("flag-drop");
+    const included = await newGroup("flag-keep");
+    await includeGroup(included);
+    const memoryIdFor: Record<number, number> = {};
+    for (const g of [unselected, included]) {
+      const m = await newMessage(g);
+      const memory = await createMemory(admin, {
+        memoryType: "episodic",
+        groupId: g,
+        content: `אירוע ${g}`,
+        evidence: [{ messageId: m, stance: "supports" }],
+      });
+      expect(memory, `expected a memory to be written for group ${g}`).not.toBeNull();
+      await flagMemory(admin, { memoryType: "episodic", memoryId: memory!.id, reason: "doubt" });
+      memoryIdFor[g] = memory!.id;
+    }
+
+    await purgeUnselectedChats(admin);
+
+    expect(await count("aida_memory_flags", "memory_id = $1", [memoryIdFor[unselected]])).toBe(0);
+    expect(await count("aida_memory_flags", "memory_id = $1", [memoryIdFor[included]])).toBe(1);
+  });
+
   it("with olderThanDays, spares unselected chats that had recent activity", async () => {
     const dormant = await newGroup("dormant");
     const active = await newGroup("active");
@@ -219,6 +248,12 @@ describe("purgeUnselectedChats", () => {
   });
 });
 
+// NOTE: `aida_memory_flags` carries no `group_id` column at all — it is keyed
+// polymorphically on `(memory_type, memory_id)` — so this introspection-based
+// guard cannot see it and cannot be made to. It is not exempt from the purge:
+// the "purges the flags on a purged chat's memories" test above is its actual
+// safety net, the same way the aida_messages/summary_group_marks/aida_*_memories
+// tests above it pin an execution the classification lists alone couldn't prove.
 describe("purgeUnselectedChats schema coverage", () => {
   it("classifies every group_id-bearing table as either purged or deliberately kept", async () => {
     const { rows } = await admin.query<{ table_name: string }>(
@@ -258,12 +293,35 @@ describe("deleteAllData", () => {
     expect(await count("messages", "true", [])).toBe(0);
     expect(await count("imports", "true", [])).toBe(0);
   });
+
+  it("wipes memory flags, which carry no FK for the groups cascade to catch", async () => {
+    const g = await newGroup("wipe-flag");
+    const m = await newMessage(g);
+    const memory = await createMemory(admin, {
+      memoryType: "episodic",
+      groupId: g,
+      content: "אירוע",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    expect(memory).not.toBeNull();
+    await flagMemory(admin, { memoryType: "episodic", memoryId: memory!.id, reason: "doubt" });
+
+    await deleteAllData(admin);
+
+    expect(await count("aida_memory_flags", "true", [])).toBe(0);
+  });
 });
 
 /**
  * Schema guard — a wipe that misses a scoped table silently leaves data behind. Rather
  * than trust the hand-maintained list, assert it against the LIVE schema so a new
  * `tenant_id` table can't ship without being wiped (or explicitly excused).
+ *
+ * NOTE: `aida_memory_flags` carries no `tenant_id` column either, so it is just as
+ * invisible to this guard as it is to the group_id one above — same reason, same
+ * fix. `deleteAllData`'s explicit `DELETE FROM aida_memory_flags` and the "wipes
+ * memory flags" test above are what actually keep it honest; this introspection
+ * can't be extended to reach a column-less table.
  */
 describe("SCOPED_TABLES_DELETE_ORDER schema coverage", () => {
   it("covers every table that carries a tenant_id column (minus explicit exclusions)", async () => {

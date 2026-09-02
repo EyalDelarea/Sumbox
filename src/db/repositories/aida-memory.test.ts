@@ -5,10 +5,13 @@ import { createTestDatabase } from "../../test/db.js";
 import type { EvidenceStance, MemoryWriteResult } from "./aida-memory.js";
 import {
   canonicalSubjectJid,
+  clearMemoryFlag,
   correctMemory,
   createMemory,
+  flagMemory,
   listLiveMemories,
   listMemoriesForReview,
+  listMemoryFlags,
   memoryContentHash,
   revokeMemory,
   supersedeMemory,
@@ -984,6 +987,170 @@ describe("aida-memory", () => {
     expect(semantic.map((r) => r.content)).toEqual(["תכונה"]);
   });
 
+  // ── Flags ─────────────────────────────────────────────────────────────────
+
+  it("flags a belief, and re-flagging overwrites the reason rather than duplicating", async () => {
+    const g = await newGroup("flag-basic");
+    const belief = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "ספק",
+      evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+    });
+
+    await flagMemory(pool, {
+      memoryType: "episodic",
+      memoryId: belief.id,
+      reason: "אין תמיכה בהודעה המצוטטת",
+    });
+    const first = await listMemoryFlags(pool, { groupId: g });
+    expect(first).toHaveLength(1);
+    expect(first[0]?.reason).toBe("אין תמיכה בהודעה המצוטטת");
+    const firstFlaggedAt = first[0]?.flaggedAt;
+
+    // Re-raising the same doubt is not new information — it's still one row, with
+    // the newest reason and timestamp.
+    await flagMemory(pool, {
+      memoryType: "episodic",
+      memoryId: belief.id,
+      reason: "עדיין אין תמיכה, נבדק שוב",
+    });
+    const second = await listMemoryFlags(pool, { groupId: g });
+    expect(second).toHaveLength(1);
+    expect(second[0]?.reason).toBe("עדיין אין תמיכה, נבדק שוב");
+    expect(second[0]?.flaggedAt.getTime()).toBeGreaterThanOrEqual(firstFlaggedAt?.getTime() ?? 0);
+  });
+
+  it("refuses a flag with no reason", async () => {
+    const g = await newGroup("flag-empty-reason");
+    const belief = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "משהו",
+      evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+    });
+    await expect(
+      flagMemory(pool, { memoryType: "episodic", memoryId: belief.id, reason: "   " }),
+    ).rejects.toThrow(/must say why/);
+  });
+
+  it("clears a flag, and clearing an absent one is a no-op", async () => {
+    const g = await newGroup("flag-clear");
+    const belief = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "יתבטל",
+      evidence: [{ messageId: await newMessage(g), stance: "supports" }],
+    });
+    await flagMemory(pool, { memoryType: "episodic", memoryId: belief.id, reason: "בדיקה" });
+
+    const removed = await clearMemoryFlag(pool, { memoryType: "episodic", memoryId: belief.id });
+    expect(removed).toBe(1);
+    expect(await listMemoryFlags(pool, { groupId: g })).toEqual([]);
+
+    const removedAgain = await clearMemoryFlag(pool, {
+      memoryType: "episodic",
+      memoryId: belief.id,
+    });
+    expect(removedAgain).toBe(0);
+  });
+
+  it("carries the flag onto the belief's row in the review list, null when unflagged", async () => {
+    const g = await newGroup("flag-review");
+    const m = await newMessage(g);
+    const flagged = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "מסומן",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    const clean = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "לא מסומן",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    await flagMemory(pool, {
+      memoryType: "episodic",
+      memoryId: flagged.id,
+      reason: "לא נתמך בציטוט",
+    });
+
+    const rows = (await listMemoriesForReview(pool, { groupId: g })).rows;
+    const flaggedRow = rows.find((r) => r.id === flagged.id);
+    const cleanRow = rows.find((r) => r.id === clean.id);
+    expect(flaggedRow?.flagReason).toBe("לא נתמך בציטוט");
+    expect(flaggedRow?.flaggedAt).not.toBeNull();
+    expect(cleanRow?.flagReason).toBeNull();
+    expect(cleanRow?.flaggedAt).toBeNull();
+  });
+
+  it("a revoked memory's flag does not resurface it in any live read", async () => {
+    const g = await newGroup("flag-revoked");
+    const m = await newMessage(g);
+    const belief = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "יבוטל עם דגל פתוח",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    await flagMemory(pool, { memoryType: "episodic", memoryId: belief.id, reason: "חשוד" });
+    await revokeMemory(pool, { memoryType: "episodic", groupId: g, memoryId: belief.id });
+
+    // listLiveMemories already excludes revoked rows — a flag on one must not
+    // change that.
+    expect((await listLiveMemories(pool, { groupId: g })).map((r) => r.id)).not.toContain(
+      belief.id,
+    );
+    // The default review read (withdrawal hidden) also stays clear of it.
+    expect((await listMemoriesForReview(pool, { groupId: g })).rows.map((r) => r.id)).not.toContain(
+      belief.id,
+    );
+    // listMemoryFlags itself is scoped to live beliefs, per its own join predicate —
+    // a flag on a since-revoked belief is no longer an open question.
+    expect((await listMemoryFlags(pool, { groupId: g })).map((f) => f.memoryId)).not.toContain(
+      belief.id,
+    );
+    // It's still visible, flag and all, when withdrawal is explicitly asked for —
+    // the record of the doubt outlives the belief it was raised against.
+    const withWithdrawn = (
+      await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true })
+    ).rows;
+    expect(withWithdrawn.find((r) => r.id === belief.id)?.flagReason).toBe("חשוד");
+  });
+
+  it("keeps a flag on the belief it was raised against, across the four id spaces", async () => {
+    // The four memory tables have four independent sequences, so the same NUMBER
+    // is a real id in another space too — the whole reason the flag key is
+    // (memory_type, memory_id) rather than just memory_id.
+    const g = await newGroup("flag-cross-type");
+    const m = await newMessage(g);
+    const semantic = await write({
+      memoryType: "semantic",
+      groupId: g,
+      subjectJid: "972500000092@s.whatsapp.net",
+      content: "אמונה סמנטית",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    // Flag an episodic row carrying the SAME id number, in a different table.
+    await flagMemory(pool, {
+      memoryType: "episodic",
+      memoryId: semantic.id,
+      reason: "דגל של אמונה אחרת",
+    });
+
+    const row = (await listMemoriesForReview(pool, { groupId: g })).rows.find(
+      (r) => r.memoryType === "semantic" && r.id === semantic.id,
+    );
+    expect(row?.content, "the row is really here").toBe("אמונה סמנטית");
+    expect(row?.flagReason, "another kind's flag must not bleed across").toBeNull();
+    expect(row?.flaggedAt).toBeNull();
+    // Same predicate, same risk, in the flag list itself.
+    expect((await listMemoryFlags(pool, { groupId: g })).map((f) => f.memoryId)).not.toContain(
+      semantic.id,
+    );
+  });
+
   // ── Correcting a belief ──────────────────────────────────────────────────
 
   it("replaces a belief, keeps the original intact, and records why", async () => {
@@ -1017,6 +1184,48 @@ describe("aida-memory", () => {
     expect(kept?.content, "the original is never rewritten").toBe("גיא גר בתל אביב");
     expect(kept?.supersededById).toBe(live[0]?.id);
     expect(kept?.correctionNote, "and it stays marked as hers").toBeNull();
+  });
+
+  it("carries the predecessor's content on a corrected row, and null on an untouched one", async () => {
+    const g = await newGroup("correct-previous-content");
+    const m = await newMessage(g);
+    const corrected = await write({
+      memoryType: "semantic",
+      groupId: g,
+      subjectJid: "972500000092@s.whatsapp.net",
+      content: "דנה גרה בירושלים",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+    const untouched = await write({
+      memoryType: "episodic",
+      groupId: g,
+      content: "לא תוקן",
+      evidence: [{ messageId: m, stance: "supports" }],
+    });
+
+    expect(
+      (
+        await correctMemory(pool, {
+          memoryType: "semantic",
+          groupId: g,
+          memoryId: corrected.id,
+          content: "דנה עברה לתל אביב",
+          note: "היא עברה דירה",
+        })
+      ).ok,
+    ).toBe(true);
+
+    const rows = (await listMemoriesForReview(pool, { groupId: g })).rows;
+    const replacement = rows.find((r) => r.content === "דנה עברה לתל אביב");
+    expect(replacement?.previousContent, "the belief it replaced").toBe("דנה גרה בירושלים");
+    const untouchedRow = rows.find((r) => r.id === untouched.id);
+    expect(untouchedRow?.previousContent, "nothing superseded this one").toBeNull();
+
+    // The predecessor itself carries no previousContent of its own — it is the
+    // head of its own chain, not a replacement for anything.
+    const all = (await listMemoriesForReview(pool, { groupId: g, includeWithdrawn: true })).rows;
+    const original = all.find((r) => r.id === corrected.id);
+    expect(original?.previousContent, "the original replaced nothing").toBeNull();
   });
 
   it("gives the correction the original's citations, since it has none of its own", async () => {

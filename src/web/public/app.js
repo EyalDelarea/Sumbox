@@ -14,7 +14,7 @@
  * Teardown: EventSource is closed when leaving a streaming view
  */
 
-import { correctMemory, createScopeCategory, getGroups, getMemories, getMessages, getScopeCategories, getScopes, getStatus, getSummaries, getSummaryCommands, putScopes, rateSummary, revokeMemory, setSummaryTrigger, summarizeStream, toggleSummaryCommand } from "./lib/api.js";
+import { correctMemory, createScopeCategory, getGroups, getMemories, getMessages, getScopeCategories, getScopes, getStatus, getSummaries, getSummaryCommands, putScopes, rateSummary, revokeMemory, setSummaryTrigger, summarizeStream, toggleSummaryCommand, unflagMemory } from "./lib/api.js";
 import { activeCount, filterScopes, groupByCategory, partitionRemoved, sectionCount } from "./lib/scopes.js";
 import { formatAgo, presetToSince, validateRangeInput } from "./lib/time.js";
 import { renderInline, renderMarkdown, toWhatsAppText } from "./lib/markdown.js";
@@ -2160,6 +2160,7 @@ function subjectBadges(r) {
 function buildMemoryRow(r) {
   const withdrawn = r.revoked || r.superseded;
   const state = r.revoked ? "בוטל" : r.superseded ? "הוחלף" : "";
+  const flagged = r.flagReason !== null;
   // The contradicting count shows in BOTH branches. A belief with no support and
   // five messages against it is the most reviewable row on the screen, and
   // reporting only "nothing supports this" would hide exactly that.
@@ -2176,10 +2177,29 @@ function buildMemoryRow(r) {
           <span class="badge">${escHtml(r.groupName)}</span>
           <span class="badge accent">${MEMORY_KIND_LABEL[r.memoryType] ?? escHtml(r.memoryType)}</span>
           ${r.byHuman ? '<span class="badge">תוקן על ידך</span>' : ""}
+          ${
+            // A repair lands through the exact same supersede a human correction
+            // does — same shape, different author. Its own badge (never "תוקן על
+            // ידך") is the one thing standing between this row and the bug the
+            // feature exists to fix: a model repair rendered as a human's.
+            r.repairReason !== null ? '<span class="badge">תיקון אוטומטי של @אידה</span>' : ""
+          }
+          ${flagged ? '<span class="badge warn">סומן לבדיקה</span>' : ""}
           ${state ? `<span class="badge warn">${state}</span>` : ""}
         </div>
         <div class="cmd-row__name">${escHtml(r.content)}</div>
-        ${r.correctionNote ? `<div class="cmd-row__status">הסיבה שרשמת: ${escHtml(r.correctionNote)}</div>` : ""}
+        ${r.correctionNote ? `<div class="cmd-row__status">הסיבה שרשמת: <bdi>${escHtml(r.correctionNote)}</bdi></div>` : ""}
+        ${
+          // Only on a repair card, never a human correction: a human already
+          // reads their own "before" in their own memory of typing it, and this
+          // schema has no room to distinguish "your reason" from "your before"
+          // as two separate lines without them reading as one thing.
+          r.repairReason !== null && r.previousContent !== null
+            ? `<div class="cmd-row__status">היה: <bdi>${escHtml(r.previousContent)}</bdi></div>`
+            : ""
+        }
+        ${r.repairReason !== null ? `<div class="cmd-row__status">כי המקור אומר: <bdi>${escHtml(r.repairReason)}</bdi></div>` : ""}
+        ${flagged ? `<div class="cmd-row__status"><bdi>${escHtml(r.flagReason)}</bdi></div>` : ""}
         <div class="mem-row__acts">
           <button class="mem-link" data-act="src" type="button"${r.sourceMessageId ? "" : " disabled"}>${evidence}</button>
           ${
@@ -2188,6 +2208,12 @@ function buildMemoryRow(r) {
               : `<span class="mem-row__sep" aria-hidden="true">·</span>
                  <button class="mem-link" data-act="correct" type="button">תקן</button>
                  <button class="mem-link mem-link--warn" data-act="revoke" type="button">בטל</button>`
+          }
+          ${
+            flagged
+              ? `<span class="mem-row__sep" aria-hidden="true">·</span>
+                 <button class="mem-link" data-act="unflag" type="button">בטל סימון</button>`
+              : ""
           }
         </div>
       </div>
@@ -2220,6 +2246,7 @@ function wireMemory() {
       if (el.dataset.act === "src") return openMemorySource(data);
       if (el.dataset.act === "correct") return void promptCorrection(ref, data);
       if (el.dataset.act === "revoke") return void confirmRevoke(ref, data);
+      if (el.dataset.act === "unflag") return void dismissFlag(ref);
     });
   }
 }
@@ -2241,6 +2268,9 @@ const CORRECTION_REFUSALS = {
   no_evidence: "כל ההודעות שהזיכרון נשען עליהן נמחקו — אפשר רק לבטל אותו.",
   not_found: "הזיכרון לא נמצא בצ׳אט הזה.",
   supersede_failed: "התיקון לא נשמר. שום דבר לא השתנה.",
+  // The literal prefix @אידה's own repair pass writes its notes with — reserved
+  // so a repair can never be mistaken for a human's correction.
+  reserved_prefix: "אי אפשר להתחיל את הסיבה במילה השמורה הזו. נסחו אותה אחרת.",
 };
 
 async function promptCorrection(ref, row) {
@@ -2285,6 +2315,27 @@ async function confirmRevoke(ref, row) {
         : err.message === "not_found"
           ? "הזיכרון לא נמצא בצ׳אט הזה."
           : `הביטול נכשל: ${err.message}. שום דבר לא השתנה.`;
+  }
+  await loadMemories();
+}
+
+/**
+ * Dismiss an open repair-pass doubt — a quiet action, no confirm dialog, unlike
+ * revoke: it answers a question, it does not touch the belief the question was
+ * about. The card refreshes on success the same way every other action here
+ * does, so the flag badge simply stops appearing.
+ */
+async function dismissFlag(ref) {
+  try {
+    await unflagMemory(ref);
+    memoryState.notice = "";
+  } catch (err) {
+    memoryState.notice =
+      err.message === "not_flagged"
+        ? "הסימון כבר טופל."
+        : err.message === "not_found"
+          ? "הזיכרון לא נמצא בצ׳אט הזה."
+          : `ביטול הסימון נכשל: ${err.message}. שום דבר לא השתנה.`;
   }
   await loadMemories();
 }

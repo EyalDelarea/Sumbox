@@ -1,5 +1,7 @@
 import type http from "node:http";
+import { REPAIR_NOTE_PREFIX } from "../../ask/memory-repair-run.js";
 import {
+  clearMemoryFlag,
   correctMemory,
   listMemoriesForReview,
   type MemoryType,
@@ -16,21 +18,57 @@ import { readJsonBody } from "./scopes.js";
  * GET    /api/memories                — everything on file, filterable
  * POST   /api/memories/correct        — replace a belief with your wording, and say why
  * POST   /api/memories/revoke         — withdraw one
+ * POST   /api/memories/unflag         — dismiss an open repair-pass doubt
  *
  * Post-hoc cleanup is the entire safety model for memory: no filter prevents a
  * bad belief being written, and what was accepted instead was a place a human
- * could find one and take it back. These three endpoints are that place.
+ * could find one and take it back. These four endpoints are that place.
  *
- * NEITHER WRITE DELETES ANYTHING. A correction appends and marks; a revoke
- * stamps. The words this returns to the UI matter for the same reason — a button
- * labelled "delete" over a row that survives would be the interface lying about
- * its own behaviour.
+ * NO WRITE DELETES A BELIEF. A correction appends and marks; a revoke stamps;
+ * unflag only closes the open question, never the belief itself. The words this
+ * returns to the UI matter for the same reason — a button labelled "delete" over
+ * a row that survives would be the interface lying about its own behaviour.
  *
- * Every write names the group as well as the memory. The repository requires it
- * so a withdrawal cannot walk out of the chat it belongs to, and the id alone is
- * not enough: the four memory tables have four independent sequences, so a low id
- * exists in all of them.
+ * Every belief write names the group as well as the memory. The repository
+ * requires it so a withdrawal cannot walk out of the chat it belongs to, and the
+ * id alone is not enough: the four memory tables have four independent
+ * sequences, so a low id exists in all of them. `unflag` is scoped the same way
+ * even though `aida_memory_flags` itself carries no group — this handler checks
+ * the belief lives in the named chat before touching its flag, so the same
+ * cross-chat mistake `revoke` guards against cannot happen here either.
  */
+
+/**
+ * The three things a corrected row can be, told apart by its `correction_note`.
+ *
+ * `null` means the extractor's own conclusion, untouched. A note present but
+ * starting with {@link REPAIR_NOTE_PREFIX} is the blind repair pass rewriting
+ * its own earlier belief — NOT a human decision, even though it lands through
+ * the exact same `correctMemory` supersede a person's correction does. Anything
+ * else is a human's reason, verbatim.
+ *
+ * Getting this wrong is not cosmetic: before this split, every repair note
+ * rendered on the review screen as הסיבה שרשמת ("the reason you wrote") — five
+ * of the model's own corrections were, and still are on disk, mislabelled as a
+ * person's.
+ */
+function provenanceOf(correctionNote: string | null): {
+  byHuman: boolean;
+  correctionNote: string | null;
+  repairReason: string | null;
+} {
+  if (correctionNote === null) {
+    return { byHuman: false, correctionNote: null, repairReason: null };
+  }
+  if (correctionNote.startsWith(REPAIR_NOTE_PREFIX)) {
+    return {
+      byHuman: false,
+      correctionNote: null,
+      repairReason: correctionNote.slice(REPAIR_NOTE_PREFIX.length).trim(),
+    };
+  }
+  return { byHuman: true, correctionNote, repairReason: null };
+}
 
 const MEMORY_TABLE: Record<MemoryType, string> = {
   episodic: "aida_episodic_memories",
@@ -77,6 +115,9 @@ export async function handleMemories(
   }
   if (req.method === "POST" && url.pathname === "/api/memories/revoke") {
     return await postRevoke(req, res, deps);
+  }
+  if (req.method === "POST" && url.pathname === "/api/memories/unflag") {
+    return await postUnflag(req, res, deps);
   }
   json(res, 405, { error: "Method not allowed." });
 }
@@ -137,14 +178,19 @@ async function getMemories(url: URL, res: http.ServerResponse, deps: ServerDeps)
         observedAt: r.observedAt.toISOString(),
         supportingEvidence: r.supportingEvidence,
         contradictingEvidence: r.contradictingEvidence,
-        // The note's presence is what marks a row as human-written; the UI needs
-        // both the flag and the text.
-        correctionNote: r.correctionNote,
-        byHuman: r.correctionNote !== null,
+        // Three-way provenance on the note, never just "present or not" — see
+        // `provenanceOf`. `byHuman` and `repairReason` are mutually exclusive.
+        ...provenanceOf(r.correctionNote),
+        // What this belief said before a correction replaced it. Null when
+        // nothing has superseded it.
+        previousContent: r.previousContent,
         revoked: r.revokedAt !== null,
         superseded: r.supersededById !== null,
         // So the UI can open the conversation on the message in one tap.
         sourceMessageId: r.firstSourceMessageId,
+        // Null when the repair pass has no open doubt about this belief.
+        flagReason: r.flagReason,
+        flaggedAt: r.flaggedAt === null ? null : r.flaggedAt.toISOString(),
       })),
     });
   } catch (err) {
@@ -175,6 +221,15 @@ async function postCorrect(
   // a row as human-written, so a UI that forgot the field would silently produce
   // corrections indistinguishable from her own conclusions.
   if (note === "") return json(res, 400, { error: "A correction must say why." });
+  // `provenanceOf` tells a repair from a human by this literal prefix alone, so a
+  // person whose own reason happens to start with it would otherwise be stored
+  // indistinguishably from — and rendered as — the model's own repair. Refusing
+  // it here, on the web correction endpoint (the only place a human-authored
+  // note reaches `correctMemory`), is what makes the prefix unambiguous by
+  // construction rather than by convention.
+  if (note.startsWith(REPAIR_NOTE_PREFIX)) {
+    return json(res, 400, { error: "reserved_prefix" });
+  }
 
   try {
     const outcome = await correctMemory(deps.pool, {
@@ -229,7 +284,40 @@ async function postRevoke(
   }
 }
 
-/** Does this belief exist in this chat at all? Only used to explain a no-op revoke. */
+/** POST /api/memories/unflag — { memoryType, groupId, memoryId } */
+async function postUnflag(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  deps: ServerDeps,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  if (body === null) return json(res, 400, { error: "Malformed body." });
+
+  const memoryType = parseMemoryType(body.memoryType);
+  const groupId = parsePositiveInt(body.groupId);
+  const memoryId = parsePositiveInt(body.memoryId);
+  if (memoryType === null || groupId === null || memoryId === null) {
+    return json(res, 400, { error: "Malformed memory reference." });
+  }
+
+  try {
+    // `aida_memory_flags` has no group of its own — the belief it points at is
+    // the only thing that knows which chat it belongs to (see the migration),
+    // so this check is what stops an unflag aimed at the right id in the wrong
+    // chat, exactly as `revokeMemory`'s own WHERE clause does for a revoke.
+    const exists = await memoryExists(deps.pool, memoryType, groupId, memoryId);
+    if (!exists) return json(res, 404, { error: "not_found" });
+
+    const cleared = await clearMemoryFlag(deps.pool, { memoryType, memoryId });
+    if (cleared === 0) return json(res, 404, { error: "not_flagged" });
+    json(res, 200, { cleared });
+  } catch (err) {
+    getLogger("web").error({ err, memoryType, groupId, memoryId }, "memories: unflag failed");
+    json(res, 500, { error: "Failed to dismiss flag." });
+  }
+}
+
+/** Does this belief exist in this chat at all? Used to explain a no-op revoke or unflag. */
 async function memoryExists(
   pool: ServerDeps["pool"],
   memoryType: MemoryType,

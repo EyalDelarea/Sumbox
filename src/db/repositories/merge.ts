@@ -250,18 +250,23 @@ export async function mergeGroups(
     dupId,
   ]);
 
-  // 3b. Drop the dup group's @Aida memories and their evidence, EXPLICITLY.
+  // 3b. Drop the dup group's @Aida memories, their evidence, and their open
+  //     flags, EXPLICITLY.
   //
   //     The group delete below cascades the memory rows away on its own. What it
-  //     cannot do is reach their evidence: `aida_memory_evidence` is keyed on
-  //     `(memory_type, memory_id)` with no foreign key — the schema's one
-  //     deliberate polymorphic reference — and it cascades from `messages`, whose
-  //     rows this merge MOVED rather than deleted (step 1 preserves message ids).
-  //     So every evidence row citing a moved message would survive its memory and
-  //     become a dangling reference no constraint can catch. The evidence
-  //     migration says a dangling `memory_id` cannot arise from ordinary use; this
-  //     is what makes that true, because merging duplicate-named chats IS ordinary
-  //     use (CLAUDE.md names it as the sanctioned answer to a duplicate name).
+  //     cannot do is reach either satellite table keyed on `(memory_type,
+  //     memory_id)` with no foreign key — the schema's deliberate polymorphic
+  //     references: `aida_memory_evidence` cascades from `messages`, whose rows
+  //     this merge MOVED rather than deleted (step 1 preserves message ids), and
+  //     `aida_memory_flags` has no cascade path from anything at all (see that
+  //     migration's doc comment — every deleter of memory rows must clear
+  //     matching flags first, and this is one of the three). So an evidence row
+  //     citing a moved message, or a flag against a dropped belief, would survive
+  //     its memory and become a dangling reference no constraint can catch. The
+  //     evidence migration says a dangling `memory_id` cannot arise from ordinary
+  //     use; this is what makes that true, because merging duplicate-named chats
+  //     IS ordinary use (CLAUDE.md names it as the sanctioned answer to a
+  //     duplicate name).
   //
   //     The memories themselves are DISCARDED rather than carried over. Moving them
   //     would mean resolving collisions against the survivor's own beliefs on a
@@ -276,6 +281,12 @@ export async function mergeGroups(
       `DELETE FROM aida_memory_evidence e
         USING ${table} m
         WHERE m.group_id = $1 AND e.memory_type = $2 AND e.memory_id = m.id`,
+      [dupId, MEMORY_TYPE_FOR[table]],
+    );
+    await client.query(
+      `DELETE FROM aida_memory_flags f
+        USING ${table} m
+        WHERE m.group_id = $1 AND f.memory_type = $2 AND f.memory_id = m.id`,
       [dupId, MEMORY_TYPE_FOR[table]],
     );
     const dropped = await client.query(`DELETE FROM ${table} WHERE group_id = $1`, [dupId]);

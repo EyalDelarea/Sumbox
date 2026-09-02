@@ -678,6 +678,86 @@ export async function listLiveMemories(
   }));
 }
 
+// ── Flags ─────────────────────────────────────────────────────────────────
+
+/** A belief the repair pass could not support, waiting on a human answer. */
+export type MemoryFlag = {
+  memoryType: MemoryType;
+  memoryId: number;
+  reason: string;
+  flaggedAt: Date;
+};
+
+/**
+ * Raise a doubt about a belief without acting on it.
+ *
+ * IDEMPOTENT BY BELIEF. A later pass re-raising the same doubt is not new
+ * information — it overwrites the reason and the timestamp so the list stays one
+ * row per open question, which is the only shape an operator will actually read.
+ */
+export async function flagMemory(
+  client: pg.Pool | pg.PoolClient,
+  input: { memoryType: MemoryType; memoryId: number; reason: string },
+): Promise<void> {
+  const reason = input.reason.trim();
+  if (reason.length === 0) throw new Error("flagMemory: a flag must say why");
+  await client.query(
+    `INSERT INTO aida_memory_flags (memory_type, memory_id, reason)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (memory_type, memory_id)
+     DO UPDATE SET reason = EXCLUDED.reason, flagged_at = now()`,
+    [input.memoryType, input.memoryId, reason],
+  );
+}
+
+/** Answer a flag — the belief was revoked, or it stands. Either way it closes. */
+export async function clearMemoryFlag(
+  client: pg.Pool | pg.PoolClient,
+  input: { memoryType: MemoryType; memoryId: number },
+): Promise<number> {
+  const { rowCount } = await client.query(
+    "DELETE FROM aida_memory_flags WHERE memory_type = $1 AND memory_id = $2",
+    [input.memoryType, input.memoryId],
+  );
+  return rowCount ?? 0;
+}
+
+/**
+ * Every open flag in one group, oldest doubt first.
+ *
+ * SCOPED BY JOINING BACK TO THE BELIEF, because the flag table carries no group
+ * of its own — the belief it points at is the only thing that knows which chat it
+ * belongs to, and a flag list that crossed chats would be the same boundary
+ * failure `revokeMemory` re-asserts.
+ */
+export async function listMemoryFlags(
+  client: pg.Pool | pg.PoolClient,
+  input: { groupId: number },
+): Promise<MemoryFlag[]> {
+  const branches = (Object.keys(TABLE_FOR) as MemoryType[]).map(
+    (memoryType) => `
+      SELECT f.memory_type, f.memory_id, f.reason, f.flagged_at
+        FROM aida_memory_flags f
+        JOIN ${TABLE_FOR[memoryType]} m ON m.id = f.memory_id
+       WHERE f.memory_type = '${memoryType}' AND m.group_id = $1
+         AND m.revoked_at IS NULL AND m.superseded_by_id IS NULL`,
+  );
+  const { rows } = await client.query<{
+    memory_type: MemoryType;
+    memory_id: string;
+    reason: string;
+    flagged_at: Date;
+  }>(`${branches.join(" UNION ALL ")} ORDER BY flagged_at, memory_type, memory_id`, [
+    input.groupId,
+  ]);
+  return rows.map((r) => ({
+    memoryType: r.memory_type,
+    memoryId: Number(r.memory_id),
+    reason: r.reason,
+    flaggedAt: r.flagged_at,
+  }));
+}
+
 // ── The review surface ────────────────────────────────────────────────────
 
 /** A memory as the review screen shows it: across groups, withdrawal visible. */
@@ -699,6 +779,29 @@ export type MemoryForReview = StoredMemory & {
    * whole design exists to prevent, so the check must not be a second request.
    */
   firstSourceMessageId: number | null;
+  /**
+   * Why the repair pass could not support this belief, when it has an open flag.
+   *
+   * Null for the common case — no doubt on file. Carried here rather than making
+   * the review screen issue a second query per row, and rather than making it
+   * cross-reference {@link listMemoryFlags} itself: a flag is only ever useful
+   * shown beside the belief it doubts.
+   */
+  flagReason: string | null;
+  /** When the open flag was raised, or last re-raised. Null alongside `flagReason`. */
+  flaggedAt: Date | null;
+  /**
+   * What this belief said before a correction replaced it. Null when nothing
+   * superseded it, which is the common case.
+   *
+   * Read off the predecessor row — the one whose `superseded_by_id` points here —
+   * rather than stored on this row, because the writer only ever points OLD at
+   * NEW (see the module header). One predecessor is all a row can ever have: the
+   * only writer that sets `superseded_by_id` is {@link correctMemory}, and it
+   * always points at a row it just created in the same call, so two rows can
+   * never converge onto the same successor.
+   */
+  previousContent: string | null;
 };
 
 /** Rows plus whether the cap hid any. */
@@ -762,7 +865,9 @@ export async function listMemoriesForReview(
       SELECT m.id, '${memoryType}'::text AS memory_type, m.content, ${subjects} AS subject_jids,
              ${facet} AS facet, m.observed_at, m.group_id, g.name AS group_name,
              m.correction_note, m.superseded_by_id, m.revoked_at,
-             e.supporting, e.contradicting, e.first_source
+             e.supporting, e.contradicting, e.first_source,
+             f.reason AS flag_reason, f.flagged_at AS flagged_at,
+             prev.content AS previous_content
         FROM ${table} m
         JOIN groups g ON g.id = m.group_id
         JOIN LATERAL (
@@ -772,6 +877,9 @@ export async function listMemoriesForReview(
             FROM aida_memory_evidence
            WHERE memory_type = '${memoryType}' AND memory_id = m.id
         ) e ON true
+        LEFT JOIN aida_memory_flags f
+          ON f.memory_type = '${memoryType}' AND f.memory_id = m.id
+        LEFT JOIN ${table} prev ON prev.superseded_by_id = m.id
        WHERE ($1::bigint IS NULL OR m.group_id = $1) ${withdrawal}`;
   });
 
@@ -790,6 +898,9 @@ export async function listMemoriesForReview(
     supporting: string;
     contradicting: string;
     first_source: string | null;
+    flag_reason: string | null;
+    flagged_at: Date | null;
+    previous_content: string | null;
   }>(
     `${branches.join("\n      UNION ALL")}
      ORDER BY observed_at DESC, memory_type ASC, id DESC
@@ -818,6 +929,9 @@ export async function listMemoriesForReview(
       revokedAt: r.revoked_at,
       firstSourceMessageId:
         r.first_source === null || r.first_source === undefined ? null : Number(r.first_source),
+      flagReason: r.flag_reason,
+      flaggedAt: r.flagged_at,
+      previousContent: r.previous_content,
     })),
   };
 }

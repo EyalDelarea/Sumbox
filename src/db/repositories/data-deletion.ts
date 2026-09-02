@@ -114,6 +114,15 @@ export async function deleteAllData(client: pg.Pool | pg.PoolClient): Promise<De
   for (const table of SCOPED_TABLES_DELETE_ORDER) {
     await client.query(`DELETE FROM ${table}`);
   }
+  // aida_memory_flags carries neither `tenant_id` nor `group_id` — it is keyed
+  // polymorphically on `(memory_type, memory_id)` into the four aida_*_memories
+  // tables above, with NO foreign key at all (see that migration's doc comment).
+  // The `groups` delete cascades those four tables away, but nothing cascades
+  // into a table with no FK pointing at it, so a flag would otherwise outlive
+  // every belief it was ever raised against. Unconditional is correct here — a
+  // full wipe has no "keep this chat's flags" case the way a merge or an
+  // unselected-chat purge does.
+  await client.query(`DELETE FROM aida_memory_flags`);
   return { mediaPaths };
 }
 
@@ -255,12 +264,24 @@ export async function purgeUnselectedChats(
   // group row survives — and the same fix, with a behavioral test pinning the list
   // to actual execution rather than trusting the classification alone. The evidence
   // ledger has no group_id and cascades from `messages`, deleted just above.
-  for (const table of [
-    "aida_episodic_memories",
-    "aida_semantic_memories",
-    "aida_relational_memories",
-    "aida_self_state_memories",
-  ]) {
+  //
+  // `aida_memory_flags` is a THIRD satellite of these tables (alongside the
+  // evidence ledger) and has to go first, per belief, before its memory row is
+  // deleted below — it carries no group_id of its own (nor any FK at all; see
+  // that migration's doc comment) and would otherwise outlive the purged chat's
+  // beliefs with no cascade to catch it.
+  for (const [table, memoryType] of [
+    ["aida_episodic_memories", "episodic"],
+    ["aida_semantic_memories", "semantic"],
+    ["aida_relational_memories", "relational"],
+    ["aida_self_state_memories", "self_state"],
+  ] as const) {
+    await client.query(
+      `DELETE FROM aida_memory_flags f
+        USING ${table} m
+        WHERE m.group_id = ANY($1::bigint[]) AND f.memory_type = $2 AND f.memory_id = m.id`,
+      [groupIds, memoryType],
+    );
     await client.query(`DELETE FROM ${table} WHERE group_id = ANY($1::bigint[])`, ids);
   }
   await client.query(`DELETE FROM summaries WHERE group_id = ANY($1::bigint[])`, ids);
