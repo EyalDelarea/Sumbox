@@ -4491,7 +4491,7 @@ h2.dg-sec{ margin:14px 2px 0; }
 /* Who the belief is about — the row's primary scan target, so it carries the
    ink weight while the chat and kind badges stay quiet around it. */
 .badge--who { color: var(--ink); border-color: var(--line); background: transparent; }
-.mem-row__acts { display: flex; align-items: center; gap: 10px; margin-block-start: 8px; }
+.mem-row__acts { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-block-start: 8px; }
 .mem-row__sep { color: var(--line); }
 .mem-link {
   background: none; border: 0; padding: 0; cursor: pointer;

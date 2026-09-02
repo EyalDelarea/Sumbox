@@ -267,7 +267,9 @@ export function setSummaryTrigger(trigger) {
  * @returns {Promise<{truncated: boolean, memories: Array<{id: number, memoryType: string,
  *   groupId: number, groupName: string, content: string, facet: string|null, observedAt: string,
  *   supportingEvidence: number, contradictingEvidence: number, correctionNote: string|null,
- *   byHuman: boolean, revoked: boolean, superseded: boolean, sourceMessageId: number|null}>}>}
+ *   byHuman: boolean, repairReason: string|null, previousContent: string|null,
+ *   revoked: boolean, superseded: boolean,
+ *   sourceMessageId: number|null, flagReason: string|null, flaggedAt: string|null}>}>}
  */
 export function getMemories(filter = {}) {
   const q = new URLSearchParams();
@@ -313,6 +315,23 @@ export function revokeMemory({ memoryType, groupId, memoryId }) {
     body: JSON.stringify({ memoryType, groupId, memoryId }),
   }).then(async (r) => {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `revoke ${r.status}`);
+    return r.json();
+  });
+}
+
+/**
+ * Dismiss an open repair-pass doubt. The belief itself is untouched — this only
+ * closes the question, the same way answering a flag does on the server.
+ *
+ * @returns {Promise<{ cleared: number }>}
+ */
+export function unflagMemory({ memoryType, groupId, memoryId }) {
+  return fetch("/api/memories/unflag", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ memoryType, groupId, memoryId }),
+  }).then(async (r) => {
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `unflag ${r.status}`);
     return r.json();
   });
 }
