@@ -1,7 +1,7 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase } from "../../test/db.js";
-import { createMemory } from "./aida-memory.js";
+import { createMemory, flagMemory } from "./aida-memory.js";
 import { upsertGroupByWhatsappId } from "./groups.js";
 import { mergeGroups } from "./merge.js";
 import { upsertParticipant } from "./participants.js";
@@ -133,6 +133,66 @@ describe("mergeGroups", () => {
       `SELECT count(*)::int AS n FROM aida_memory_evidence`,
     );
     expect(Number(orphans[0]?.n), "no evidence row outlives the memory it belongs to").toBe(0);
+  });
+
+  it("clears the dup group's memory flags but leaves the survivor's alone", async () => {
+    // Third satellite of the same trap as the evidence test above:
+    // `aida_memory_flags` has no FK at all — not even one that cascades from
+    // `messages` the way the evidence ledger's does — so nothing but this
+    // explicit clear stops a dangling (memory_type, memory_id) flag surviving an
+    // ordinary merge.
+    const survivorId = await upsertGroupByWhatsappId(pool, {
+      whatsappId: "972500000097-flag@s.whatsapp.net",
+      name: "Flag Survivor",
+      source: "live",
+    });
+    const dupId = await upsertGroupByWhatsappId(pool, {
+      whatsappId: "70390252580997-flag@lid",
+      name: "Flag Dup",
+      source: "live",
+    });
+    const p = await upsertParticipant(pool, "Flag Sender");
+    await insertMsg(survivorId, p, "flag-surv", "EXT-FLAG-SURV");
+    await insertMsg(dupId, p, "flag-dup", "EXT-FLAG-DUP");
+    const { rows: survMsgRows } = await pool.query<{ id: string }>(
+      `SELECT id FROM messages WHERE group_id = $1`,
+      [survivorId],
+    );
+    const { rows: dupMsgRows } = await pool.query<{ id: string }>(
+      `SELECT id FROM messages WHERE group_id = $1`,
+      [dupId],
+    );
+    const survMemory = await createMemory(pool, {
+      memoryType: "episodic",
+      content: "אירוע בצ'אט השורד",
+      groupId: survivorId,
+      evidence: [{ messageId: Number(survMsgRows[0]?.id), stance: "supports" }],
+    });
+    const dupMemory = await createMemory(pool, {
+      memoryType: "episodic",
+      content: "אירוע בצ'אט הכפול",
+      groupId: dupId,
+      evidence: [{ messageId: Number(dupMsgRows[0]?.id), stance: "supports" }],
+    });
+    expect(survMemory, "expected the survivor memory to be written").not.toBeNull();
+    expect(dupMemory, "expected the dup memory to be written").not.toBeNull();
+    await flagMemory(pool, {
+      memoryType: "episodic",
+      memoryId: survMemory!.id,
+      reason: "doubt on survivor",
+    });
+    await flagMemory(pool, {
+      memoryType: "episodic",
+      memoryId: dupMemory!.id,
+      reason: "doubt on dup",
+    });
+
+    await mergeGroups(pool, { survivorId, dupId, name: "Flag Survivor" });
+
+    const { rows: flags } = await pool.query<{ memory_id: string }>(
+      `SELECT memory_id FROM aida_memory_flags WHERE memory_type = 'episodic'`,
+    );
+    expect(flags.map((r) => Number(r.memory_id))).toEqual([survMemory!.id]);
   });
 
   it("rejects merging a group into itself", async () => {
