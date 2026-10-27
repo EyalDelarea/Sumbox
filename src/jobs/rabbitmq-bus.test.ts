@@ -271,6 +271,53 @@ describe("RabbitMqJobBus — integration (testcontainers)", () => {
       await bus.close();
     }
   }, 30_000);
+
+  // ── startup requeue: queueStats + republish ──────────────────────────────
+  // memory.extract is used by no other test here, so its queue starts empty.
+
+  it("republish re-sends an existing job under its own id without recording a new run", async () => {
+    const recorder = new InMemoryJobRunRecorder();
+    const bus = makeBus(recorder);
+    const consumerBus = makeBus(new InMemoryJobRunRecorder());
+
+    try {
+      expect(await bus.queueStats("memory.extract")).toEqual({ ready: 0, consumers: 0 });
+
+      const payload = { groupId: "9", since: "s", until: "u" };
+      await bus.republish({
+        id: "existing-row-id",
+        type: "memory.extract",
+        payload,
+        attempts: 0,
+        maxAttempts: 4,
+      });
+      await waitUntil(async () => (await bus.queueStats("memory.extract")).ready === 1, 5_000);
+
+      // The row already exists — a second 'pending' record (or a fresh id, as
+      // enqueue would mint) is exactly what the startup requeue must not create.
+      expect(recorder.enqueuedJobs).toEqual([]);
+      expect(recorder.statusHistory).toEqual([]);
+
+      const received: Array<{ id: string; attempts: number; maxAttempts: number }> = [];
+      await consumerBus.consume(
+        "memory.extract",
+        async (job) => {
+          received.push({ id: job.id, attempts: job.attempts, maxAttempts: job.maxAttempts });
+          expect(job.payload).toEqual(payload);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(() => received.length === 1, 5_000);
+      expect(received).toEqual([{ id: "existing-row-id", attempts: 1, maxAttempts: 4 }]);
+
+      // A live consumer is visible to a second process — the requeue's guard
+      // against counting another worker's unacked messages as lost.
+      expect((await bus.queueStats("memory.extract")).consumers).toBe(1);
+    } finally {
+      await consumerBus.close();
+      await bus.close();
+    }
+  }, 30_000);
 });
 
 // ── Fix 4: connect-race unit test (fake amqplib, no Testcontainers) ──────────
