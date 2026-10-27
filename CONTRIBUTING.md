@@ -22,7 +22,7 @@ npm run build         # must compile + copy web assets
 npm test              # must pass — Docker must be running (Testcontainers)
 ```
 
-All four are required. Docker must be running for the test suite because tests spin up ephemeral Postgres and RabbitMQ containers via Testcontainers. CI runs the same gate on GitHub-hosted `ubuntu-latest` runners.
+All four are required; `npm run preflight` runs them in order. Docker must be running for the test suite because tests spin up ephemeral Postgres and RabbitMQ containers via Testcontainers. CI runs the same gate on GitHub-hosted `ubuntu-latest` runners.
 
 ## Pull request guidelines
 
@@ -35,8 +35,9 @@ All four are required. Docker must be running for the test suite because tests s
 
 Migrations live in `src/db/migrations/`, named `<number>_<description>.ts`, and run
 in ascending numeric order by `node-pg-migrate`. Their numbers must be **unique** —
-two files with the same number break deploys (the later one sorts before an applied
-migration and `checkOrder` aborts).
+two files with the same number have no defined order between them. (`checkOrder` is
+off — see `src/db/migrate.ts` — so a migration merged after a newer-numbered sibling
+still applies; the duplicate number is the collision that genuinely corrupts order.)
 
 **Always create migrations with `npm run migrate:create -- <name>`.** It prefixes the
 filename with a millisecond timestamp, so parallel branches/agents can't pick the same

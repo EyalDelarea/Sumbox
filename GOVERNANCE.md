@@ -46,7 +46,7 @@ no blind guessing.
 1. **Quoted CI evidence.** Run the gate and paste the *real* output — never
    "should pass." The gate is:
    ```
-   npm run check      # biome check src   (autofix: npm run check --write / npm run format)
+   npm run check      # biome check src   (autofix: npm run check -- --write / npm run format)
    npm run typecheck  # tsc --noEmit
    npm run build      # tsc + copy web assets
    npm test           # vitest run src    (needs Docker for Testcontainers)
@@ -86,14 +86,15 @@ confirm; never assume that gate or claim it on the user's behalf.
 | `src/serve/` · `src/web/` (`…/public/`) | `serve` composition root · HTTP server (`web/server.ts`) + RTL mobile web app & static assets |
 | `src/service/` | Cross-process liveness / heartbeat |
 | `src/summarization/` | Summary/digest generation pipeline |
+| `src/ask/` · `src/eval/` · `src/observability/` | `@Aida` in-group Q&A (retrieval, answer paths, shadow memory) · her eval/measure harness · opt-in local Langfuse tracing |
 | `src/media/` · `src/transcription/` · `src/vision/` | Media pipeline · faster-whisper STT · local vision |
 | `src/logging/` · `src/ops/` · `src/doctor/` | Structured logging · operational tooling · diagnostics |
 | `src/test/` | Shared test harness (`globalSetup`, isolated DB clones) |
 
 ### ✅ Always Do — autopilot, no need to ask
 
-- Run `biome check --write` / `npm run format` before committing.
-- Run the full preflight gate (typecheck · build · test) before opening/updating a PR.
+- Run `npm run check -- --write` / `npm run format` before committing.
+- Run the full preflight gate (`npm run preflight`: check · typecheck · build · test) before opening/updating a PR.
 - Build features as an **atomic, bottom-up commit stack** with conventional
   `type(scope):` messages (reuse the established scope vocabulary).
 - Create migrations with `npm run migrate:create` (timestamp-prefixed, **never**

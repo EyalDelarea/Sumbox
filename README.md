@@ -146,6 +146,10 @@ The doctor checks, in order:
 6. **Python + faster-whisper importable** — spawns `python -c "import faster_whisper"`
 7. **ffmpeg on PATH** — spawns `ffmpeg -version`
 
+It also checks, between 3 and 4, **DB indexes pass integrity check (amcheck)** (see
+`ops/runbooks/collation-corruption.md`), and finishes with two advisory `@Aida` checks:
+**@Aida roster resolvable** and **@Aida embeddings current**.
+
 Each line prints `✅ <check>`, `⚠️ <check>` (advisory — does not fail the run), or `❌ <check> — fix: <command>`. The process exits 1 only if a non-advisory check fails.
 
 ---
@@ -187,7 +191,7 @@ rm -rf data/baileys-auth/
 ## 🛠️ CLI commands
 
 <details>
-<summary><strong>Expand the full command reference</strong> — serve, collect, summarize, groups, transcribe, analyze-backlog, digest-run, import, media-backfill, full-sync, merge-duplicate-chats, ops-sweep, ask-*, aida-eval, doctor</summary>
+<summary><strong>Expand the full command reference</strong> — serve, collect, summarize, groups, transcribe, analyze-backlog, digest-run, import, media-backfill, full-sync, merge-duplicate-chats, ops-sweep, ask-*, aida-*, doctor</summary>
 
 <br/>
 
@@ -285,6 +289,7 @@ To export a chat from WhatsApp: open the chat → tap the group/contact name →
 
 ```bash
 npx tsx src/cli.ts media-backfill
+npx tsx src/cli.ts media-backfill --limit 200      # default 50 messages per run
 ```
 
 For messages saved with a media reference but no downloaded file (e.g. from onboarding), this scans a fresh linked session to download and analyze them. Note WhatsApp media URLs expire, so older media may be unrecoverable.
@@ -293,10 +298,10 @@ For messages saved with a media reference but no downloaded file (e.g. from onbo
 
 ```bash
 npx tsx src/cli.ts full-sync --all                 # every chat
-npx tsx src/cli.ts full-sync --group "Family"      # only whitelisted chats
+npx tsx src/cli.ts full-sync --group "Family,Work"  # only whitelisted chats (names or ids)
 ```
 
-Pulls deep history via a fresh linked device (scan the QR once) and persists it. Use `--all` for every chat or repeat `--group` to whitelist specific chats.
+Pulls deep history via a fresh linked device (scan the QR once) and persists it. Use `--all` for every chat, or `--group` with a comma-separated list of chat names or ids to whitelist specific chats — not both.
 
 ### `merge-duplicate-chats` — unify @lid / phone duplicate chats
 
@@ -315,7 +320,7 @@ npx tsx src/cli.ts ops-sweep
 
 Manually triggers one operational sweep: re-drives dead/stuck jobs and records a status snapshot. Runs automatically on a schedule (`OPS_SWEEP_ENABLED`); this forces one now.
 
-### `ask-*` / `aida-eval` — @Aida tooling
+### `ask-*` / `aida-*` — @Aida tooling
 
 ```bash
 npx tsx src/cli.ts ask-embed-backfill                        # embed history (bge-m3) so @Aida can search it
@@ -323,6 +328,9 @@ npx tsx src/cli.ts ask-search "Family" "מתי הטיול?"          # probe: se
 npx tsx src/cli.ts ask-redteam --pii-group 3 --people-group 7  # adversarial guardrail probes
 npx tsx src/cli.ts ask-sandbox --group 7 --questions q.txt   # run the real agentic loop, traced, no sends
 npx tsx src/cli.ts aida-eval --suite all                     # eval suites over the (gitignored) golden set
+npx tsx src/cli.ts aida-measure --runs 3 --save arm-a.json   # replay real questions, report mean + spread
+npx tsx src/cli.ts aida-redteam --group 7 --runs 3           # red-team probes through the agentic path, scored
+npx tsx src/cli.ts aida-memory --group 7                     # review @Aida's shadow memory for a group
 ```
 
 - **`ask-embed-backfill`** — embed all un-embedded messages now, so answers cover history from before embeddings were enabled.
@@ -330,6 +338,9 @@ npx tsx src/cli.ts aida-eval --suite all                     # eval suites over 
 - **`ask-redteam`** — runs committed adversarial probes (PII fishing, prompt injection, people questions) against the live answer path; read-only.
 - **`ask-sandbox --group <id> [--questions file]`** — runs @Aida's real agentic loop over a real group with local Langfuse tracing, without sending anything to WhatsApp.
 - **`aida-eval [--suite retrieval|e2e|all]`** — scores retrieval and end-to-end answers against a local golden set (gitignored — it quotes real messages, so a fresh clone has none).
+- **`aida-measure [--group <id>] [--runs N] [--limit N] [--save file] [--against file]`** — replays the questions @Aida has really been asked N times and reports each metric's mean and observed spread; `--save` an arm and `--against` it later for a verdict table. Fewer than 2 runs cannot resolve a change.
+- **`aida-redteam --group <id> [--runs N] [--verbose]`** — runs the red-team probes N times through the agentic path against a real group's roster and history, and scores them; read-only.
+- **`aida-memory --group <id> [--extract [--hours N]] [--revoke <id>] [--limit N]`** — lists the shadow-memory observations for a group (each with its source message), runs extraction over the last N hours now with `--extract`, or tombstones one with `--revoke`. Nothing reads these observations yet; scheduled extraction is opt-in via `ASK_MEMORY_SHADOW`.
 
 ### `doctor` — verify prerequisites
 
@@ -384,6 +395,7 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 | `OPS_SWEEP_TIMES` | `08:00,18:00` | Comma-separated HH:MM times for the ops sweep |
 | `OPS_REDRIVE_CAP` | `2` | Max auto re-drives of a stuck work-item before it's flagged instead |
 | `ASK_AGENTIC` | `false` | Answer `@Aida` questions with the agentic tool loop instead of single-shot RAG |
+| `ASK_MEMORY_SHADOW` | `false` | Enqueue `@Aida`'s shadow memory extraction (`memory.extract` jobs) alongside each digest. Costs a model pass per group per digest; a worker must include `memory.extract` in `--types` to consume them |
 | `EMBEDDING_MODEL` | `bge-m3` | Ollama embedding model for `@Aida` retrieval |
 | `EMBEDDING_DIM` | `1024` | Embedding vector dimension (must match the pgvector column) |
 | `MEDIA_PURGE_UNSELECTED_DAYS` | `30` | Days a downloaded-but-unselected media file is kept before the purge sweep deletes it |
@@ -392,6 +404,7 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 | `LANGFUSE_ENABLED` | `false` | Opt-in local Langfuse tracing of the agentic `@Aida` path (see `make langfuse-up`) |
 | `LANGFUSE_BASEURL` | `http://localhost:3000` | Local Langfuse base URL — the exporter refuses non-local URLs by design |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | turnkey local values | Match the keys provisioned by `docker-compose.langfuse.yml`; no UI setup needed |
+| `NAME_ALIASES` | *(unset)* | Pin how stored sender names render in summaries and `@Aida`, e.g. `Dana Cohen=דנה,Eyal=אייל` (`Stored Name=Preferred`, comma-separated) |
 | `SUMBOX_DIAG_NAMES` | *(unset)* | Set to `1` to log extra name-resolution diagnostics from the collector. Diagnostic only. |
 
 </details>
@@ -495,6 +508,7 @@ npm run check         # Biome lint + format check (autofix: npm run check -- --w
 npm run typecheck     # TypeScript type-check (tsc --noEmit)
 npm test              # Vitest test suite
 npm run build         # Compile TypeScript to dist/
+npm run preflight     # all four above, in CI order: check → typecheck → build → test
 npm run migrate       # Apply database migrations
 ```
 
@@ -503,10 +517,15 @@ npm run migrate       # Apply database migrations
 **Make targets** wrap the everyday flows:
 
 ```bash
-make dev      # full local stack: infra + migrations + worker + web/collector (Ctrl-C stops all)
-make up       # infra only — Postgres, RabbitMQ up + migrations applied
-make down     # stop infra (make down ARGS=-v also wipes volumes)
-make bench    # inference benchmark (see bench/README.md)
+make dev          # full local stack: infra + migrations + worker + web/collector (Ctrl-C stops all)
+make dev-worker   # split dev: just the worker (each split target ensures infra + migrations)
+make dev-collect  # split dev: just the WhatsApp collector session
+make dev-ui       # split dev: just the web UI (serve without the collector)
+make setup        # provision/repair the faster-whisper venv (make dev runs it automatically)
+make up           # infra only — Postgres, RabbitMQ up + migrations applied
+make down         # stop infra (make down ARGS=-v also wipes volumes)
+make langfuse-up  # opt-in local Langfuse (also langfuse-down / langfuse-logs / langfuse-verify)
+make bench        # inference benchmark (see bench/README.md); bench-all runs the full sweep
 ```
 
 Tests use [Testcontainers](https://testcontainers.com/) for ephemeral Postgres and RabbitMQ — **Docker must be running** to run the full test suite.
@@ -514,7 +533,7 @@ Tests use [Testcontainers](https://testcontainers.com/) for ephemeral Postgres a
 The worker can be started independently for debugging:
 
 ```bash
-npx tsx src/workers/worker.ts --types import.file,transcribe.voicenote,analyze.image,analyze.video,summarize.group,summarize.total
+npx tsx src/workers/worker.ts --types import.file,transcribe.voicenote,analyze.image,analyze.video,summarize.group,summarize.total,memory.extract
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide.
