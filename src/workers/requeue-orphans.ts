@@ -24,9 +24,13 @@
  *   - this runs in the worker BEFORE buildWorker attaches its consumers, and after
  *     resetStaleRunningJobs (a dead worker's unacked messages are back to ready);
  *   - a type that already has a consumer (another worker process) is skipped.
- * Rows are read before the queue is inspected, so a job the collector publishes
- * in between can only make us under-count (re-sent on a later restart), never
- * double-send. The grace window keeps us from touching a row created moments ago.
+ * Rows are read before the queue is inspected, so a job published wholly between
+ * the two reads only makes us under-count (re-sent on a later restart). But the
+ * bus writes the row BEFORE it publishes the message, so a concurrent publish
+ * whose row lands before our read and whose message lands after the queue check
+ * over-counts by one and double-sends the oldest, still-queued row. Handlers are
+ * idempotent, so that duplicate is a no-op. The grace window keeps us from
+ * re-sending a row created moments ago.
  *
  * WHAT IT RE-SENDS. Only types that this worker consumes AND that opt in via
  * JOB_DESCRIPTORS[type].requeueOnStartup (verified-idempotent handlers). The

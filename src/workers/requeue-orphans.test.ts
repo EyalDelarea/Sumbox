@@ -266,7 +266,7 @@ describe("requeueOrphanedJobs", () => {
     );
   });
 
-  it("reads job_runs BEFORE inspecting the queue, so a concurrent publish can only under-count", async () => {
+  it("reads job_runs BEFORE inspecting the queue, so a publish wholly in between can only under-count", async () => {
     const calls: string[] = [];
     const bus = new FakeBus();
     const stats = bus.queueStats.bind(bus);
