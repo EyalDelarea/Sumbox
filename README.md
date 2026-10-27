@@ -376,6 +376,7 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 | `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` | RabbitMQ AMQP connection URL |
 | `LOG_LEVEL` | `info` | pino log level (`trace` / `debug` / `info` / `warn` / `error` / `fatal`) |
 | `WORKER_CONCURRENCY` | `1` | Concurrent jobs per worker process |
+| `WORKER_REQUEUE_GRACE_MS` | `300000` | On startup the worker re-sends media jobs whose queue messages were lost; rows younger than this (ms) are left alone |
 | `WHATSAPP_ALLOW_SEND` | `false` | Set `true` only to allow outbound WhatsApp messages. Leave `false` for passive collection. |
 | `RETAIN_MEDIA` | `false` | Set `true` to keep media files on disk after analysis/transcription. By default files are pruned after captioning. |
 | `DIGEST_ENABLED` | `true` | Enable scheduled twice-daily pre-summarization (so opening a group feels instant) |
