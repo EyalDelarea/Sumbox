@@ -278,7 +278,7 @@ describe("buildPrompt", () => {
 describe("estimateTokens", () => {
   it("grows with input", () => {
     // No longer a flat chars/4: Latin now costs ~1 token per 3.1 chars (measured),
-    // and Hebrew ~1 token per 1.28. See the estimateTokens block below.
+    // and Hebrew ~1 token per 1.28. See the per-script cost block below.
     expect(estimateTokens("a".repeat(800))).toBeGreaterThan(estimateTokens("a".repeat(400)));
   });
 });
@@ -331,7 +331,7 @@ describe("buildPrompt adjust", () => {
 // for the Hebrew half — and it ALWAYS under-counted, which is the direction that
 // silently overflows num_ctx and truncates the summary.
 
-describe("estimateTokens", () => {
+describe("estimateTokens per-script cost", () => {
   it("charges Hebrew far more per character than Latin", () => {
     const hebrew = "שלום".repeat(100); // 400 Hebrew chars
     const latin = "hello".repeat(80); // 400 Latin chars
