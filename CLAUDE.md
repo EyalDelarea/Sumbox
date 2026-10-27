@@ -45,7 +45,7 @@ uniqueness.
 1. branch off main      feat/… · fix/… · docs/… · chore/…  (or claude/… for agent work)
 2. build bottom-up      atomic, scoped conventional commits (see below)
 3. sync main in         git merge origin/main   (resolve, re-number migrations if needed)
-4. PREFLIGHT            biome check → typecheck → build → test   (the local CI gate)
+4. PREFLIGHT            npm run preflight: check → typecheck → build → test   (the local CI gate)
 5. open PR              CI runs the same gate; the `ci-ok` check must go green
 6. HUMAN VERIFY         Eyal runs the code and confirms behavior — this gate is his, not the agent's
 7. merge PR
@@ -53,7 +53,7 @@ uniqueness.
 
 Steps 1–5 are the agent's job: **prepare everything and get to a green, review-ready
 PR.** Step 6 is the human gate — do not assume it; hand off a PR that's easy to run
-and verify. Run `/preflight` before opening or updating a PR.
+and verify. Run `npm run preflight` before opening or updating a PR.
 
 ## Commits — atomic, scoped, conventional
 
@@ -68,10 +68,10 @@ Format: `type(scope): summary`
   `collector` `db` `logging` `ui` `media` `web` `cli` `summary` `serve` `bench`
   `deps` `deps-dev` `full-sync` `backfill`
 
-## The CI gate (must pass before PR — `/preflight` runs it)
+## The CI gate (must pass before PR — `npm run preflight` runs all four)
 
 ```
-npm run check      # biome check src   (CI runs `biome ci src`; use `--write` / `npm run format` to autofix)
+npm run check      # biome check src   (CI runs `biome ci src`; use `npm run check -- --write` / `npm run format` to autofix)
 npm run typecheck  # tsc --noEmit
 npm run build      # tsc + copy web assets
 npm test           # vitest — needs Docker (Testcontainers spin up Postgres + RabbitMQ)
@@ -79,7 +79,7 @@ npm test           # vitest — needs Docker (Testcontainers spin up Postgres + 
 
 CI collapses lint + typecheck + build + test into a single required `ci-ok` check.
 Common avoidable round-trips seen in history: **unused imports** and **unformatted
-code** — run `npm run check --write` before committing. CI runs on GitHub-hosted
+code** — run `npm run check -- --write` before committing. CI runs on GitHub-hosted
 `ubuntu-latest` runners.
 
 ## Tests

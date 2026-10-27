@@ -99,16 +99,19 @@ WhatsApp export (.txt/.zip) ──(importer)───┘                        
 | `analyze-backlog [--limit N] [--types ...]` | Enqueue vision analysis (`analyze.image`/`analyze.video`) for media lacking a completed analysis. |
 | `digest-run [--all]` | Manually trigger the scheduled digest (enqueues `summarize.group` jobs). |
 | `ops-sweep` | Ops maintenance: self-heal dead jobs, record status history. |
-| `import <file> [--name N] [--folder dir]` | Import a WhatsApp export (`.txt`/`.zip`); dedupes; `--folder` for bulk. |
+| `import [path] [--name N] [--folder dir]` | Import a WhatsApp export (`.txt`/`.zip`); dedupes; `--folder` for bulk. |
 | `media-backfill [--limit N]` | Download + analyze media descriptors stored at ingest but not yet fetched. |
-| `full-sync` | Pull deep WhatsApp history on a freshly-linked session (onboarding push sync). |
+| `full-sync --all \| --group <list>` | Pull deep WhatsApp history on a freshly-linked session (onboarding push sync); `--group` takes comma-separated names or ids. |
 | `merge-duplicate-chats` | Merge duplicate group rows (e.g. LID/PN identity splits) into one. |
 | `ask-embed-backfill [--batch N]` | Embed all un-embedded messages (bge-m3) so `@Aida` can search history. |
 | `ask-search <group> <query> [--k N]` | Probe: semantic-search a group's history (verifies retrieval + scoping). |
 | `ask-redteam --pii-group N --people-group N` | Adversarial red-team of `@Aida`'s guardrails (read-only). |
 | `ask-sandbox --group N [--questions file]` | Run `@Aida`'s real agentic loop over a real group, traced in local Langfuse, no sends. |
 | `aida-eval [--suite ...]` | Run `@Aida`'s eval suites over the local golden set (read-only, no sends). |
-| `doctor` | Verify prerequisites (Docker, compose, Postgres+migrations, RabbitMQ, Ollama+model, faster-whisper, ffmpeg). |
+| `aida-measure [--group N] [--runs N] [--save file] [--against file]` | Replay the questions `@Aida` was really asked N times; report per-metric mean + spread, and compare against a saved arm. |
+| `aida-redteam --group N [--runs N] [--verbose]` | Run the red-team probes N times through the agentic path and score them (read-only). |
+| `aida-memory --group N [--extract] [--revoke id]` | Review `@Aida`'s shadow memory for a group; extract now, or tombstone one observation. |
+| `doctor` | Verify prerequisites (Docker, compose, Postgres+migrations, index integrity, RabbitMQ, Ollama+model, faster-whisper, ffmpeg) plus advisory `@Aida` roster/embedding checks. |
 
 `make dev` is the everyday entry point: brings up the Docker stack, applies
 migrations, and starts the worker + web server + live collector together.
@@ -137,16 +140,16 @@ The web app (`src/web/public/`) has three surfaces:
 | `serve/` | The `serve` composition root — wires the collector, scheduler, retention sweep, and web server into one process. |
 | `test/` | Shared Vitest harness: one Postgres container, per-file isolated DB clones. |
 | `jobs/` | Job bus abstraction — in-memory bus (tests) + RabbitMQ bus (prod), job types, run recorder. |
-| `workers/` | Worker process + handlers: `import-file`, `transcribe-voicenote`, `analyze-media`, `summarize-group`, `summarize-total`. |
+| `workers/` | Worker process + handlers: `import-file`, `transcribe-voicenote`, `analyze-media`, `summarize-group`, `summarize-total`, `memory-extract`. |
 | `transcription/` | Python `faster-whisper` worker (`worker.py`), Node wrapper, ivrit-whisper integration. |
 | `vision/` | Ollama image/video analyzer, media-kind detection, multi-frame video analysis. |
 | `summarization/` | Selection, catch-up prep, prompt assembly, Ollama summarizer, rendering. |
-| `ask/` | `@Aida` in-group Q&A: hybrid retrieval (pgvector semantic + Postgres FTS fused via RRF), bge-m3 embedder + embedding sweep, citations, attribution, groundedness, single-shot and agentic (AI SDK tool-loop) answer paths. |
-| `eval/` | `@Aida` eval harness — golden-set loader for the retrieval/e2e suites (`aida-eval`). |
+| `ask/` | `@Aida` in-group Q&A: hybrid retrieval (pgvector semantic + Postgres FTS fused via RRF), bge-m3 embedder + embedding sweep, citations, attribution, groundedness, single-shot and agentic (AI SDK tool-loop) answer paths, opt-in shadow memory extraction (`ASK_MEMORY_SHADOW`). |
+| `eval/` | `@Aida` eval harness — golden-set retrieval/e2e suites (`aida-eval`) and label-free repeated-run measurement over real questions (`aida-measure`). |
 | `observability/` | Opt-in, fully-local Langfuse (OpenTelemetry) tracing for the agentic `@Aida` path; refuses non-local endpoints. |
 | `scheduler/` | Twice-daily digest scheduler (pre-summaries), enqueue-run, runner, schedule logic. |
 | `service/` | Always-on service: heartbeat, liveness, status. |
-| `ops/` | Operational tooling: `sweep` (self-heal dead jobs), `redrive` (re-queue failures). |
+| `ops/` | Operational tooling: `sweep` (self-heal dead jobs), `redrive` (re-queue failures), and the `@Aida` red-team / sandbox runners (`ask-redteam`, `aida-redteam`, `ask-sandbox`). |
 | `media/` | Prune-after-caption (delete media files after analysis unless `RETAIN_MEDIA=true`). |
 | `doctor/` | Prerequisite checks. |
 | `web/` | HTTP server, SSE (streaming summaries), static mobile UI under `public/` (vanilla JS libs: api, health, markdown, open-state, progress, time). |
@@ -191,8 +194,8 @@ The web app (`src/web/public/`) has three surfaces:
 - **Media analysis quality WIP:** earlier vision model had preamble leakage +
   degeneration on text-heavy Hebrew images; re-enabled with gemma4:26b but
   quality tuning continues.
-- **Hebrew name overrides** (deferred); `@lid` opaque IDs can't always resolve
-  to a name.
+- **Hebrew name overrides** are env-only (`NAME_ALIASES`), with no UI; `@lid`
+  opaque IDs can't always resolve to a name.
 - **Ultra-short-video frame extraction** (deferred): sub-second clips break
   `fps=1` extraction → should grab 1 frame.
 - **No packaged deploy / prod story:** day-to-day is `make dev`.
