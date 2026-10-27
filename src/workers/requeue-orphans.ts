@@ -58,7 +58,7 @@ export type RequeueOrphansDeps = {
 export type RequeueOutcome =
   | { type: JobType; status: "requeued"; tracked: number; queued: number; requeued: number }
   | { type: JobType; status: "skipped-live-consumer"; consumers: number }
-  | { type: JobType; status: "error"; error: string };
+  | { type: JobType; status: "error"; error: string; requeued: number };
 
 // ── Selection (pure) ─────────────────────────────────────────────────────────
 
@@ -89,6 +89,8 @@ export async function requeueOrphanedJobs(deps: RequeueOrphansDeps): Promise<Req
   const outcomes: RequeueOutcome[] = [];
 
   for (const type of eligible) {
+    // Counted outside the try so a mid-loop failure still reports what was sent.
+    let sent = 0;
     try {
       // Rows BEFORE the queue — see the header for why the order matters.
       const rows = await deps.listNonTerminal(type);
@@ -113,6 +115,7 @@ export async function requeueOrphanedJobs(deps: RequeueOrphansDeps): Promise<Req
           attempts: 0,
           maxAttempts: row.maxAttempts,
         });
+        sent++;
       }
 
       deps.log.info(
@@ -128,8 +131,11 @@ export async function requeueOrphanedJobs(deps: RequeueOrphansDeps): Promise<Req
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      deps.log.error({ err, jobType: type }, `Startup requeue failed for ${type}: ${error}`);
-      outcomes.push({ type, status: "error", error });
+      deps.log.error(
+        { err, jobType: type, requeued: sent },
+        `Startup requeue failed for ${type} after re-sending ${sent} job(s): ${error}`,
+      );
+      outcomes.push({ type, status: "error", error, requeued: sent });
     }
   }
 

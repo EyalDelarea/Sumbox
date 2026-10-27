@@ -235,8 +235,55 @@ describe("requeueOrphanedJobs", () => {
       type: "transcribe.voicenote",
       status: "error",
       error: "db down",
+      requeued: 0,
     });
     expect(bus.published).toHaveLength(2);
     expect(lines.some((l) => l.level === "error" && l.msg.includes("db down"))).toBe(true);
+  });
+
+  it("a mid-loop publish failure reports how many were already re-sent", async () => {
+    const bus = new FakeBus();
+    const real = bus.republish.bind(bus);
+    bus.republish = async (job: Job) => {
+      if (bus.published.length === 2) throw new Error("channel closed");
+      await real(job);
+    };
+    const { deps, lines } = makeDeps(
+      { "transcribe.voicenote": rowsOf("transcribe.voicenote", 5) },
+      bus,
+      {
+        types: ["transcribe.voicenote"],
+      },
+    );
+
+    const outcomes = await requeueOrphanedJobs(deps);
+
+    expect(outcomes).toEqual([
+      { type: "transcribe.voicenote", status: "error", error: "channel closed", requeued: 2 },
+    ]);
+    expect(lines.some((l) => l.level === "error" && l.msg.includes("after re-sending 2"))).toBe(
+      true,
+    );
+  });
+
+  it("reads job_runs BEFORE inspecting the queue, so a concurrent publish can only under-count", async () => {
+    const calls: string[] = [];
+    const bus = new FakeBus();
+    const stats = bus.queueStats.bind(bus);
+    bus.queueStats = async (type: JobType) => {
+      calls.push(`stats:${type}`);
+      return stats(type);
+    };
+    const { deps } = makeDeps({}, bus, {
+      types: ["transcribe.voicenote"],
+      listNonTerminal: async (type) => {
+        calls.push(`rows:${type}`);
+        return [];
+      },
+    });
+
+    await requeueOrphanedJobs(deps);
+
+    expect(calls).toEqual(["rows:transcribe.voicenote", "stats:transcribe.voicenote"]);
   });
 });
