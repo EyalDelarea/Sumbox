@@ -89,6 +89,55 @@ export async function resetStaleRunningJobs(client: pg.Pool | pg.PoolClient): Pr
   return rowCount ?? 0;
 }
 
+/** A job_runs row that should still have a message somewhere in its queue. */
+export type NonTerminalJobRun = {
+  id: string;
+  type: JobType;
+  status: JobStatus;
+  payload: Record<string, unknown>;
+  maxAttempts: number;
+  createdAt: Date;
+};
+
+/**
+ * Every non-terminal job_runs row of one type, oldest first.
+ *
+ * "Non-terminal" is pending, running AND failed: the bus only writes `failed`
+ * when it republishes a retry (an exhausted job becomes `dead`), so a `failed`
+ * row has a retry message sitting in the queue just like a `pending` one. In a
+ * healthy system each of these rows maps to exactly one message in
+ * `jobs.<type>` — which is what lets the startup requeue detect lost messages
+ * by count (see src/workers/requeue-orphans.ts).
+ */
+export async function listNonTerminalJobRuns(
+  client: pg.Pool | pg.PoolClient,
+  type: JobType,
+): Promise<NonTerminalJobRun[]> {
+  const { rows } = await client.query<{
+    id: string;
+    type: JobType;
+    status: JobStatus;
+    payload: Record<string, unknown>;
+    max_attempts: number;
+    created_at: Date;
+  }>(
+    `SELECT id, type, status, payload, max_attempts, created_at
+     FROM job_runs
+     WHERE type = $1
+       AND status IN ('pending', 'running', 'failed')
+     ORDER BY created_at, id`,
+    [type],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    type: r.type,
+    status: r.status,
+    payload: r.payload,
+    maxAttempts: r.max_attempts,
+    createdAt: r.created_at,
+  }));
+}
+
 /**
  * Count job_runs rows that are currently in-flight (pending or running) for
  * media-analysis types (analyze.image, analyze.video, transcribe.voicenote).

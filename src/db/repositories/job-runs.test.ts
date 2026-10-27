@@ -4,6 +4,7 @@ import { createTestDatabase } from "../../test/db.js";
 import {
   countInFlightMediaJobs,
   countJobsByStatus,
+  listNonTerminalJobRuns,
   resetStaleRunningJobs,
   setJobStatus,
   upsertJobRun,
@@ -421,6 +422,60 @@ describe("job-runs repository", () => {
       await pool.query(`UPDATE job_runs SET status='done' WHERE status IN ('pending','running')`);
       const count = await countInFlightMediaJobs(pool);
       expect(count).toBe(0);
+    });
+  });
+
+  describe("listNonTerminalJobRuns", () => {
+    // memory.extract is used by no other test in this file, so the type filter
+    // isolates these rows from the shared database.
+    const ids = {
+      pendingOld: "550e8400-e29b-41d4-a716-4466554ae001",
+      failed: "550e8400-e29b-41d4-a716-4466554ae002",
+      running: "550e8400-e29b-41d4-a716-4466554ae003",
+      pendingNew: "550e8400-e29b-41d4-a716-4466554ae004",
+      done: "550e8400-e29b-41d4-a716-4466554ae005",
+      dead: "550e8400-e29b-41d4-a716-4466554ae006",
+    };
+
+    it("returns pending, running and failed rows of the type, oldest first; never done/dead", async () => {
+      const insert = async (id: string, status: string, minutesAgo: number) => {
+        await pool.query(
+          `INSERT INTO job_runs (id, type, status, payload, attempts, max_attempts, created_at)
+           VALUES ($1, 'memory.extract', $2, $3, 0, 4, now() - make_interval(mins => $4))`,
+          [id, status, JSON.stringify({ groupId: "7", since: "a", until: "b" }), minutesAgo],
+        );
+      };
+      // Inserted out of age order so the ORDER BY is what's under test.
+      await insert(ids.pendingNew, "pending", 1);
+      await insert(ids.done, "done", 50);
+      await insert(ids.running, "running", 20);
+      await insert(ids.pendingOld, "pending", 40);
+      await insert(ids.dead, "dead", 45);
+      await insert(ids.failed, "failed", 30);
+      // A pending row of another type must not leak in.
+      await upsertJobRun(pool, {
+        id: "550e8400-e29b-41d4-a716-4466554ae007",
+        type: "summarize.total",
+        status: "pending",
+        payload: { since: "x" },
+        attempts: 0,
+        maxAttempts: 3,
+      });
+
+      const rows = await listNonTerminalJobRuns(pool, "memory.extract");
+
+      expect(rows.map((r) => [r.id, r.status])).toEqual([
+        [ids.pendingOld, "pending"],
+        [ids.failed, "failed"],
+        [ids.running, "running"],
+        [ids.pendingNew, "pending"],
+      ]);
+      expect(rows[0]).toMatchObject({
+        type: "memory.extract",
+        payload: { groupId: "7", since: "a", until: "b" },
+        maxAttempts: 4,
+      });
+      expect(rows[0]?.createdAt).toBeInstanceOf(Date);
     });
   });
 });
