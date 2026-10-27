@@ -117,6 +117,11 @@ code** — run `npm run check -- --write` before committing. CI runs on GitHub-h
   without the collector). Each in its own terminal. After `git pull`, Ctrl-C `dev-ui` and
   re-run it to refresh the UI while the worker keeps its jobs and the collector keeps its
   session. The processes share only Postgres + RabbitMQ, so they're already decoupled.
+- **Lost queue messages self-heal on worker start.** If RabbitMQ comes back empty, the
+  worker re-sends the missing media jobs (voice/image/video) before it starts consuming:
+  lost = open `job_runs` rows − ready queue messages, oldest first, under the row's own id
+  (`src/workers/requeue-orphans.ts`). It logs `Re-queued N orphaned <type> job(s)` per type.
+  Run ONE worker per job type — a type that already has a consumer is skipped.
 
 ## Observability — `@Aida` agentic loop (opt-in, FULLY LOCAL)
 

@@ -235,6 +235,32 @@ export class RabbitMqJobBus implements JobBus {
     return info.messageCount;
   }
 
+  /**
+   * Ready messages and attached consumers for a type's main queue. Note that
+   * `ready` excludes messages delivered to a live consumer and not yet acked.
+   */
+  async queueStats(type: JobType): Promise<{ ready: number; consumers: number }> {
+    const ch = await this.connect();
+    await this.assertTopology(ch, type);
+    const info = await ch.checkQueue(`jobs.${type}`);
+    return { ready: info.messageCount, consumers: info.consumerCount };
+  }
+
+  /**
+   * Re-send a job whose job_runs row already exists, under that row's id. Unlike
+   * `enqueue` it mints no id and records nothing: the startup requeue uses it to
+   * restore a message the broker lost, and a fresh id would orphan the original
+   * row (still non-terminal) and get it re-sent again on every restart.
+   */
+  async republish(job: Job): Promise<void> {
+    const ch = await this.connect();
+    await this.assertTopology(ch, job.type);
+    ch.sendToQueue(`jobs.${job.type}`, Buffer.from(JSON.stringify(job.payload)), {
+      persistent: true,
+      headers: { id: job.id, attempts: job.attempts, maxAttempts: job.maxAttempts },
+    });
+  }
+
   /** Depth of the dead-letter queue for a given type (exposed for testing). */
   async deadDepth(type: JobType): Promise<number> {
     const ch = await this.connect();

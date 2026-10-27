@@ -49,6 +49,13 @@ describe("JOB_DESCRIPTORS", () => {
     expect(JOB_DESCRIPTORS["import.file"].usesOllama).toBe(false);
   });
 
+  it("pins startup requeue to the idempotent, never-stale media types", () => {
+    const requeued = ALL_JOB_TYPES.filter((t) => JOB_DESCRIPTORS[t].requeueOnStartup);
+    expect(new Set(requeued)).toEqual(
+      new Set<JobType>(["transcribe.voicenote", "analyze.image", "analyze.video"]),
+    );
+  });
+
   it("pins the metrics opLabel for each type", () => {
     expect(JOB_DESCRIPTORS["import.file"].opLabel).toBe("import");
     expect(JOB_DESCRIPTORS["transcribe.voicenote"].opLabel).toBe("audio");

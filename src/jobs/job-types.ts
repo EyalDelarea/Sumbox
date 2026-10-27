@@ -15,29 +15,68 @@ export type JobDescriptor = {
   usesOllama: boolean;
   /** Coarse operation label for metrics/dashboards. */
   opLabel: string;
+  /**
+   * True when the worker may re-send this type's lost messages at startup
+   * (src/workers/requeue-orphans.ts). Only for types whose handler is verified
+   * idempotent AND whose work is still worth doing however late it runs: a
+   * re-sent job may be months old.
+   */
+  requeueOnStartup: boolean;
 };
 
 /**
  * Single source of truth for every job type AND its policy — one row per type.
  * The `JobType` union, `ALL_JOB_TYPES`, the worker's prefetch/Ollama gates, and
  * `opForJobType` all derive from this table, so a new type can't silently miss a
- * policy (the `satisfies` forces all three fields on every row).
+ * policy (the `satisfies` forces every field on every row).
  *
  * IMPORTANT: adding a row here also needs a migration widening the
  * job_runs_type_check Postgres constraint — the test
  * src/jobs/job-runs-constraint.test.ts fails CI if you forget.
  */
 export const JOB_DESCRIPTORS = {
-  "import.file": { prefetch: "concurrency", usesOllama: false, opLabel: "import" },
-  "transcribe.voicenote": { prefetch: "one", usesOllama: false, opLabel: "audio" },
-  "analyze.image": { prefetch: "one", usesOllama: true, opLabel: "image" },
-  "analyze.video": { prefetch: "one", usesOllama: true, opLabel: "video" },
-  "summarize.group": { prefetch: "one", usesOllama: true, opLabel: "summary" },
-  "summarize.total": { prefetch: "one", usesOllama: true, opLabel: "summary" },
+  // Not requeued on startup: the export file it points at is often gone by then.
+  "import.file": {
+    prefetch: "concurrency",
+    usesOllama: false,
+    opLabel: "import",
+    requeueOnStartup: false,
+  },
+  // The three media types ARE requeued on startup: makeIdempotentHandler skips a
+  // message that already has a transcript/analysis, and enrichment never goes stale.
+  "transcribe.voicenote": {
+    prefetch: "one",
+    usesOllama: false,
+    opLabel: "audio",
+    requeueOnStartup: true,
+  },
+  "analyze.image": { prefetch: "one", usesOllama: true, opLabel: "image", requeueOnStartup: true },
+  "analyze.video": { prefetch: "one", usesOllama: true, opLabel: "video", requeueOnStartup: true },
+  // Not requeued: the scheduler re-enqueues every changed group on each run, so a
+  // lost summary is already superseded; replaying it is a stale LLM run.
+  "summarize.group": {
+    prefetch: "one",
+    usesOllama: true,
+    opLabel: "summary",
+    requeueOnStartup: false,
+  },
+  // Not requeued: not idempotent — every run inserts a new total_summaries row.
+  "summarize.total": {
+    prefetch: "one",
+    usesOllama: true,
+    opLabel: "summary",
+    requeueOnStartup: false,
+  },
   // @Aida's memory extraction. Ollama-bound like the summarizer, and prefetch
   // "one" for the same reason: it shares the single local GPU, and a shadow-phase
   // background job must never starve a summary or an answer someone is waiting on.
-  "memory.extract": { prefetch: "one", usesOllama: true, opLabel: "summary" },
+  // Not requeued: shadow-phase output nothing reads yet — not worth replaying.
+  "memory.extract": {
+    prefetch: "one",
+    usesOllama: true,
+    opLabel: "summary",
+    requeueOnStartup: false,
+  },
 } as const satisfies Record<string, JobDescriptor>;
 
 export type JobType = keyof typeof JOB_DESCRIPTORS;

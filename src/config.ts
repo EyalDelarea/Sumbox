@@ -68,6 +68,11 @@ export type LoggingConfig = {
 export type WorkerConfig = {
   /** Default prefetch (concurrent jobs) per worker process. */
   concurrency: number;
+  /**
+   * Startup requeue grace window (ms): a job_runs row younger than this is never
+   * re-sent, even when its message looks missing — it may still be mid-publish.
+   */
+  requeueGraceMs: number;
 };
 
 export type VisionConfig = {
@@ -233,6 +238,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     worker: {
       concurrency: Number(env.WORKER_CONCURRENCY ?? 1),
+      requeueGraceMs: Number(env.WORKER_REQUEUE_GRACE_MS ?? 5 * 60 * 1000),
     },
     whatsapp: {
       // Off by default — sending must be explicitly opted into.
