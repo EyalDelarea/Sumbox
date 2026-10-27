@@ -35,6 +35,11 @@ describe("loadConfig worker block", () => {
     const cfg = loadConfig({ WORKER_CONCURRENCY: "4" });
     expect(cfg.worker.concurrency).toBe(4);
   });
+
+  it("defaults the startup requeue grace window to 5 minutes and honors the override", () => {
+    expect(loadConfig({}).worker.requeueGraceMs).toBe(300_000);
+    expect(loadConfig({ WORKER_REQUEUE_GRACE_MS: "60000" }).worker.requeueGraceMs).toBe(60_000);
+  });
 });
 
 describe("loadConfig whatsapp block (safety guardrail)", () => {

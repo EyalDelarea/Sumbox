@@ -157,7 +157,8 @@ async function main(): Promise<void> {
     { OllamaVisionAnalyzer },
     { IvritWhisperTranscriber },
     { pruneMediaFile },
-    { resetStaleRunningJobs },
+    { resetStaleRunningJobs, listNonTerminalJobRuns },
+    { requeueOrphanedJobs },
   ] = await Promise.all([
     import("../config.js"),
     import("../jobs/rabbitmq-bus.js"),
@@ -176,6 +177,7 @@ async function main(): Promise<void> {
     import("../transcription/ivrit-whisper.js"),
     import("../media/prune.js"),
     import("../db/repositories/job-runs.js"),
+    import("./requeue-orphans.js"),
   ]);
 
   // Parse CLI args
@@ -422,6 +424,19 @@ async function main(): Promise<void> {
       model: config.summarization.model,
     });
   }
+
+  // Re-send messages the broker lost (e.g. RabbitMQ came back empty) for the types
+  // this worker consumes. Must run AFTER the stale-running reset and BEFORE
+  // buildWorker attaches consumers: lost messages are counted as open job_runs
+  // rows minus ready queue messages, which only holds while nothing consumes.
+  await requeueOrphanedJobs({
+    types: Object.keys(handlers) as JobType[],
+    listNonTerminal: (type) => listNonTerminalJobRuns(pool, type),
+    bus,
+    now: () => new Date(),
+    graceMs: config.worker.requeueGraceMs,
+    log: logger,
+  });
 
   const worker = await buildWorker({
     bus,

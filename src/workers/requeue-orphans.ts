@@ -60,9 +60,6 @@ export type RequeueOutcome =
   | { type: JobType; status: "skipped-live-consumer"; consumers: number }
   | { type: JobType; status: "error"; error: string };
 
-/** Default grace window: 5 minutes. */
-export const DEFAULT_REQUEUE_GRACE_MS = 5 * 60 * 1000;
-
 // ── Selection (pure) ─────────────────────────────────────────────────────────
 
 /**
