@@ -26,7 +26,7 @@
     "@langfuse/client": "^5.14.0",
     "@langfuse/core": "^5.14.0",
     "@langfuse/otel": "^5.14.0",
-    "@langfuse/tracing": "^5.14.0",
+    "@langfuse/tracing": "^6.0.2",
     "@langfuse/vercel-ai-sdk": "^5.14.0",
     "@opentelemetry/sdk-node": "^0.223.0",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
