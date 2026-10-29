@@ -24,7 +24,7 @@
   },
   "dependencies": {
     "@langfuse/client": "^5.14.0",
-    "@langfuse/core": "^5.14.0",
+    "@langfuse/core": "^6.0.2",
     "@langfuse/otel": "^5.14.0",
     "@langfuse/tracing": "^5.14.0",
     "@langfuse/vercel-ai-sdk": "^5.14.0",
