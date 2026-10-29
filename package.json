@@ -28,7 +28,7 @@
     "@langfuse/otel": "^5.14.0",
     "@langfuse/tracing": "^5.14.0",
     "@langfuse/vercel-ai-sdk": "^5.14.0",
-    "@opentelemetry/sdk-node": "^0.223.0",
+    "@opentelemetry/sdk-node": "^0.300.0",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "ai": "^7.0.154",
     "amqplib": "^2.2.0",
