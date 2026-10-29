@@ -23,7 +23,7 @@
     "preflight": "npm run check && npm run typecheck && npm run build && npm test"
   },
   "dependencies": {
-    "@langfuse/client": "^5.14.0",
+    "@langfuse/client": "^6.0.2",
     "@langfuse/core": "^5.14.0",
     "@langfuse/otel": "^5.14.0",
     "@langfuse/tracing": "^5.14.0",
