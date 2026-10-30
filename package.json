@@ -46,7 +46,7 @@
     "@testcontainers/postgresql": "^12.2.1",
     "@testcontainers/rabbitmq": "^12.2.1",
     "@types/amqplib": "^0.10.7",
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "@types/unzipper": "^0.10.11",
     "node-pg-migrate": "^9.0.0",
