@@ -42,7 +42,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.3",
+    "@biomejs/biome": "2.6.4",
     "@testcontainers/postgresql": "^12.2.1",
     "@testcontainers/rabbitmq": "^12.2.1",
     "@types/amqplib": "^0.10.7",
