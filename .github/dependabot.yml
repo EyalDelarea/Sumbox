@@ -5,6 +5,16 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Held until the Langfuse server upgrade spec, which moves these together:
+    # @langfuse/* 6 needs a Langfuse server >= v4.59 (docker-compose.langfuse.yml
+    # runs v3), and the OTel 0.300 line needs @opentelemetry/api 1.10, which
+    # langfuse 5 can't take (it pins api 1.9.x via @ai-sdk/otel). The group
+    # labels 0.2xx -> 0.3xx as a minor bump, so OTel is held by version range.
+    ignore:
+      - dependency-name: "@langfuse/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@opentelemetry/sdk-node"
+        versions: [">=0.300.0"]
     groups:
       # One PR for all non-major npm updates to keep noise low.
       npm-minor-patch:
