@@ -513,6 +513,8 @@ export class CollectorSession extends EventEmitter {
 
     const { state, saveCreds } = await this.deps.useAuthState(this.authDir);
     assertLoadedStoredCreds(this.authDir, storedCreds, state.creds);
+    // The creds loaded cleanly: the failure streak (if any) is broken.
+    this.connectFailures = 0;
 
     // WhatsApp rejects stale WA-Web client versions with a pre-QR 405, which
     // presents as a silent disconnect loop that never pairs. Ask WhatsApp's own
