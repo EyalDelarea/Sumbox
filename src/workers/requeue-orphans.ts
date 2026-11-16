@@ -35,10 +35,29 @@
  * WHAT IT RE-SENDS. Only types that this worker consumes AND that opt in via
  * JOB_DESCRIPTORS[type].requeueOnStartup (verified-idempotent handlers). The
  * message keeps the row's id and starts at attempts 0; no row is written.
+ *
+ * RETIRE INSTEAD OF RE-SEND. Types that opt in via
+ * JOB_DESCRIPTORS[type].retireOrphansOnStartup (the summaries) are counted the
+ * same way, but their orphans are not re-sent: a lost summary is superseded by
+ * the next scheduled run, and a lost total by the next run's window. Left alone
+ * they sit `pending` forever (36 summarize.group rows from 2026-07..09 did).
+ * Orphaned `pending` rows older than RETIRE_MIN_AGE_MS are marked `failed` with
+ * ORPHAN_RETIRED_REASON — a status update, never a delete. `failed`, not `dead`:
+ * ops-sweep re-drives (and deletes) dead rows. The day-long minimum age is far
+ * past any real backlog, so a row whose message is merely slow is never touched.
  */
 import type { NonTerminalJobRun } from "../db/repositories/job-runs.js";
 import { JOB_DESCRIPTORS, type Job, type JobType } from "../jobs/job-types.js";
 import type { Logger } from "../logging/logger.js";
+
+// ── Policy ───────────────────────────────────────────────────────────────────
+
+/** Orphans younger than this are never retired — only clearly abandoned rows. */
+export const RETIRE_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** last_error written on a retired row. */
+export const ORPHAN_RETIRED_REASON =
+  "orphaned: no queue message at worker startup; superseded by later scheduled runs";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,11 +75,17 @@ export type RequeueOrphansDeps = {
   now: () => Date;
   /** Rows younger than this are never re-sent. */
   graceMs: number;
+  /**
+   * Mark the given still-`pending` rows failed with `reason`; returns how many
+   * changed (see retirePendingJobRuns).
+   */
+  retire: (ids: string[], reason: string) => Promise<number>;
   log: Pick<Logger, "info" | "warn" | "error">;
 };
 
 export type RequeueOutcome =
   | { type: JobType; status: "requeued"; tracked: number; queued: number; requeued: number }
+  | { type: JobType; status: "retired"; tracked: number; queued: number; retired: number }
   | { type: JobType; status: "skipped-live-consumer"; consumers: number }
   | { type: JobType; status: "error"; error: string; requeued: number };
 
@@ -89,7 +114,9 @@ export function selectOrphans(
  * this is recovery, and the worker must still come up to process what IS queued.
  */
 export async function requeueOrphanedJobs(deps: RequeueOrphansDeps): Promise<RequeueOutcome[]> {
-  const eligible = deps.types.filter((t) => JOB_DESCRIPTORS[t].requeueOnStartup);
+  const eligible = deps.types.filter(
+    (t) => JOB_DESCRIPTORS[t].requeueOnStartup || JOB_DESCRIPTORS[t].retireOrphansOnStartup,
+  );
   const outcomes: RequeueOutcome[] = [];
 
   for (const type of eligible) {
@@ -106,6 +133,22 @@ export async function requeueOrphanedJobs(deps: RequeueOrphansDeps): Promise<Req
           `Startup requeue skipped for ${type}: ${consumers} consumer(s) already attached, so lost messages can't be counted.`,
         );
         outcomes.push({ type, status: "skipped-live-consumer", consumers });
+        continue;
+      }
+
+      if (JOB_DESCRIPTORS[type].retireOrphansOnStartup) {
+        const cutoff = new Date(deps.now().getTime() - Math.max(deps.graceMs, RETIRE_MIN_AGE_MS));
+        // Only `pending` rows are retired; an orphaned `failed` row already
+        // reports a failure, and the repository re-checks `pending` anyway.
+        const ids = selectOrphans(rows, ready, cutoff)
+          .filter((r) => r.status === "pending")
+          .map((r) => r.id);
+        const retired = await deps.retire(ids, ORPHAN_RETIRED_REASON);
+        const line = `Retired ${retired} orphaned ${type} job(s) on startup as failed (${rows.length} open in job_runs, ${ready} in queue).`;
+        const fields = { jobType: type, retired, tracked: rows.length, queued: ready };
+        if (retired > 0) deps.log.warn(fields, line);
+        else deps.log.info(fields, line);
+        outcomes.push({ type, status: "retired", tracked: rows.length, queued: ready, retired });
         continue;
       }
 
