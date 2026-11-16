@@ -30,7 +30,15 @@ import makeWASocket, {
   type WAMessage,
   type WASocket,
 } from "@whiskeysockets/baileys";
-import { getLogger } from "../logging/log.js";
+import { getBaseLogger, getLogger } from "../logging/log.js";
+import {
+  assertLoadedStoredCreds,
+  type BackoffOptions,
+  backoffDelay,
+  CredsSaver,
+  CredsUnreadableError,
+  readStoredCreds,
+} from "./creds-persistence.js";
 import { GroupSubjectThrottle } from "./group-subject-throttle.js";
 import { createHistorySyncProgress, type HistorySyncProgress } from "./history-sync-progress.js";
 import { type AllowlistSource, applyOutboundGuard } from "./outbound-guard.js";
@@ -38,6 +46,33 @@ import { type AllowlistSource, applyOutboundGuard } from "./outbound-guard.js";
 const collectorLog = getLogger("collector");
 const historySyncLog = getLogger("history-sync");
 const diagLog = getLogger("diag-names");
+
+// ── Auth-state failure policy ───────────────────────────────────────────────
+
+/** Reconnect backoff after a connect() that threw (e.g. creds.json unreadable). */
+const RECONNECT_BACKOFF: BackoffOptions = { baseMs: 3_000, capMs: 60_000 };
+/** ~6 minutes of failed connects with the backoff above before exiting loudly. */
+const MAX_CONSECUTIVE_CONNECT_FAILURES = 10;
+
+/**
+ * Exit non-zero with a message that survives the exit. The pino transport is a
+ * worker thread, so a line logged right before process.exit can be lost — write
+ * it to stderr synchronously too, then give pino a bounded chance to flush.
+ */
+function exitLoudly(message: string, err: unknown): void {
+  const why = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`[collector] FATAL: ${message}: ${why}\n`);
+  collectorLog.fatal({ err }, message);
+  const exit = () => process.exit(1);
+  // Not unref'd: this timer must itself keep the loop alive, or an otherwise
+  // idle process could drain and exit 0 before the flush calls back.
+  setTimeout(exit, 1_000);
+  try {
+    getBaseLogger().flush(() => exit());
+  } catch {
+    exit();
+  }
+}
 
 export type SessionEvents = {
   message: [msg: WAMessage];
@@ -85,6 +120,21 @@ export class CollectorSession extends EventEmitter {
    * storm yet short enough to self-heal once the rate budget recovers.
    */
   private readonly groupSubjectThrottle = new GroupSubjectThrottle(5 * 60_000);
+  /**
+   * Persists creds on every `creds.update`. One per session, not per connect():
+   * its consecutive-failure count must survive reconnect storms (see
+   * creds-persistence.ts for the 2026-11-15 incident this guards).
+   */
+  private readonly credsSaver = new CredsSaver({
+    log: collectorLog,
+    onFatal: (err, failures) =>
+      exitLoudly(
+        `could not save WhatsApp creds after ${failures} consecutive attempts — check permissions on data/baileys-auth/`,
+        err,
+      ),
+  });
+  /** connect() attempts that threw in a row; reset when a connection opens. */
+  private connectFailures = 0;
 
   constructor(
     authDir: string,
@@ -186,11 +236,21 @@ export class CollectorSession extends EventEmitter {
 
   async start(): Promise<void> {
     this.stopped = false;
-    await this.connect();
+    try {
+      await this.connect();
+    } catch (err) {
+      // An unreadable creds.json at boot is the same transient fault as during a
+      // reconnect: retry it on the same backoff (exiting loudly if it persists)
+      // rather than failing start(), which serve would log once and then carry
+      // on with no collector. Any other startup error still propagates.
+      if (!(err instanceof CredsUnreadableError)) throw err;
+      this.onConnectFailed(err);
+    }
   }
 
   stop(): void {
     this.stopped = true;
+    this.credsSaver.stop();
     try {
       this.socket?.end(undefined);
     } catch {
@@ -369,13 +429,54 @@ export class CollectorSession extends EventEmitter {
     });
   }
 
+  /**
+   * Reconnect after `delayMs`. A connect() that throws (today: creds.json exists
+   * but is unreadable) is retried with backoff instead of being logged once and
+   * dropped, which left a live process with no connection. After
+   * MAX_CONSECUTIVE_CONNECT_FAILURES in a row it exits loudly.
+   */
+  private scheduleReconnect(delayMs: number): void {
+    setTimeout(() => {
+      if (this.stopped) return;
+      this.connect().catch((err: unknown) => this.onConnectFailed(err));
+    }, delayMs);
+  }
+
+  /** Count a failed connect(); retry with backoff, or exit loudly past the limit. */
+  private onConnectFailed(err: unknown): void {
+    this.connectFailures++;
+    if (this.connectFailures >= MAX_CONSECUTIVE_CONNECT_FAILURES) {
+      exitLoudly(`WhatsApp connect failed ${this.connectFailures} consecutive times`, err);
+      return;
+    }
+    const retryInMs = backoffDelay(this.connectFailures, RECONNECT_BACKOFF);
+    collectorLog.error(
+      {
+        err,
+        consecutiveFailures: this.connectFailures,
+        maxConsecutiveFailures: MAX_CONSECUTIVE_CONNECT_FAILURES,
+        retryInMs,
+      },
+      "connect failed — will retry",
+    );
+    this.scheduleReconnect(retryInMs);
+  }
+
   private async connect(): Promise<void> {
     if (this.stopped) return;
 
     // Ensure auth directory exists
     fs.mkdirSync(this.authDir, { recursive: true });
 
+    // useMultiFileAuthState swallows read errors and falls back to FRESH creds,
+    // which the next save would write over the real link. Refuse to connect
+    // while an existing creds.json can't be read, and check Baileys actually
+    // loaded it (its own read can fail even after ours succeeded). The caller
+    // retries a CredsUnreadableError with backoff.
+    const storedCreds = await readStoredCreds(this.authDir);
+
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+    assertLoadedStoredCreds(this.authDir, storedCreds, state.creds);
 
     // WhatsApp rejects stale WA-Web client versions with a pre-QR 405, which
     // presents as a silent disconnect loop that never pairs. Ask WhatsApp's own
@@ -412,8 +513,13 @@ export class CollectorSession extends EventEmitter {
 
     this.socket = sock;
 
-    // Persist credentials whenever they update (keeps session alive across restarts)
-    sock.ev.on("creds.update", saveCreds);
+    // Persist credentials whenever they update (keeps session alive across
+    // restarts). Never pass saveCreds straight in: the emitter drops its promise,
+    // so a failed write (EPERM) became an unhandled rejection that killed the
+    // process. The saver logs, retries with backoff, and only exits after
+    // repeated consecutive failures.
+    this.credsSaver.bind(saveCreds);
+    sock.ev.on("creds.update", this.credsSaver.onUpdate);
 
     // Contacts directory — the only source for SAVED contact names / push names.
     // Forwarded for the collector to resolve 1:1 chat display names.
@@ -438,6 +544,7 @@ export class CollectorSession extends EventEmitter {
       }
 
       if (connection === "open") {
+        this.connectFailures = 0;
         if (DIAG_NAMES) {
           diagLog.debug(
             "active — watching contacts.upsert/update + history.set (chats/contacts/lidPnMappings)",
@@ -466,11 +573,7 @@ export class CollectorSession extends EventEmitter {
             "connection closed",
           );
           // Reconnect after a brief delay
-          setTimeout(() => {
-            this.connect().catch((err: unknown) => {
-              collectorLog.error({ err }, "reconnect failed");
-            });
-          }, 3000);
+          this.scheduleReconnect(3000);
         }
       }
     });
