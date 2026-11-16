@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { RETIRED_ORPHAN_ERROR } from "../db/repositories/job-runs.js";
 import type { JobBus } from "../jobs/job-bus.js";
 import type { JobType } from "../jobs/job-types.js";
 
@@ -59,9 +60,12 @@ export type RedriveDeadJobsOpts = {
 export async function redriveDeadJobs(opts: RedriveDeadJobsOpts): Promise<RedriveResult> {
   const { pool, bus, cap } = opts;
 
-  // Load all dead rows
+  // Load all dead rows — except retired orphans (RETIRED_ORPHAN_ERROR): their
+  // work is superseded, so re-driving would replay stale work and delete the row.
   const { rows: deadRows } = await pool.query<DeadRow>(
-    `SELECT id, type, payload, last_error FROM job_runs WHERE status = 'dead'`,
+    `SELECT id, type, payload, last_error FROM job_runs
+     WHERE status = 'dead' AND last_error IS DISTINCT FROM $1`,
+    [RETIRED_ORPHAN_ERROR],
   );
 
   if (deadRows.length === 0) {

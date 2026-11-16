@@ -22,6 +22,16 @@ export type JobDescriptor = {
    * re-sent job may be months old.
    */
   requeueOnStartup: boolean;
+  /**
+   * True when the worker retires this type's orphaned `pending` rows at startup
+   * instead of re-sending them: rows with no queue message behind them, older
+   * than a day, are retired as `dead` with a marker redrive skips
+   * (src/workers/requeue-orphans.ts).
+   * For types whose lost work is superseded by a later run, so replaying it would
+   * only be a stale LLM call — but leaving it `pending` forever misreports it.
+   * Mutually exclusive with requeueOnStartup.
+   */
+  retireOrphansOnStartup: boolean;
 };
 
 /**
@@ -41,6 +51,7 @@ export const JOB_DESCRIPTORS = {
     usesOllama: false,
     opLabel: "import",
     requeueOnStartup: false,
+    retireOrphansOnStartup: false,
   },
   // The three media types ARE requeued on startup: makeIdempotentHandler skips a
   // message that already has a transcript/analysis, and enrichment never goes stale.
@@ -49,23 +60,40 @@ export const JOB_DESCRIPTORS = {
     usesOllama: false,
     opLabel: "audio",
     requeueOnStartup: true,
+    retireOrphansOnStartup: false,
   },
-  "analyze.image": { prefetch: "one", usesOllama: true, opLabel: "image", requeueOnStartup: true },
-  "analyze.video": { prefetch: "one", usesOllama: true, opLabel: "video", requeueOnStartup: true },
+  "analyze.image": {
+    prefetch: "one",
+    usesOllama: true,
+    opLabel: "image",
+    requeueOnStartup: true,
+    retireOrphansOnStartup: false,
+  },
+  "analyze.video": {
+    prefetch: "one",
+    usesOllama: true,
+    opLabel: "video",
+    requeueOnStartup: true,
+    retireOrphansOnStartup: false,
+  },
   // Not requeued: the scheduler re-enqueues every changed group on each run, so a
-  // lost summary is already superseded; replaying it is a stale LLM run.
+  // lost summary is already superseded; replaying it is a stale LLM run. Retired
+  // instead, so a lost one doesn't sit `pending` forever.
   "summarize.group": {
     prefetch: "one",
     usesOllama: true,
     opLabel: "summary",
     requeueOnStartup: false,
+    retireOrphansOnStartup: true,
   },
   // Not requeued: not idempotent — every run inserts a new total_summaries row.
+  // Retired instead: the next scheduled run's window covers the lost span.
   "summarize.total": {
     prefetch: "one",
     usesOllama: true,
     opLabel: "summary",
     requeueOnStartup: false,
+    retireOrphansOnStartup: true,
   },
   // @Aida's memory extraction. Ollama-bound like the summarizer, and prefetch
   // "one" for the same reason: it shares the single local GPU, and a shadow-phase
@@ -76,6 +104,7 @@ export const JOB_DESCRIPTORS = {
     usesOllama: true,
     opLabel: "summary",
     requeueOnStartup: false,
+    retireOrphansOnStartup: false,
   },
 } as const satisfies Record<string, JobDescriptor>;
 

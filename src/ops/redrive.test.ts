@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { upsertJobRun } from "../db/repositories/job-runs.js";
+import { RETIRED_ORPHAN_ERROR, upsertJobRun } from "../db/repositories/job-runs.js";
 import { InMemoryJobBus } from "../jobs/in-memory-bus.js";
 import { InMemoryJobRunRecorder } from "../jobs/job-run-recorder.js";
 import { createTestDatabase } from "../test/db.js";
@@ -249,5 +249,24 @@ describe("redriveDeadJobs", () => {
     // The dead row must still exist — work item is NOT lost
     const { rows } = await pool.query(`SELECT id FROM job_runs WHERE id = $1`, [deadId]);
     expect(rows).toHaveLength(1);
+  });
+
+  it("never re-drives or deletes a retired orphan (dead + RETIRED_ORPHAN_ERROR)", async () => {
+    const { bus, recorder } = makeBus();
+    const retiredId = await seedDeadJob(pool, {
+      type: "summarize.group",
+      payload: { groupId: "retired-1" },
+      lastError: RETIRED_ORPHAN_ERROR,
+    });
+
+    const result = await redriveDeadJobs({ pool, bus, cap: 2, now: () => new Date() });
+
+    const replayed = recorder.enqueuedJobs.filter(
+      (e) => (e.job.payload as Record<string, unknown>).groupId === "retired-1",
+    );
+    expect(replayed).toEqual([]);
+    expect(result.flaggedDetails.some((d) => d.lastError === RETIRED_ORPHAN_ERROR)).toBe(false);
+    const { rows } = await pool.query(`SELECT status FROM job_runs WHERE id = $1`, [retiredId]);
+    expect(rows).toEqual([{ status: "dead" }]);
   });
 });

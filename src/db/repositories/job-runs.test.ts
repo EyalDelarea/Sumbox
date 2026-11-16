@@ -6,7 +6,9 @@ import {
   countJobsByStatus,
   getJobStatuses,
   listNonTerminalJobRuns,
+  RETIRED_ORPHAN_ERROR,
   resetStaleRunningJobs,
+  retirePendingJobRuns,
   setJobStatus,
   upsertJobRun,
 } from "./job-runs.js";
@@ -506,6 +508,72 @@ describe("job-runs repository", () => {
 
     it("returns an empty map for no ids without querying", async () => {
       expect((await getJobStatuses(pool, [])).size).toBe(0);
+    });
+  });
+
+  describe("retirePendingJobRuns", () => {
+    // Ids distinct from getJobStatuses' rows (same type, shared database).
+    const ids = {
+      pending: "550e8400-e29b-41d4-a716-4466554ab101",
+      running: "550e8400-e29b-41d4-a716-4466554ab102",
+      done: "550e8400-e29b-41d4-a716-4466554ab103",
+      untouched: "550e8400-e29b-41d4-a716-4466554ab104",
+    };
+
+    it("marks only the listed, still-pending rows dead with the marker; deletes nothing", async () => {
+      for (const [id, status] of [
+        [ids.pending, "pending"],
+        [ids.running, "running"],
+        [ids.done, "done"],
+        [ids.untouched, "pending"],
+      ] as const) {
+        await pool.query(
+          `INSERT INTO job_runs (id, type, status, payload, attempts, max_attempts)
+           VALUES ($1, 'summarize.group', $2, '{}', 0, 3)`,
+          [id, status],
+        );
+      }
+
+      const n = await retirePendingJobRuns(pool, [ids.pending, ids.running, ids.done]);
+
+      expect(n).toBe(1);
+      const { rows } = await pool.query<{ id: string; status: string; last_error: string | null }>(
+        `SELECT id::text AS id, status, last_error FROM job_runs WHERE id = ANY($1::uuid[]) ORDER BY id`,
+        [Object.values(ids)],
+      );
+      expect(rows.map((r) => [r.id, r.status, r.last_error])).toEqual([
+        [ids.pending, "dead", RETIRED_ORPHAN_ERROR],
+        [ids.running, "running", null],
+        [ids.done, "done", null],
+        [ids.untouched, "pending", null],
+      ]);
+    });
+
+    it("a retired row reads as settled: not listed as non-terminal, dead to the digest wait", async () => {
+      const id = "550e8400-e29b-41d4-a716-4466554ab111";
+      await upsertJobRun(pool, {
+        id,
+        type: "memory.extract",
+        status: "pending",
+        payload: {},
+        attempts: 0,
+        maxAttempts: 3,
+      });
+      expect((await listNonTerminalJobRuns(pool, "memory.extract")).map((r) => r.id)).toContain(id);
+
+      await retirePendingJobRuns(pool, [id]);
+
+      expect((await listNonTerminalJobRuns(pool, "memory.extract")).map((r) => r.id)).not.toContain(
+        id,
+      );
+      expect((await getJobStatuses(pool, [id])).get(id)).toBe("dead");
+    });
+
+    // The self-heal of a wrongly retired row runs through the bus's real consume
+    // path — see "consume revives a retired (dead) row" in jobs/rabbitmq-bus.test.ts.
+
+    it("is a no-op for an empty id list", async () => {
+      expect(await retirePendingJobRuns(pool, [])).toBe(0);
     });
   });
 });

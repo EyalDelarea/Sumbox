@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { NonTerminalJobRun } from "../db/repositories/job-runs.js";
 import type { Job, JobType } from "../jobs/job-types.js";
 import {
+  RETIRE_MIN_AGE_MS,
   type RequeueBus,
   type RequeueOrphansDeps,
   requeueOrphanedJobs,
@@ -52,6 +53,7 @@ function makeDeps(
 ) {
   const lines: Array<{ level: string; msg: string }> = [];
   const listed: JobType[] = [];
+  const retired: string[][] = [];
   const deps: RequeueOrphansDeps = {
     types: ["transcribe.voicenote", "analyze.image", "analyze.video"],
     listNonTerminal: async (type) => {
@@ -61,6 +63,10 @@ function makeDeps(
     bus,
     now: () => NOW,
     graceMs: GRACE_MS,
+    retire: async (ids) => {
+      retired.push(ids);
+      return ids.length;
+    },
     log: {
       info: (_o: unknown, msg?: string) => lines.push({ level: "info", msg: msg ?? "" }),
       warn: (_o: unknown, msg?: string) => lines.push({ level: "warn", msg: msg ?? "" }),
@@ -68,7 +74,7 @@ function makeDeps(
     } as RequeueOrphansDeps["log"],
     ...overrides,
   };
-  return { deps, lines, listed };
+  return { deps, lines, listed, retired };
 }
 
 // ── selectOrphans ────────────────────────────────────────────────────────────
@@ -180,23 +186,23 @@ describe("requeueOrphanedJobs", () => {
     expect(lines.some((l) => l.level === "warn" && l.msg.includes("analyze.image"))).toBe(true);
   });
 
-  it("only touches types this worker consumes that opt in to startup requeue", async () => {
+  it("only touches types this worker consumes that opt in to startup requeue or retirement", async () => {
     const bus = new FakeBus();
     const { deps, listed } = makeDeps(
       {
-        "summarize.total": rowsOf("summarize.total", 2),
+        "memory.extract": rowsOf("memory.extract", 2),
         "summarize.group": rowsOf("summarize.group", 2),
         "analyze.video": rowsOf("analyze.video", 2),
       },
       bus,
-      // analyze.video is requeueable but not consumed here; the summaries are
-      // consumed but not requeueable.
-      { types: ["summarize.total", "summarize.group", "transcribe.voicenote"] },
+      // analyze.video is requeueable but not consumed here; memory.extract is
+      // consumed but opts into neither; summarize.group is retired, not re-sent.
+      { types: ["memory.extract", "summarize.group", "transcribe.voicenote"] },
     );
 
     await requeueOrphanedJobs(deps);
 
-    expect(listed).toEqual(["transcribe.voicenote"]);
+    expect(listed).toEqual(["summarize.group", "transcribe.voicenote"]);
     expect(bus.published).toEqual([]);
   });
 
@@ -285,5 +291,137 @@ describe("requeueOrphanedJobs", () => {
     await requeueOrphanedJobs(deps);
 
     expect(calls).toEqual(["rows:transcribe.voicenote", "stats:transcribe.voicenote"]);
+  });
+});
+
+// ── retirement (summaries) ───────────────────────────────────────────────────
+
+describe("requeueOrphanedJobs — retiring orphaned summaries", () => {
+  const DAY_MIN = RETIRE_MIN_AGE_MS / 60_000;
+
+  it("marks day-old orphaned pending summaries failed with the reason, and never re-sends them", async () => {
+    // The 2026-11-16 live shape: months-old pending rows, empty queue.
+    const old = rowsOf("summarize.group", 3, 90 * DAY_MIN);
+    const bus = new FakeBus();
+    const { deps, retired, lines } = makeDeps({ "summarize.group": old }, bus, {
+      types: ["summarize.group"],
+    });
+
+    const outcomes = await requeueOrphanedJobs(deps);
+
+    expect(bus.published).toEqual([]);
+    expect(retired).toEqual([old.map((r) => r.id)]);
+    expect(outcomes).toEqual([
+      { type: "summarize.group", status: "retired", tracked: 3, queued: 0, retired: 3 },
+    ]);
+    expect(lines).toContainEqual({
+      level: "warn",
+      msg: "Retired 3 orphaned summarize.group job(s) on startup as dead (3 open in job_runs, 0 in queue).",
+    });
+  });
+
+  it("leaves an orphan younger than a day alone — it may only be slow, not lost", async () => {
+    // Well past the requeue grace window, but under a day old.
+    const recent = rowsOf("summarize.total", 2, DAY_MIN - 10);
+    const { deps, retired } = makeDeps({ "summarize.total": recent }, new FakeBus(), {
+      types: ["summarize.total"],
+    });
+
+    await requeueOrphanedJobs(deps);
+
+    expect(retired).toEqual([[]]);
+  });
+
+  it("retires only the missing count — rows whose messages are still queued are kept", async () => {
+    const rows = rowsOf("summarize.group", 5, 3 * DAY_MIN);
+    const { deps, retired } = makeDeps(
+      { "summarize.group": rows },
+      new FakeBus({ "summarize.group": 2 }),
+      {
+        types: ["summarize.group"],
+      },
+    );
+
+    await requeueOrphanedJobs(deps);
+
+    // 5 rows, 2 queued → the oldest 3 have no message.
+    expect(retired[0]).toEqual(rows.slice(0, 3).map((r) => r.id));
+  });
+
+  it("never retires a failed or running row, only pending ones", async () => {
+    const rows = rowsOf("summarize.group", 3, 3 * DAY_MIN).map((r, i) => ({
+      ...r,
+      status: (["failed", "running", "pending"] as const)[i] ?? "pending",
+    }));
+    const { deps, retired } = makeDeps({ "summarize.group": rows }, new FakeBus(), {
+      types: ["summarize.group"],
+    });
+
+    await requeueOrphanedJobs(deps);
+
+    expect(retired[0]).toEqual([rows[2]?.id]);
+  });
+
+  it("never counts failed rows as missing, so they can't push a queued backlog row into the slice", async () => {
+    // A 5-day-old backlog of 2 live pending rows whose messages ARE queued, plus
+    // 36 newer `failed` rows (e.g. the July rows, whose retries are long gone).
+    // Counting them would make 36 "missing" and slice the oldest — the live ones.
+    const live = rowsOf("summarize.group", 2, 5 * DAY_MIN).map((r) => ({
+      ...r,
+      id: `live-${r.id}`,
+    }));
+    const staleFailed = rowsOf("summarize.group", 36, 2 * DAY_MIN).map((r) => ({
+      ...r,
+      status: "failed" as const,
+    }));
+    const { deps, retired } = makeDeps(
+      { "summarize.group": [...live, ...staleFailed] },
+      new FakeBus({ "summarize.group": 2 }),
+      { types: ["summarize.group"] },
+    );
+
+    await requeueOrphanedJobs(deps);
+
+    expect(retired).toEqual([[]]);
+  });
+
+  it("skips retirement while another consumer is attached", async () => {
+    const { deps, retired } = makeDeps(
+      { "summarize.group": rowsOf("summarize.group", 2, 3 * DAY_MIN) },
+      new FakeBus({}, { "summarize.group": 1 }),
+      { types: ["summarize.group"] },
+    );
+
+    const outcomes = await requeueOrphanedJobs(deps);
+
+    expect(retired).toEqual([]);
+    expect(outcomes[0]?.status).toBe("skipped-live-consumer");
+  });
+
+  it("a retire failure is logged and does not stop the other types", async () => {
+    const bus = new FakeBus();
+    const { deps, lines } = makeDeps(
+      {
+        "summarize.group": rowsOf("summarize.group", 1, 3 * DAY_MIN),
+        "transcribe.voicenote": rowsOf("transcribe.voicenote", 1),
+      },
+      bus,
+      {
+        types: ["summarize.group", "transcribe.voicenote"],
+        retire: async () => {
+          throw new Error("db down");
+        },
+      },
+    );
+
+    const outcomes = await requeueOrphanedJobs(deps);
+
+    expect(outcomes[0]).toMatchObject({
+      type: "summarize.group",
+      status: "error",
+      error: "db down",
+    });
+    expect(bus.published).toHaveLength(1);
+    expect(lines.some((l) => l.level === "error" && l.msg.includes("db down"))).toBe(true);
   });
 });

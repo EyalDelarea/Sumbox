@@ -89,6 +89,52 @@ export async function resetStaleRunningJobs(client: pg.Pool | pg.PoolClient): Pr
   return rowCount ?? 0;
 }
 
+/**
+ * The exact `last_error` of a RETIRED row: a `dead` row the worker gave up on at
+ * startup because its queue message was lost and its work is superseded (see
+ * src/workers/requeue-orphans.ts). It is the marker ops-sweep's redrive
+ * (src/ops/redrive.ts) skips — redrive otherwise re-enqueues and DELETES every
+ * dead row, which would replay exactly the stale work being retired and erase
+ * its history.
+ *
+ * Why `dead` + marker rather than another status: `dead` is the bus's only
+ * terminal failure, so every reader already treats it as settled — the digest's
+ * group wait (scheduler/await-jobs.ts), listNonTerminalJobRuns, status counts.
+ * `failed` means "a retry is in flight" there. A new status value would need a
+ * migration widening the job_runs status CHECK constraint.
+ */
+export const RETIRED_ORPHAN_ERROR =
+  "retired at worker startup: queue message lost; superseded by later scheduled runs";
+
+/**
+ * Retire the listed rows: mark them `dead` with RETIRED_ORPHAN_ERROR — but only
+ * those still `pending`. A status update, never a delete: the row stays as
+ * history. The `status = 'pending'` guard leaves alone a row that started
+ * running, or settled, since it was selected.
+ *
+ * Not irreversible: if a retired row's message was in fact still queued, the
+ * bus's consume sets the row `running` (setJobStatus has no status guard), and
+ * it settles normally from there.
+ *
+ * Returns the number of rows updated.
+ */
+export async function retirePendingJobRuns(
+  client: pg.Pool | pg.PoolClient,
+  ids: readonly string[],
+): Promise<number> {
+  if (ids.length === 0) return 0;
+  const { rowCount } = await client.query(
+    `UPDATE job_runs
+     SET status     = 'dead',
+         last_error = $2,
+         updated_at = now()
+     WHERE status = 'pending'
+       AND id = ANY($1::uuid[])`,
+    [ids, RETIRED_ORPHAN_ERROR],
+  );
+  return rowCount ?? 0;
+}
+
 /** A job_runs row that should still have a message somewhere in its queue. */
 export type NonTerminalJobRun = {
   id: string;
