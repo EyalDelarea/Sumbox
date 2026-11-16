@@ -363,6 +363,30 @@ describe("requeueOrphanedJobs — retiring orphaned summaries", () => {
     expect(retired[0]?.ids).toEqual([rows[2]?.id]);
   });
 
+  it("a later startup never retires a live queued row, however many rows were retired before", async () => {
+    // A 5-day-old backlog of 2 live pending rows whose messages ARE queued, plus
+    // 36 newer rows retired on an earlier startup (now `failed`, no message).
+    // Counting the retired rows would make 36 "missing" and slice the oldest —
+    // the live ones.
+    const live = rowsOf("summarize.group", 2, 5 * DAY_MIN).map((r) => ({
+      ...r,
+      id: `live-${r.id}`,
+    }));
+    const previouslyRetired = rowsOf("summarize.group", 36, 2 * DAY_MIN).map((r) => ({
+      ...r,
+      status: "failed" as const,
+    }));
+    const { deps, retired } = makeDeps(
+      { "summarize.group": [...live, ...previouslyRetired] },
+      new FakeBus({ "summarize.group": 2 }),
+      { types: ["summarize.group"] },
+    );
+
+    await requeueOrphanedJobs(deps);
+
+    expect(retired).toEqual([{ ids: [], reason: ORPHAN_RETIRED_REASON }]);
+  });
+
   it("skips retirement while another consumer is attached", async () => {
     const { deps, retired } = makeDeps(
       { "summarize.group": rowsOf("summarize.group", 2, 3 * DAY_MIN) },

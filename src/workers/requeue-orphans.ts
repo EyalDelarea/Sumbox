@@ -43,8 +43,17 @@
  * they sit `pending` forever (36 summarize.group rows from 2026-07..09 did).
  * Orphaned `pending` rows older than RETIRE_MIN_AGE_MS are marked `failed` with
  * ORPHAN_RETIRED_REASON — a status update, never a delete. `failed`, not `dead`:
- * ops-sweep re-drives (and deletes) dead rows. The day-long minimum age is far
- * past any real backlog, so a row whose message is merely slow is never touched.
+ * ops-sweep re-drives (and deletes) dead rows.
+ *
+ * Retirement counts ONLY `pending` rows against the queue: missing =
+ * pending rows − ready messages. A retired row is `failed` with no message, so
+ * counting `failed` rows (as the re-send path does) would inflate every later
+ * startup's count by every row ever retired, and the oldest-first slice could
+ * then reach a live, still-queued pending row. Ready messages also include
+ * genuine `failed` retries, so this count can only come out LOW — an orphan may
+ * wait for a later startup, but a queued row is never retired. The day-long
+ * minimum age is a second margin on top: a row created by the current scheduler
+ * run is never a candidate.
  */
 import type { NonTerminalJobRun } from "../db/repositories/job-runs.js";
 import { JOB_DESCRIPTORS, type Job, type JobType } from "../jobs/job-types.js";
@@ -138,11 +147,10 @@ export async function requeueOrphanedJobs(deps: RequeueOrphansDeps): Promise<Req
 
       if (JOB_DESCRIPTORS[type].retireOrphansOnStartup) {
         const cutoff = new Date(deps.now().getTime() - Math.max(deps.graceMs, RETIRE_MIN_AGE_MS));
-        // Only `pending` rows are retired; an orphaned `failed` row already
-        // reports a failure, and the repository re-checks `pending` anyway.
-        const ids = selectOrphans(rows, ready, cutoff)
-          .filter((r) => r.status === "pending")
-          .map((r) => r.id);
+        // Pending rows only, counted against the whole queue — see the header:
+        // this can under-count but never retire a row whose message is queued.
+        const pending = rows.filter((r) => r.status === "pending");
+        const ids = selectOrphans(pending, ready, cutoff).map((r) => r.id);
         const retired = await deps.retire(ids, ORPHAN_RETIRED_REASON);
         const line = `Retired ${retired} orphaned ${type} job(s) on startup as failed (${rows.length} open in job_runs, ${ready} in queue).`;
         const fields = { jobType: type, retired, tracked: rows.length, queued: ready };
