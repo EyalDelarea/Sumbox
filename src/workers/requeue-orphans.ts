@@ -41,19 +41,24 @@
  * same way, but their orphans are not re-sent: a lost summary is superseded by
  * the next scheduled run, and a lost total by the next run's window. Left alone
  * they sit `pending` forever (36 summarize.group rows from 2026-07..09 did).
- * Orphaned `pending` rows older than RETIRE_MIN_AGE_MS are marked `failed` with
- * ORPHAN_RETIRED_REASON — a status update, never a delete. `failed`, not `dead`:
- * ops-sweep re-drives (and deletes) dead rows.
+ * Orphaned `pending` rows older than RETIRE_MIN_AGE_MS are retired: marked
+ * `dead` with the RETIRED_ORPHAN_ERROR marker (retirePendingJobRuns) — a status
+ * update, never a delete. `dead` so every reader sees the row as settled; the
+ * marker so ops-sweep's redrive skips it instead of replaying and deleting it.
  *
  * Retirement counts ONLY `pending` rows against the queue: missing =
- * pending rows − ready messages. A retired row is `failed` with no message, so
- * counting `failed` rows (as the re-send path does) would inflate every later
- * startup's count by every row ever retired, and the oldest-first slice could
- * then reach a live, still-queued pending row. Ready messages also include
- * genuine `failed` retries, so this count can only come out LOW — an orphan may
- * wait for a later startup, but a queued row is never retired. The day-long
- * minimum age is a second margin on top: a row created by the current scheduler
- * run is never a candidate.
+ * pending rows − ready messages. Ready messages also include genuine `failed`
+ * retries, so the count can come out LOW (an orphan waits for a later startup),
+ * never high.
+ *
+ * WHICH rows is a guess: like the re-send path, it takes the OLDEST `missing`
+ * rows, assuming a broker loss takes the older messages. If instead a newer
+ * message was lost while an older backlog row (> RETIRE_MIN_AGE_MS) is still
+ * queued, the older, still-queued row is retired. That self-heals: when its
+ * message is consumed the bus sets the row `running` unconditionally and it
+ * settles normally (covered by a job-runs test); the newer lost row is retired
+ * on a later startup. The day-long minimum age keeps every row from the current
+ * scheduler run out of reach.
  */
 import type { NonTerminalJobRun } from "../db/repositories/job-runs.js";
 import { JOB_DESCRIPTORS, type Job, type JobType } from "../jobs/job-types.js";
@@ -63,10 +68,6 @@ import type { Logger } from "../logging/logger.js";
 
 /** Orphans younger than this are never retired — only clearly abandoned rows. */
 export const RETIRE_MIN_AGE_MS = 24 * 60 * 60 * 1000;
-
-/** last_error written on a retired row. */
-export const ORPHAN_RETIRED_REASON =
-  "orphaned: no queue message at worker startup; superseded by later scheduled runs";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -85,10 +86,10 @@ export type RequeueOrphansDeps = {
   /** Rows younger than this are never re-sent. */
   graceMs: number;
   /**
-   * Mark the given still-`pending` rows failed with `reason`; returns how many
-   * changed (see retirePendingJobRuns).
+   * Retire the given still-`pending` rows (dead + RETIRED_ORPHAN_ERROR); returns
+   * how many changed (see retirePendingJobRuns).
    */
-  retire: (ids: string[], reason: string) => Promise<number>;
+  retire: (ids: string[]) => Promise<number>;
   log: Pick<Logger, "info" | "warn" | "error">;
 };
 
@@ -147,12 +148,12 @@ export async function requeueOrphanedJobs(deps: RequeueOrphansDeps): Promise<Req
 
       if (JOB_DESCRIPTORS[type].retireOrphansOnStartup) {
         const cutoff = new Date(deps.now().getTime() - Math.max(deps.graceMs, RETIRE_MIN_AGE_MS));
-        // Pending rows only, counted against the whole queue — see the header:
-        // this can under-count but never retire a row whose message is queued.
+        // Pending rows only, counted against the whole queue — see the header
+        // for why this can under-count, and what happens if it picks wrong.
         const pending = rows.filter((r) => r.status === "pending");
         const ids = selectOrphans(pending, ready, cutoff).map((r) => r.id);
-        const retired = await deps.retire(ids, ORPHAN_RETIRED_REASON);
-        const line = `Retired ${retired} orphaned ${type} job(s) on startup as failed (${rows.length} open in job_runs, ${ready} in queue).`;
+        const retired = await deps.retire(ids);
+        const line = `Retired ${retired} orphaned ${type} job(s) on startup as dead (${rows.length} open in job_runs, ${ready} in queue).`;
         const fields = { jobType: type, retired, tracked: rows.length, queued: ready };
         if (retired > 0) deps.log.warn(fields, line);
         else deps.log.info(fields, line);

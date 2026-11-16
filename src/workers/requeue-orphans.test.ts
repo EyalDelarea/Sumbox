@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { NonTerminalJobRun } from "../db/repositories/job-runs.js";
 import type { Job, JobType } from "../jobs/job-types.js";
 import {
-  ORPHAN_RETIRED_REASON,
   RETIRE_MIN_AGE_MS,
   type RequeueBus,
   type RequeueOrphansDeps,
@@ -54,7 +53,7 @@ function makeDeps(
 ) {
   const lines: Array<{ level: string; msg: string }> = [];
   const listed: JobType[] = [];
-  const retired: Array<{ ids: string[]; reason: string }> = [];
+  const retired: string[][] = [];
   const deps: RequeueOrphansDeps = {
     types: ["transcribe.voicenote", "analyze.image", "analyze.video"],
     listNonTerminal: async (type) => {
@@ -64,8 +63,8 @@ function makeDeps(
     bus,
     now: () => NOW,
     graceMs: GRACE_MS,
-    retire: async (ids, reason) => {
-      retired.push({ ids, reason });
+    retire: async (ids) => {
+      retired.push(ids);
       return ids.length;
     },
     log: {
@@ -311,13 +310,13 @@ describe("requeueOrphanedJobs — retiring orphaned summaries", () => {
     const outcomes = await requeueOrphanedJobs(deps);
 
     expect(bus.published).toEqual([]);
-    expect(retired).toEqual([{ ids: old.map((r) => r.id), reason: ORPHAN_RETIRED_REASON }]);
+    expect(retired).toEqual([old.map((r) => r.id)]);
     expect(outcomes).toEqual([
       { type: "summarize.group", status: "retired", tracked: 3, queued: 0, retired: 3 },
     ]);
     expect(lines).toContainEqual({
       level: "warn",
-      msg: "Retired 3 orphaned summarize.group job(s) on startup as failed (3 open in job_runs, 0 in queue).",
+      msg: "Retired 3 orphaned summarize.group job(s) on startup as dead (3 open in job_runs, 0 in queue).",
     });
   });
 
@@ -330,7 +329,7 @@ describe("requeueOrphanedJobs — retiring orphaned summaries", () => {
 
     await requeueOrphanedJobs(deps);
 
-    expect(retired).toEqual([{ ids: [], reason: ORPHAN_RETIRED_REASON }]);
+    expect(retired).toEqual([[]]);
   });
 
   it("retires only the missing count — rows whose messages are still queued are kept", async () => {
@@ -346,7 +345,7 @@ describe("requeueOrphanedJobs — retiring orphaned summaries", () => {
     await requeueOrphanedJobs(deps);
 
     // 5 rows, 2 queued → the oldest 3 have no message.
-    expect(retired[0]?.ids).toEqual(rows.slice(0, 3).map((r) => r.id));
+    expect(retired[0]).toEqual(rows.slice(0, 3).map((r) => r.id));
   });
 
   it("never retires a failed or running row, only pending ones", async () => {
@@ -360,31 +359,30 @@ describe("requeueOrphanedJobs — retiring orphaned summaries", () => {
 
     await requeueOrphanedJobs(deps);
 
-    expect(retired[0]?.ids).toEqual([rows[2]?.id]);
+    expect(retired[0]).toEqual([rows[2]?.id]);
   });
 
-  it("a later startup never retires a live queued row, however many rows were retired before", async () => {
+  it("never counts failed rows as missing, so they can't push a queued backlog row into the slice", async () => {
     // A 5-day-old backlog of 2 live pending rows whose messages ARE queued, plus
-    // 36 newer rows retired on an earlier startup (now `failed`, no message).
-    // Counting the retired rows would make 36 "missing" and slice the oldest —
-    // the live ones.
+    // 36 newer `failed` rows (e.g. the July rows, whose retries are long gone).
+    // Counting them would make 36 "missing" and slice the oldest — the live ones.
     const live = rowsOf("summarize.group", 2, 5 * DAY_MIN).map((r) => ({
       ...r,
       id: `live-${r.id}`,
     }));
-    const previouslyRetired = rowsOf("summarize.group", 36, 2 * DAY_MIN).map((r) => ({
+    const staleFailed = rowsOf("summarize.group", 36, 2 * DAY_MIN).map((r) => ({
       ...r,
       status: "failed" as const,
     }));
     const { deps, retired } = makeDeps(
-      { "summarize.group": [...live, ...previouslyRetired] },
+      { "summarize.group": [...live, ...staleFailed] },
       new FakeBus({ "summarize.group": 2 }),
       { types: ["summarize.group"] },
     );
 
     await requeueOrphanedJobs(deps);
 
-    expect(retired).toEqual([{ ids: [], reason: ORPHAN_RETIRED_REASON }]);
+    expect(retired).toEqual([[]]);
   });
 
   it("skips retirement while another consumer is attached", async () => {

@@ -25,7 +25,8 @@ export type JobDescriptor = {
   /**
    * True when the worker retires this type's orphaned `pending` rows at startup
    * instead of re-sending them: rows with no queue message behind them, older
-   * than a day, are marked `failed` with a reason (src/workers/requeue-orphans.ts).
+   * than a day, are retired as `dead` with a marker redrive skips
+   * (src/workers/requeue-orphans.ts).
    * For types whose lost work is superseded by a later run, so replaying it would
    * only be a stale LLM call — but leaving it `pending` forever misreports it.
    * Mutually exclusive with requeueOnStartup.
