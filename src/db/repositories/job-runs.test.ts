@@ -6,6 +6,7 @@ import {
   countJobsByStatus,
   listNonTerminalJobRuns,
   resetStaleRunningJobs,
+  retirePendingJobRuns,
   setJobStatus,
   upsertJobRun,
 } from "./job-runs.js";
@@ -476,6 +477,53 @@ describe("job-runs repository", () => {
         maxAttempts: 4,
       });
       expect(rows[0]?.createdAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe("retirePendingJobRuns", () => {
+    // summarize.group rows are used by no other test in this file.
+    const ids = {
+      pending: "550e8400-e29b-41d4-a716-4466554ab001",
+      running: "550e8400-e29b-41d4-a716-4466554ab002",
+      done: "550e8400-e29b-41d4-a716-4466554ab003",
+      untouched: "550e8400-e29b-41d4-a716-4466554ab004",
+    };
+
+    it("marks only the listed, still-pending rows failed with the reason; deletes nothing", async () => {
+      for (const [id, status] of [
+        [ids.pending, "pending"],
+        [ids.running, "running"],
+        [ids.done, "done"],
+        [ids.untouched, "pending"],
+      ] as const) {
+        await pool.query(
+          `INSERT INTO job_runs (id, type, status, payload, attempts, max_attempts)
+           VALUES ($1, 'summarize.group', $2, '{}', 0, 3)`,
+          [id, status],
+        );
+      }
+
+      const n = await retirePendingJobRuns(
+        pool,
+        [ids.pending, ids.running, ids.done],
+        "superseded",
+      );
+
+      expect(n).toBe(1);
+      const { rows } = await pool.query<{ id: string; status: string; last_error: string | null }>(
+        `SELECT id::text AS id, status, last_error FROM job_runs WHERE id = ANY($1::uuid[]) ORDER BY id`,
+        [Object.values(ids)],
+      );
+      expect(rows.map((r) => [r.id, r.status, r.last_error])).toEqual([
+        [ids.pending, "failed", "superseded"],
+        [ids.running, "running", null],
+        [ids.done, "done", null],
+        [ids.untouched, "pending", null],
+      ]);
+    });
+
+    it("is a no-op for an empty id list", async () => {
+      expect(await retirePendingJobRuns(pool, [], "x")).toBe(0);
     });
   });
 });

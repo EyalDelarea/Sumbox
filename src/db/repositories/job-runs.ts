@@ -89,6 +89,37 @@ export async function resetStaleRunningJobs(client: pg.Pool | pg.PoolClient): Pr
   return rowCount ?? 0;
 }
 
+/**
+ * Mark the listed rows `failed` with `reason` — but only those still `pending`.
+ * Used at worker startup to retire rows whose queue message is gone and whose
+ * work is superseded (see src/workers/requeue-orphans.ts). A status update, never
+ * a delete: the row stays as history.
+ *
+ * `failed`, not `dead`: ops-sweep's redrive (src/ops/redrive.ts) re-enqueues and
+ * DELETES dead rows, which would replay exactly the stale work being retired.
+ * The `status = 'pending'` guard means a row that started running, or settled,
+ * since it was selected is left alone.
+ *
+ * Returns the number of rows updated.
+ */
+export async function retirePendingJobRuns(
+  client: pg.Pool | pg.PoolClient,
+  ids: readonly string[],
+  reason: string,
+): Promise<number> {
+  if (ids.length === 0) return 0;
+  const { rowCount } = await client.query(
+    `UPDATE job_runs
+     SET status     = 'failed',
+         last_error = $2,
+         updated_at = now()
+     WHERE status = 'pending'
+       AND id = ANY($1::uuid[])`,
+    [ids, reason],
+  );
+  return rowCount ?? 0;
+}
+
 /** A job_runs row that should still have a message somewhere in its queue. */
 export type NonTerminalJobRun = {
   id: string;
