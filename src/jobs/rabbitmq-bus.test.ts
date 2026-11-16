@@ -1,6 +1,13 @@
 import { RabbitMQContainer, type StartedRabbitMQContainer } from "@testcontainers/rabbitmq";
+import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { InMemoryJobRunRecorder } from "./job-run-recorder.js";
+import {
+  getJobStatuses,
+  RETIRED_ORPHAN_ERROR,
+  retirePendingJobRuns,
+} from "../db/repositories/job-runs.js";
+import { createTestDatabase } from "../test/db.js";
+import { InMemoryJobRunRecorder, PostgresJobRunRecorder } from "./job-run-recorder.js";
 import { RabbitMqJobBus } from "./rabbitmq-bus.js";
 
 /**
@@ -318,6 +325,49 @@ describe("RabbitMqJobBus — integration (testcontainers)", () => {
       await bus.close();
     }
   }, 30_000);
+
+  // ── Self-heal of a wrongly retired row (src/workers/requeue-orphans.ts) ──
+
+  it("consume revives a retired (dead) row whose message was still queued: running, then done", async () => {
+    // Real job_runs rows: the revival under test is consume's own status write.
+    const pool = new pg.Pool({ connectionString: await createTestDatabase() });
+    const recorder = new PostgresJobRunRecorder(pool);
+    const bus = makeBus(recorder);
+    const consumerBus = makeBus(recorder);
+
+    try {
+      const { id } = await bus.enqueue("summarize.group", { groupId: "self-heal" });
+      await waitUntil(async () => (await bus.queueStats("summarize.group")).ready === 1, 5_000);
+
+      // The startup retire guessed wrong: it retires this row while its message is queued.
+      expect(await retirePendingJobRuns(pool, [id])).toBe(1);
+      expect((await getJobStatuses(pool, [id])).get(id)).toBe("dead");
+
+      // Status as the handler sees it: consume must have revived the row first.
+      const seenByHandler: Array<string | undefined> = [];
+      await consumerBus.consume(
+        "summarize.group",
+        async (job) => {
+          seenByHandler.push((await getJobStatuses(pool, [job.id])).get(job.id));
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await getJobStatuses(pool, [id])).get(id) === "done", 5_000);
+
+      expect(seenByHandler).toEqual(["running"]);
+      const { rows } = await pool.query<{ status: string; last_error: string | null }>(
+        `SELECT status, last_error FROM job_runs WHERE id = $1`,
+        [id],
+      );
+      // Settled normally. last_error keeps the marker (setJobStatus only
+      // overwrites it with a new error) — harmless: redrive only reads dead rows.
+      expect(rows).toEqual([{ status: "done", last_error: RETIRED_ORPHAN_ERROR }]);
+    } finally {
+      await consumerBus.close();
+      await bus.close();
+      await pool.end();
+    }
+  }, 60_000);
 });
 
 // ── Fix 4: connect-race unit test (fake amqplib, no Testcontainers) ──────────

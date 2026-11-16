@@ -569,24 +569,8 @@ describe("job-runs repository", () => {
       expect((await getJobStatuses(pool, [id])).get(id)).toBe("dead");
     });
 
-    it("self-heals when a retired row's message was still queued: consume revives it", async () => {
-      const id = "550e8400-e29b-41d4-a716-4466554ab112";
-      await upsertJobRun(pool, {
-        id,
-        type: "summarize.group",
-        status: "pending",
-        payload: { groupId: "1" },
-        attempts: 0,
-        maxAttempts: 3,
-      });
-      await retirePendingJobRuns(pool, [id]);
-
-      // What RabbitMqJobBus's consume does via the recorder, unconditionally.
-      await setJobStatus(pool, id, "running");
-      await setJobStatus(pool, id, "done");
-
-      expect((await getJobStatuses(pool, [id])).get(id)).toBe("done");
-    });
+    // The self-heal of a wrongly retired row runs through the bus's real consume
+    // path — see "consume revives a retired (dead) row" in jobs/rabbitmq-bus.test.ts.
 
     it("is a no-op for an empty id list", async () => {
       expect(await retirePendingJobRuns(pool, [])).toBe(0);
