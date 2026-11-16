@@ -38,6 +38,7 @@ import {
   CredsSaver,
   CredsUnreadableError,
   readStoredCreds,
+  type StoredCreds,
 } from "./creds-persistence.js";
 import { GroupSubjectThrottle } from "./group-subject-throttle.js";
 import { createHistorySyncProgress, type HistorySyncProgress } from "./history-sync-progress.js";
@@ -73,6 +74,31 @@ function exitLoudly(message: string, err: unknown): void {
     exit();
   }
 }
+
+/**
+ * The I/O seams of a session, injectable so tests can drive connect/reconnect
+ * and creds persistence without a real socket. Production uses the defaults.
+ */
+export type SessionDeps = {
+  useAuthState: (
+    authDir: string,
+  ) => Promise<{ state: { creds: StoredCreds }; saveCreds: () => Promise<void> }>;
+  makeSocket: (config: Record<string, unknown>) => WASocket;
+  fetchVersion: () => Promise<{ version: [number, number, number] }>;
+  readStoredCreds: (authDir: string) => Promise<StoredCreds | null>;
+  setTimer: (cb: () => void, ms: number) => unknown;
+  /** Fail loudly: exit non-zero with `message`. */
+  exit: (message: string, err: unknown) => void;
+};
+
+const defaultSessionDeps: SessionDeps = {
+  useAuthState: useMultiFileAuthState as unknown as SessionDeps["useAuthState"],
+  makeSocket: makeWASocket as unknown as SessionDeps["makeSocket"],
+  fetchVersion: fetchLatestBaileysVersion as unknown as SessionDeps["fetchVersion"],
+  readStoredCreds: (dir) => readStoredCreds(dir),
+  setTimer: (cb, ms) => setTimeout(cb, ms),
+  exit: exitLoudly,
+};
 
 export type SessionEvents = {
   message: [msg: WAMessage];
@@ -125,16 +151,14 @@ export class CollectorSession extends EventEmitter {
    * its consecutive-failure count must survive reconnect storms (see
    * creds-persistence.ts for the 2026-11-15 incident this guards).
    */
-  private readonly credsSaver = new CredsSaver({
-    log: collectorLog,
-    onFatal: (err, failures) =>
-      exitLoudly(
-        `could not save WhatsApp creds after ${failures} consecutive attempts — check permissions on data/baileys-auth/`,
-        err,
-      ),
-  });
-  /** connect() attempts that threw in a row; reset when a connection opens. */
+  private readonly credsSaver: CredsSaver;
+  /**
+   * connect() attempts that threw IN A ROW. Reset by a successful creds load
+   * (and by an open connection), so scattered read failures during a long
+   * reconnect storm never add up to the exit — only a persistent one does.
+   */
   private connectFailures = 0;
+  private readonly deps: SessionDeps;
 
   constructor(
     authDir: string,
@@ -143,9 +167,21 @@ export class CollectorSession extends EventEmitter {
       syncFullHistory?: boolean;
       acceptAllHistory?: boolean;
       allowlist?: string[] | AllowlistSource;
+      /** Test seams; production omits this. */
+      deps?: Partial<SessionDeps>;
     } = {},
   ) {
     super();
+    this.deps = { ...defaultSessionDeps, ...opts.deps };
+    const exit = this.deps.exit;
+    this.credsSaver = new CredsSaver({
+      log: collectorLog,
+      onFatal: (err, failures) =>
+        exit(
+          `could not save WhatsApp creds after ${failures} consecutive attempts — check permissions on ${authDir}/creds.json`,
+          err,
+        ),
+    });
     this.authDir = authDir;
     this.allowSend = allowSend;
     this.historyProgress = createHistorySyncProgress({
@@ -436,7 +472,7 @@ export class CollectorSession extends EventEmitter {
    * MAX_CONSECUTIVE_CONNECT_FAILURES in a row it exits loudly.
    */
   private scheduleReconnect(delayMs: number): void {
-    setTimeout(() => {
+    this.deps.setTimer(() => {
       if (this.stopped) return;
       this.connect().catch((err: unknown) => this.onConnectFailed(err));
     }, delayMs);
@@ -446,7 +482,7 @@ export class CollectorSession extends EventEmitter {
   private onConnectFailed(err: unknown): void {
     this.connectFailures++;
     if (this.connectFailures >= MAX_CONSECUTIVE_CONNECT_FAILURES) {
-      exitLoudly(`WhatsApp connect failed ${this.connectFailures} consecutive times`, err);
+      this.deps.exit(`WhatsApp connect failed ${this.connectFailures} consecutive times`, err);
       return;
     }
     const retryInMs = backoffDelay(this.connectFailures, RECONNECT_BACKOFF);
@@ -473,9 +509,9 @@ export class CollectorSession extends EventEmitter {
     // while an existing creds.json can't be read, and check Baileys actually
     // loaded it (its own read can fail even after ours succeeded). The caller
     // retries a CredsUnreadableError with backoff.
-    const storedCreds = await readStoredCreds(this.authDir);
+    const storedCreds = await this.deps.readStoredCreds(this.authDir);
 
-    const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+    const { state, saveCreds } = await this.deps.useAuthState(this.authDir);
     assertLoadedStoredCreds(this.authDir, storedCreds, state.creds);
 
     // WhatsApp rejects stale WA-Web client versions with a pre-QR 405, which
@@ -485,12 +521,12 @@ export class CollectorSession extends EventEmitter {
     // baked-in version if the check fails (e.g. offline).
     let waVersion: [number, number, number] | undefined;
     try {
-      ({ version: waVersion } = await fetchLatestBaileysVersion());
+      ({ version: waVersion } = await this.deps.fetchVersion());
     } catch {
       waVersion = undefined;
     }
 
-    const sock = makeWASocket({
+    const sock = this.deps.makeSocket({
       auth: state,
       ...(waVersion ? { version: waVersion } : {}),
       // Forward-only by default (research R3). full-sync mode flips this to pull the
