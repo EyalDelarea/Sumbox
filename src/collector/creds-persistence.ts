@@ -263,7 +263,9 @@ export class CredsUnreadableError extends Error {
   ) {
     const why = cause instanceof Error ? cause.message : String(cause);
     super(
-      `${credsPath} exists but could not be loaded (refusing to connect with fresh creds): ${why}`,
+      `${credsPath} exists but could not be loaded (${why}). Refusing to connect with fresh creds, which would overwrite the WhatsApp link. ` +
+        `To recover: fix the file's permissions or restore ${credsPath} from a backup; ` +
+        `or, if it is truly lost, re-pair by moving ${path.dirname(credsPath)} aside and scanning the QR again. Nothing was deleted.`,
       { cause },
     );
     this.name = "CredsUnreadableError";
