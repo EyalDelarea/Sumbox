@@ -56,6 +56,12 @@ describe("JOB_DESCRIPTORS", () => {
     );
   });
 
+  it("pins startup retirement to the superseded summary types, never a requeued one", () => {
+    const retired = ALL_JOB_TYPES.filter((t) => JOB_DESCRIPTORS[t].retireOrphansOnStartup);
+    expect(new Set(retired)).toEqual(new Set<JobType>(["summarize.group", "summarize.total"]));
+    for (const t of retired) expect(JOB_DESCRIPTORS[t].requeueOnStartup).toBe(false);
+  });
+
   it("pins the metrics opLabel for each type", () => {
     expect(JOB_DESCRIPTORS["import.file"].opLabel).toBe("import");
     expect(JOB_DESCRIPTORS["transcribe.voicenote"].opLabel).toBe("audio");
