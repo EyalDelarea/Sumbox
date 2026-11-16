@@ -300,3 +300,130 @@ describe("memory.extract enqueue", () => {
     expect(new Date(payload.until).getTime()).toBeGreaterThan(new Date(payload.since).getTime());
   });
 });
+
+// ---------------------------------------------------------------------------
+// summarize.total waits for this run's group jobs
+// ---------------------------------------------------------------------------
+
+describe("summarize.total sequencing", () => {
+  let pool: pg.Pool;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: await createTestDatabase() });
+    await seedGroup(pool, "seq-a");
+    await seedGroup(pool, "seq-b");
+  }, 120_000);
+
+  afterAll(async () => {
+    await pool?.end();
+  }, 30_000);
+
+  /** A bus that mints distinct ids and records every event in order. */
+  function makeSequencedBus(events: string[]): JobBus {
+    let n = 0;
+    return {
+      enqueue: async <T extends JobType>(type: T, _payload: JobPayloads[T]) => {
+        const id = `${type}#${++n}`;
+        events.push(`enqueue ${id}`);
+        return { id };
+      },
+      consume: vi.fn(),
+      depth: vi.fn().mockResolvedValue(0),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as JobBus;
+  }
+
+  const since = new Date("2026-11-16T08:00:00.000Z");
+
+  it("enqueues the total only after waiting on exactly this run's group job ids", async () => {
+    const events: string[] = [];
+    const bus = makeSequencedBus(events);
+    const result = await enqueueScheduledRun(pool, bus, {
+      all: true,
+      sinceForTotal: since,
+      awaitGroupJobs: async (ids) => {
+        events.push(`wait ${[...ids].join(",")}`);
+        return { status: "settled" };
+      },
+    });
+
+    const groupIds = events
+      .filter((e) => e.startsWith("enqueue summarize.group"))
+      .map((e) => e.slice("enqueue ".length));
+    expect(groupIds.length).toBeGreaterThanOrEqual(2);
+    // The last two events: wait on every group id, THEN the total.
+    expect(events.slice(-2)).toEqual([
+      `wait ${groupIds.join(",")}`,
+      expect.stringMatching(/^enqueue summarize\.total#/),
+    ]);
+    expect(result.total).toBe("enqueued");
+  });
+
+  it("still enqueues the total when the wait times out (a lost group message can't block it)", async () => {
+    const events: string[] = [];
+    const result = await enqueueScheduledRun(pool, makeSequencedBus(events), {
+      all: true,
+      sinceForTotal: since,
+      awaitGroupJobs: async (ids) => ({ status: "timeout", unsettled: [ids[0]!] }),
+    });
+    expect(events.filter((e) => e.startsWith("enqueue summarize.total"))).toHaveLength(1);
+    expect(result.total).toBe("enqueued");
+  });
+
+  it("enqueues NO total when the wait is aborted (scheduler stopped)", async () => {
+    const events: string[] = [];
+    const ac = new AbortController();
+    let sawSignal: AbortSignal | undefined;
+    const result = await enqueueScheduledRun(pool, makeSequencedBus(events), {
+      all: true,
+      sinceForTotal: since,
+      signal: ac.signal,
+      awaitGroupJobs: async (ids, signal) => {
+        sawSignal = signal;
+        return { status: "aborted", unsettled: [...ids] };
+      },
+    });
+    expect(sawSignal).toBe(ac.signal);
+    expect(events.filter((e) => e.startsWith("enqueue summarize.total"))).toHaveLength(0);
+    expect(result.total).toBe("aborted");
+  });
+
+  it("does not wait at all when no total is requested (manual digest-run)", async () => {
+    const wait = vi.fn();
+    const result = await enqueueScheduledRun(pool, makeSequencedBus([]), {
+      all: true,
+      awaitGroupJobs: wait,
+    });
+    expect(wait).not.toHaveBeenCalled();
+    expect(result.total).toBeUndefined();
+  });
+
+  it("the default wait reads job_runs: proceeds once the group rows are done/dead", async () => {
+    // A bus that records real job_runs rows (as the RabbitMQ bus does) already
+    // settled, so the default poller finds nothing to wait for.
+    const { upsertJobRun } = await import("../db/repositories/job-runs.js");
+    const { randomUUID } = await import("node:crypto");
+    const events: string[] = [];
+    const bus = {
+      enqueue: async <T extends JobType>(type: T, payload: JobPayloads[T]) => {
+        const id = randomUUID();
+        await upsertJobRun(pool, {
+          id,
+          type,
+          status: type === "summarize.group" ? "done" : "pending",
+          payload: payload as Record<string, unknown>,
+          attempts: 0,
+          maxAttempts: 3,
+        });
+        events.push(type);
+        return { id };
+      },
+    } as unknown as JobBus;
+
+    const t0 = Date.now();
+    const result = await enqueueScheduledRun(pool, bus, { all: true, sinceForTotal: since });
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(events.at(-1)).toBe("summarize.total");
+    expect(result.total).toBe("enqueued");
+  });
+});

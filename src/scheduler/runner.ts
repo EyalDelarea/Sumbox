@@ -63,6 +63,17 @@ function slotKey(slot: TimeSlot, prefix: string): string {
 /** On the first ever run there is no prior watermark; bound the window to 12h. */
 const TWELVE_H_MS = 12 * 60 * 60 * 1000;
 
+/**
+ * True when a digest run requested a total but never enqueued it — stopped
+ * mid-wait ("aborted") or the enqueue itself failed. Such a run is not recorded,
+ * so the next run's window still starts before it and covers the lost span.
+ */
+function totalNotEnqueued(result: unknown): boolean {
+  if (typeof result !== "object" || result === null) return false;
+  const total = (result as { total?: unknown }).total;
+  return total === "aborted" || total === "enqueue-failed";
+}
+
 export type SchedulerHandle = {
   stop: () => void;
 };
@@ -92,6 +103,13 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
   }
 
   let stopped = false;
+  /**
+   * Aborts an in-flight run's wait for its group jobs on stop(). enqueueRun may
+   * take a while — the digest holds summarize.total back until the run's group
+   * jobs settle (see scheduler/await-jobs.ts) — so stop() must not leave it
+   * polling, and a run cut short must not be recorded as complete.
+   */
+  const stopController = new AbortController();
   let currentTimer: NodeJS.Timeout | null = null;
 
   const log = {
@@ -166,9 +184,24 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
         // total-summary run over the window since the previous run, then record
         // that every slot ran at firedAt.
         const { sinceForTotal } = await rollupWindow(firedAt);
-        await enqueueRun(pool, bus, { sinceForTotal });
-        await recordAllSlots(firedAt);
-        log.info(`Scheduled run complete at ${firedAt.toISOString()}`);
+        const result = await enqueueRun(pool, bus, {
+          sinceForTotal,
+          signal: stopController.signal,
+        });
+        // Slots are recorded only AFTER the whole run (groups, wait, total). If
+        // the total was never enqueued (stop() cut the wait short, or the
+        // enqueue failed), leave the slots unrecorded: the next run's window
+        // then still covers this span, and a next start's catch-up redoes it
+        // (group jobs are idempotent). A serve restart mid-wait lands the same
+        // way, since nothing was recorded yet.
+        if (totalNotEnqueued(result)) {
+          log.error(
+            `Scheduled run at ${firedAt.toISOString()} did not enqueue its total; not recorded`,
+          );
+        } else {
+          await recordAllSlots(firedAt);
+          log.info(`Scheduled run complete at ${firedAt.toISOString()}`);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(`Scheduled run failed: ${msg}`);
@@ -199,9 +232,17 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
       if (dueSumbox(nowDate, latest, times)) {
         if (stopped) return;
         log.info(`Startup catch-up: running enqueueScheduledRun`);
-        await enqueueRun(pool, bus, { sinceForTotal });
-        await recordAllSlots(nowDate);
-        log.info(`Startup catch-up complete at ${nowDate.toISOString()}`);
+        const result = await enqueueRun(pool, bus, {
+          sinceForTotal,
+          signal: stopController.signal,
+        });
+        // See the periodic path: a run that didn't enqueue its total is not recorded.
+        if (totalNotEnqueued(result)) {
+          log.error(`Startup catch-up did not enqueue its total; not recorded`);
+        } else {
+          await recordAllSlots(nowDate);
+          log.info(`Startup catch-up complete at ${nowDate.toISOString()}`);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -218,6 +259,7 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
   return {
     stop: () => {
       stopped = true;
+      stopController.abort();
       if (currentTimer !== null) {
         clearTimeout(currentTimer);
         currentTimer = null;
