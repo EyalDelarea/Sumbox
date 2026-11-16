@@ -4,6 +4,7 @@ import { createTestDatabase } from "../../test/db.js";
 import {
   countInFlightMediaJobs,
   countJobsByStatus,
+  getJobStatuses,
   listNonTerminalJobRuns,
   resetStaleRunningJobs,
   retirePendingJobRuns,
@@ -480,13 +481,42 @@ describe("job-runs repository", () => {
     });
   });
 
+  describe("getJobStatuses", () => {
+    it("returns the status of each listed id and omits ids with no row", async () => {
+      const a = "550e8400-e29b-41d4-a716-4466554ab001";
+      const b = "550e8400-e29b-41d4-a716-4466554ab002";
+      for (const [id, status] of [
+        [a, "done"],
+        [b, "failed"],
+      ] as const) {
+        await upsertJobRun(pool, {
+          id,
+          type: "summarize.group",
+          status,
+          payload: { groupId: "1" },
+          attempts: 0,
+          maxAttempts: 3,
+        });
+      }
+      const missing = "550e8400-e29b-41d4-a716-4466554ab003";
+
+      const statuses = await getJobStatuses(pool, [a, b, missing, "not-a-uuid"]);
+
+      expect(Object.fromEntries(statuses)).toEqual({ [a]: "done", [b]: "failed" });
+    });
+
+    it("returns an empty map for no ids without querying", async () => {
+      expect((await getJobStatuses(pool, [])).size).toBe(0);
+    });
+  });
+
   describe("retirePendingJobRuns", () => {
-    // summarize.group rows are used by no other test in this file.
+    // Ids distinct from getJobStatuses' rows (same type, shared database).
     const ids = {
-      pending: "550e8400-e29b-41d4-a716-4466554ab001",
-      running: "550e8400-e29b-41d4-a716-4466554ab002",
-      done: "550e8400-e29b-41d4-a716-4466554ab003",
-      untouched: "550e8400-e29b-41d4-a716-4466554ab004",
+      pending: "550e8400-e29b-41d4-a716-4466554ab101",
+      running: "550e8400-e29b-41d4-a716-4466554ab102",
+      done: "550e8400-e29b-41d4-a716-4466554ab103",
+      untouched: "550e8400-e29b-41d4-a716-4466554ab104",
     };
 
     it("marks only the listed, still-pending rows failed with the reason; deletes nothing", async () => {

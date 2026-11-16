@@ -9,7 +9,15 @@
 
 import type pg from "pg";
 import { listIncludedGroupIds } from "../db/repositories/chat-scopes.js";
+import { getJobStatuses } from "../db/repositories/job-runs.js";
 import type { JobBus } from "../jobs/job-bus.js";
+import {
+  type AwaitJobsOutcome,
+  abortableSleep,
+  awaitJobsSettled,
+  DEFAULT_GROUP_WAIT_POLL_MS,
+  DEFAULT_GROUP_WAIT_TIMEOUT_MS,
+} from "./await-jobs.js";
 
 export type EnqueueScheduledRunOpts = {
   /**
@@ -21,15 +29,28 @@ export type EnqueueScheduledRunOpts = {
   /** When true, enqueue all groups regardless of whether they have new messages. */
   all?: boolean;
   /**
-   * When provided, also enqueue ONE summarize.total job for [since, now] after
-   * the per-group jobs. Omitted by callers that only want per-group behaviour.
+   * When provided, also enqueue ONE summarize.total job for [since, now] — but
+   * only once this run's summarize.group jobs have settled (or the wait timed
+   * out), so the total reads fresh group summaries. See await-jobs.ts for why
+   * the wait lives here. Omitted by callers that only want per-group behaviour
+   * (the manual `digest-run`), which then return as soon as groups are enqueued.
    */
   sinceForTotal?: Date;
+  /**
+   * Aborts the wait for the group jobs (the scheduler's stop()). An aborted wait
+   * enqueues NO total — the caller must not record the run as complete, so the
+   * next start's catch-up redoes it (group jobs are idempotent).
+   */
+  signal?: AbortSignal;
+  /** Injectable group-job wait (tests). Defaults to polling job_runs. */
+  awaitGroupJobs?: (ids: readonly string[], signal?: AbortSignal) => Promise<AwaitJobsOutcome>;
 };
 
 export type EnqueueScheduledRunResult = {
   enqueued: number;
   skipped: number;
+  /** Only set when a total was requested (sinceForTotal). */
+  total?: "enqueued" | "enqueue-failed" | "aborted";
 };
 
 /**
@@ -91,6 +112,8 @@ export async function enqueueScheduledRun(
   const now = new Date();
   let enqueued = 0;
   let skipped = 0;
+  /** This run's summarize.group job ids — what the total waits for. */
+  const groupJobIds: string[] = [];
 
   try {
     // Only included chats are summarized (S4 scope filter, default-OFF): a group
@@ -107,9 +130,10 @@ export async function enqueueScheduledRun(
           continue;
         }
 
-        await bus.enqueue("summarize.group", {
+        const { id } = await bus.enqueue("summarize.group", {
           groupId: String(groupId),
         });
+        groupJobIds.push(id);
         enqueued++;
 
         // @Aida's shadow memory rides the same cadence (D1: piggyback the summary
@@ -150,16 +174,54 @@ export async function enqueueScheduledRun(
     process.stderr.write(`[enqueueScheduledRun] fatal error, returning partial result: ${msg}\n`);
   }
 
-  if (opts?.sinceForTotal) {
-    try {
-      await bus.enqueue("summarize.total", {
-        since: opts.sinceForTotal.toISOString(),
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[enqueueScheduledRun] summarize.total enqueue failed: ${msg}\n`);
-    }
+  if (!opts?.sinceForTotal) return { enqueued, skipped };
+
+  // Hold the total back until this run's group jobs have settled. Never throws:
+  // the default wait reports read errors itself and always ends (settled,
+  // timeout, or aborted).
+  const awaitGroups =
+    opts.awaitGroupJobs ??
+    ((ids: readonly string[], signal?: AbortSignal) =>
+      awaitJobsSettled(
+        {
+          getStatuses: (pending) => getJobStatuses(pool, pending),
+          sleep: abortableSleep,
+          now: () => Date.now(),
+          onPollError: (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(
+              `[enqueueScheduledRun] reading group job status failed (will retry): ${msg}\n`,
+            );
+          },
+        },
+        ids,
+        {
+          timeoutMs: DEFAULT_GROUP_WAIT_TIMEOUT_MS,
+          pollMs: DEFAULT_GROUP_WAIT_POLL_MS,
+          signal,
+        },
+      ));
+  const wait = await awaitGroups(groupJobIds, opts.signal);
+  if (wait.status === "aborted") {
+    process.stderr.write(
+      `[enqueueScheduledRun] stopped while waiting for ${wait.unsettled.length} group job(s); summarize.total NOT enqueued\n`,
+    );
+    return { enqueued, skipped, total: "aborted" };
+  }
+  if (wait.status === "timeout") {
+    process.stderr.write(
+      `[enqueueScheduledRun] ${wait.unsettled.length} group job(s) still unsettled after the wait (${wait.unsettled.join(", ")}); enqueueing summarize.total anyway\n`,
+    );
   }
 
-  return { enqueued, skipped };
+  try {
+    await bus.enqueue("summarize.total", {
+      since: opts.sinceForTotal.toISOString(),
+    });
+    return { enqueued, skipped, total: "enqueued" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[enqueueScheduledRun] summarize.total enqueue failed: ${msg}\n`);
+    return { enqueued, skipped, total: "enqueue-failed" };
+  }
 }

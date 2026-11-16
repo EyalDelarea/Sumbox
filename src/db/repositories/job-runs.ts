@@ -207,3 +207,25 @@ export async function countJobsByStatus(
 
   return result;
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Current status of each listed job_runs row, keyed by id. Ids with no row are
+ * absent from the map. A malformed id (a test double's "fake-id") can't match
+ * a uuid row, so it is dropped up front rather than failing the cast — which
+ * keeps the lookup on the primary-key index (this runs every 15s while the
+ * digest waits).
+ */
+export async function getJobStatuses(
+  client: pg.Pool | pg.PoolClient,
+  ids: readonly string[],
+): Promise<Map<string, JobStatus>> {
+  const valid = ids.filter((id) => UUID_RE.test(id));
+  if (valid.length === 0) return new Map();
+  const { rows } = await client.query<{ id: string; status: JobStatus }>(
+    `SELECT id::text AS id, status FROM job_runs WHERE id = ANY($1::uuid[])`,
+    [valid],
+  );
+  return new Map(rows.map((r) => [r.id, r.status]));
+}
