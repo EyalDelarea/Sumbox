@@ -4,6 +4,7 @@ import { createTestDatabase } from "../../test/db.js";
 import {
   countInFlightMediaJobs,
   countJobsByStatus,
+  getJobStatuses,
   listNonTerminalJobRuns,
   resetStaleRunningJobs,
   setJobStatus,
@@ -476,6 +477,35 @@ describe("job-runs repository", () => {
         maxAttempts: 4,
       });
       expect(rows[0]?.createdAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe("getJobStatuses", () => {
+    it("returns the status of each listed id and omits ids with no row", async () => {
+      const a = "550e8400-e29b-41d4-a716-4466554ab001";
+      const b = "550e8400-e29b-41d4-a716-4466554ab002";
+      for (const [id, status] of [
+        [a, "done"],
+        [b, "failed"],
+      ] as const) {
+        await upsertJobRun(pool, {
+          id,
+          type: "summarize.group",
+          status,
+          payload: { groupId: "1" },
+          attempts: 0,
+          maxAttempts: 3,
+        });
+      }
+      const missing = "550e8400-e29b-41d4-a716-4466554ab003";
+
+      const statuses = await getJobStatuses(pool, [a, b, missing, "not-a-uuid"]);
+
+      expect(Object.fromEntries(statuses)).toEqual({ [a]: "done", [b]: "failed" });
+    });
+
+    it("returns an empty map for no ids without querying", async () => {
+      expect((await getJobStatuses(pool, [])).size).toBe(0);
     });
   });
 });

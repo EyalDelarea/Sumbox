@@ -176,3 +176,20 @@ export async function countJobsByStatus(
 
   return result;
 }
+
+/**
+ * Current status of each listed job_runs row, keyed by id. Ids with no row are
+ * absent from the map. Compares as text so a malformed id (a test double's
+ * "fake-id") reads as "no row" instead of failing the uuid cast.
+ */
+export async function getJobStatuses(
+  client: pg.Pool | pg.PoolClient,
+  ids: readonly string[],
+): Promise<Map<string, JobStatus>> {
+  if (ids.length === 0) return new Map();
+  const { rows } = await client.query<{ id: string; status: JobStatus }>(
+    `SELECT id::text AS id, status FROM job_runs WHERE id::text = ANY($1::text[])`,
+    [ids],
+  );
+  return new Map(rows.map((r) => [r.id, r.status]));
+}
