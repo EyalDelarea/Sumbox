@@ -398,3 +398,59 @@ describe("startScheduler — scheduled timer fire", () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 });
+
+describe("startScheduler — stop() during a run that is waiting on its group jobs", () => {
+  const lastRun = new Date(2026, 5, 4, 7, 0, 0); // 08:00 slot missed → catch-up due
+
+  it("passes an abort signal that stop() fires, and does not record an aborted run", async () => {
+    const recordRun = vi.fn().mockResolvedValue(undefined);
+    let signal: AbortSignal | undefined;
+    // Stands in for enqueueScheduledRun: waits for groups until aborted, then
+    // reports the total as aborted.
+    const enqueue = vi.fn(async (_p: unknown, _b: unknown, o?: { signal?: AbortSignal }) => {
+      signal = o?.signal;
+      await new Promise<void>((resolve) => o?.signal?.addEventListener("abort", () => resolve()));
+      return { enqueued: 2, skipped: 0, total: "aborted" };
+    });
+
+    const { stop } = startScheduler({
+      pool: makeFakePool(),
+      bus: makeFakeBus(),
+      times: TIMES,
+      enabled: true,
+      now: () => NOW_AFTER_FIRST_SLOT,
+      setTimer: makeFakeTimer().setTimer,
+      getLastRun: vi.fn().mockResolvedValue(lastRun),
+      recordRun,
+      enqueueRun: enqueue,
+    });
+
+    await vi.waitFor(() => expect(enqueue).toHaveBeenCalled(), { timeout: 2000 });
+    expect(signal?.aborted).toBe(false);
+    stop();
+    expect(signal?.aborted).toBe(true);
+    await new Promise((r) => setTimeout(r, 30));
+    // Unrecorded, so the next start's catch-up redoes the run.
+    expect(recordRun).not.toHaveBeenCalled();
+  });
+
+  it("records the slots once the run finished with its total enqueued", async () => {
+    const recordRun = vi.fn().mockResolvedValue(undefined);
+    const enqueue = vi.fn().mockResolvedValue({ enqueued: 2, skipped: 0, total: "enqueued" });
+    const { stop } = startScheduler({
+      pool: makeFakePool(),
+      bus: makeFakeBus(),
+      times: TIMES,
+      enabled: true,
+      now: () => NOW_AFTER_FIRST_SLOT,
+      setTimer: makeFakeTimer().setTimer,
+      getLastRun: vi.fn().mockResolvedValue(lastRun),
+      recordRun,
+      enqueueRun: enqueue,
+    });
+    await vi.waitFor(() => expect(recordRun).toHaveBeenCalledTimes(TIMES.length), {
+      timeout: 2000,
+    });
+    stop();
+  });
+});
