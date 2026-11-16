@@ -63,13 +63,15 @@ function slotKey(slot: TimeSlot, prefix: string): string {
 /** On the first ever run there is no prior watermark; bound the window to 12h. */
 const TWELVE_H_MS = 12 * 60 * 60 * 1000;
 
-/** True when the digest run was stopped before it enqueued its total. */
-function totalWasAborted(result: unknown): boolean {
-  return (
-    typeof result === "object" &&
-    result !== null &&
-    (result as { total?: unknown }).total === "aborted"
-  );
+/**
+ * True when a digest run requested a total but never enqueued it — stopped
+ * mid-wait ("aborted") or the enqueue itself failed. Such a run is not recorded,
+ * so the next run's window still starts before it and covers the lost span.
+ */
+function totalNotEnqueued(result: unknown): boolean {
+  if (typeof result !== "object" || result === null) return false;
+  const total = (result as { total?: unknown }).total;
+  return total === "aborted" || total === "enqueue-failed";
 }
 
 export type SchedulerHandle = {
@@ -187,13 +189,19 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
           signal: stopController.signal,
         });
         // Slots are recorded only AFTER the whole run (groups, wait, total). If
-        // stop() cut the wait short, the total was never enqueued: leave the
-        // slots unrecorded so the next start's catch-up redoes the run (group
-        // jobs are idempotent). A serve restart mid-wait lands the same way,
-        // since nothing was recorded yet.
-        if (totalWasAborted(result)) return;
-        await recordAllSlots(firedAt);
-        log.info(`Scheduled run complete at ${firedAt.toISOString()}`);
+        // the total was never enqueued (stop() cut the wait short, or the
+        // enqueue failed), leave the slots unrecorded: the next run's window
+        // then still covers this span, and a next start's catch-up redoes it
+        // (group jobs are idempotent). A serve restart mid-wait lands the same
+        // way, since nothing was recorded yet.
+        if (totalNotEnqueued(result)) {
+          log.error(
+            `Scheduled run at ${firedAt.toISOString()} did not enqueue its total; not recorded`,
+          );
+        } else {
+          await recordAllSlots(firedAt);
+          log.info(`Scheduled run complete at ${firedAt.toISOString()}`);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(`Scheduled run failed: ${msg}`);
@@ -228,10 +236,13 @@ export function startScheduler(opts: StartSchedulerOpts): SchedulerHandle {
           sinceForTotal,
           signal: stopController.signal,
         });
-        // See the periodic path: a run cut short by stop() is not recorded.
-        if (totalWasAborted(result)) return;
-        await recordAllSlots(nowDate);
-        log.info(`Startup catch-up complete at ${nowDate.toISOString()}`);
+        // See the periodic path: a run that didn't enqueue its total is not recorded.
+        if (totalNotEnqueued(result)) {
+          log.error(`Startup catch-up did not enqueue its total; not recorded`);
+        } else {
+          await recordAllSlots(nowDate);
+          log.info(`Startup catch-up complete at ${nowDate.toISOString()}`);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -454,3 +454,31 @@ describe("startScheduler — stop() during a run that is waiting on its group jo
     stop();
   });
 });
+
+describe("startScheduler — a run whose total enqueue failed", () => {
+  it("is not recorded, and the scheduler still arms the next slot", async () => {
+    const timer = makeFakeTimer();
+    const recordRun = vi.fn().mockResolvedValue(undefined);
+    const enqueue = vi.fn().mockResolvedValue({ enqueued: 1, skipped: 0, total: "enqueue-failed" });
+    const { stop } = startScheduler({
+      pool: makeFakePool(),
+      bus: makeFakeBus(),
+      times: TIMES,
+      enabled: true,
+      now: () => NOW_AFTER_FIRST_SLOT,
+      setTimer: timer.setTimer,
+      // Last run after the most recent slot → no catch-up; only the timer path runs.
+      getLastRun: vi.fn().mockResolvedValue(new Date(2026, 5, 4, 8, 30, 0)),
+      recordRun,
+      enqueueRun: enqueue,
+    });
+    await vi.waitFor(() => expect(timer.callCount()).toBe(1), { timeout: 2000 });
+
+    timer.fire();
+    await vi.waitFor(() => expect(timer.callCount()).toBe(2), { timeout: 2000 });
+
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(recordRun).not.toHaveBeenCalled();
+    stop();
+  });
+});
