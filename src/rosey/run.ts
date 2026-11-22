@@ -87,6 +87,8 @@ export type TagCatchUp = {
   /** A "done" that named no live task, or more than one: nothing changed. */
   noMatch: number;
   ambiguous: number;
+  /** A "done" on a task whose status was set by hand: recorded, not applied (D4). */
+  refused: number;
   /** Commands that threw; the cursor stays put so they are retried. */
   failures: number;
 };
@@ -143,6 +145,7 @@ export async function runAggregation(
     done: 0,
     noMatch: 0,
     ambiguous: 0,
+    refused: 0,
     failures: 0,
   };
   const late = messages.filter(
@@ -171,6 +174,7 @@ export async function runAggregation(
         tagged.created += out.created;
         tagged.confirmed += out.confirmed;
       } else if (out.kind === "done") tagged.done++;
+      else if (out.kind === "done_refused") tagged.refused++;
       else if (out.kind === "done_no_match") tagged.noMatch++;
       else tagged.ambiguous++;
     } catch (err) {

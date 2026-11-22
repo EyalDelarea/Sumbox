@@ -151,6 +151,19 @@ describe("applyCommand — done", () => {
     });
   });
 
+  it("reports a done the store refused (a task closed or opened by hand) as refused", async () => {
+    const { s, marks } = store([task(1, "לתקן ברז", { statusSource: "manual" })]);
+    s.markStatus = async (input) => {
+      marks.push(input);
+      return { found: true, applied: false, previous: "open", current: "open" };
+    };
+    expect(await applyCommand({ kind: "done", query: "ברז" }, ctx(), s)).toEqual({
+      kind: "done_refused",
+      taskId: 1,
+    });
+    expect(marks).toHaveLength(1); // still recorded, so the act is on the record
+  });
+
   it("an empty query without a quote matches nothing; a done task is not live", async () => {
     const { s } = store([task(1, "לקנות חלב", { status: "done" })]);
     expect(await applyCommand({ kind: "done", query: "" }, ctx(), s)).toEqual({

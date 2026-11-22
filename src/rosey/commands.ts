@@ -48,6 +48,8 @@ export type CommandStore = {
 export type CommandOutcome =
   | { kind: "added"; created: number; confirmed: number; alreadyOpen: number }
   | { kind: "done"; taskId: number }
+  /** The task was found, but its status is not the chat's to change (D4: set by hand). */
+  | { kind: "done_refused"; taskId: number }
   | { kind: "done_no_match" }
   | { kind: "done_ambiguous"; candidates: number };
 
@@ -106,6 +108,13 @@ export async function applyCommand(
   if (pick.length === 0) return { kind: "done_no_match" };
   if (pick.length > 1) return { kind: "done_ambiguous", candidates: pick.length };
   const task = pick[0]!;
-  await store.markStatus({ taskId: task.id, status: "done", sourceMessageId: ctx.messageId });
-  return { kind: "done", taskId: task.id };
+  const marked = await store.markStatus({
+    taskId: task.id,
+    status: "done",
+    sourceMessageId: ctx.messageId,
+  });
+  // Recorded either way (the event log keeps the refused act); reported as it is.
+  return marked.found && marked.applied
+    ? { kind: "done", taskId: task.id }
+    : { kind: "done_refused", taskId: task.id };
 }

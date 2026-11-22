@@ -103,6 +103,7 @@ describe("runAggregation", () => {
       done: 1,
       noMatch: 1,
       ambiguous: 0,
+      refused: 0,
       failures: 0,
     });
 
