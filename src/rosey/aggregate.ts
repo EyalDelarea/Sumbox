@@ -4,9 +4,9 @@
  * Pure orchestration over injected dependencies, so the same code runs from the
  * CLI backfill and (later) the live collector, and is testable without Ollama.
  *
- *   messages ──batch──▶ model suggests (cited, kind-labelled)
- *            ──each──▶ dedup vs live tasks raised in the last N days
- *            ──new───▶ insert as 'suggested'
+ *   messages ──batch──▶ model suggests (cited, kind-labelled: task / grocery)
+ *            ──each──▶ dedup vs live items OF THE SAME KIND raised in the last N days
+ *            ──new───▶ insert as 'suggested', under its kind
  *
  * Messages carrying a @Rosey tag are NOT read here: D3 says an explicit tag
  * always wins, so the model never second-guesses a tagged message.
@@ -14,6 +14,7 @@
 
 import type { RoseySourceMessage } from "../db/repositories/rosey-tasks.js";
 import { type DedupDecision, decideDuplicate, type LiveTaskRef } from "./dedup.js";
+import type { RoseyItemKind } from "./kind.js";
 import { buildSuggestPrompt, parseSuggestions, SUGGEST_SYSTEM } from "./suggest.js";
 import { titleKey } from "./text.js";
 
@@ -31,11 +32,16 @@ export type AggregateDeps = {
   generate: (system: string, user: string) => Promise<string>;
   isTagged: (text: string) => boolean;
   resolveRaisedBy: (messageIds: readonly number[]) => Promise<Map<number, number | null>>;
-  /** Every live task raised in [since, until] — a truncated list lets twins through. */
-  liveTasksRaisedBetween: (since: Date, until: Date) => Promise<LiveTaskRef[]>;
+  /**
+   * Every live item of `kind` raised in [since, until] — a truncated list lets
+   * twins through. Dedup is per kind: "milk" on the shopping list and a task
+   * that happens to share its title are two items.
+   */
+  liveTasksRaisedBetween: (since: Date, until: Date, kind: RoseyItemKind) => Promise<LiveTaskRef[]>;
   insertSuggestion: (input: {
     title: string;
     titleKey: string;
+    kind: RoseyItemKind;
     raisedByParticipantId: number | null;
     sourceMessageId: number;
     sourceItemIndex: number;
@@ -57,6 +63,7 @@ export type AggregateReport = {
   merged: { exact: number; model: number };
   dedupUnparsed: number;
   created: number;
+  createdByKind: Record<RoseyItemKind, number>;
   /** Already stored from an earlier run (same message, same normalized title), whatever its status. */
   alreadyStored: number;
   raisedByUnresolved: number;
@@ -84,6 +91,7 @@ export async function aggregateMessages(
     merged: { exact: 0, model: 0 },
     dedupUnparsed: 0,
     created: 0,
+    createdByKind: { task: 0, grocery: 0 },
     alreadyStored: 0,
     raisedByUnresolved: 0,
   };
@@ -125,6 +133,7 @@ export async function aggregateMessages(
         const live = await deps.liveTasksRaisedBetween(
           new Date(msg.sentAt.getTime() - windowMs),
           new Date(msg.sentAt.getTime() + windowMs),
+          item.kind,
         );
         const decision: DedupDecision = await decideDuplicate(
           { title: item.title, titleKey: key },
@@ -140,6 +149,7 @@ export async function aggregateMessages(
         const id = await deps.insertSuggestion({
           title: item.title,
           titleKey: key,
+          kind: item.kind,
           raisedByParticipantId,
           sourceMessageId: item.sourceMessageId,
           sourceItemIndex: item.itemIndex,
@@ -150,6 +160,7 @@ export async function aggregateMessages(
           continue;
         }
         report.created++;
+        report.createdByKind[item.kind]++;
         if (raisedByParticipantId === null) report.raisedByUnresolved++;
       }
     } catch (err) {

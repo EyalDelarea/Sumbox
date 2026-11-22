@@ -15,6 +15,7 @@ const html = renderLabelSheet({
       title: "fix the tap",
       titleKey: "fix the tap",
       origin: "tag",
+      kind: "task",
       status: "open",
       statusSource: "tag",
       raisedByParticipantId: null,

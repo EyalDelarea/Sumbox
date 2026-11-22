@@ -13,7 +13,13 @@ const msg = (id: number, d: number, content: string): RoseySourceMessage => ({
   isVoice: false,
 });
 
-type Stored = { id: number; title: string; titleKey: string; raisedAt: Date };
+type Stored = {
+  id: number;
+  title: string;
+  titleKey: string;
+  raisedAt: Date;
+  kind: "task" | "grocery";
+};
 
 /** An in-memory store + scripted model, so the orchestration is tested without Ollama. */
 function harness(script: {
@@ -40,14 +46,23 @@ function harness(script: {
     isTagged: (t) => t.includes("@Rosey"),
     resolveRaisedBy: async (ids) =>
       new Map(ids.map((i) => [i, script.raisedBy === undefined ? 7 : script.raisedBy])),
-    liveTasksRaisedBetween: async (since, until) =>
-      stored.filter((t) => t.raisedAt >= since && t.raisedAt <= until),
+    liveTasksRaisedBetween: async (since, until, kind) =>
+      stored.filter(
+        (t) =>
+          t.raisedAt >= since && t.raisedAt <= until && (kind === undefined || t.kind === kind),
+      ),
     insertSuggestion: async (input) => {
       const k = `${input.sourceMessageId}:${input.titleKey}`; // the store's identity
       if (seen.has(k)) return null;
       seen.add(k);
       const id = stored.length + 1;
-      stored.push({ id, title: input.title, titleKey: input.titleKey, raisedAt: input.raisedAt });
+      stored.push({
+        id,
+        title: input.title,
+        titleKey: input.titleKey,
+        raisedAt: input.raisedAt,
+        kind: input.kind,
+      });
       return id;
     },
     onBatchError: (err) => errors.push(err),
@@ -66,6 +81,42 @@ describe("aggregateMessages", () => {
     const r = await aggregateMessages([msg(1, 1, "חלב וביצים"), msg(2, 1, "תיקנתי")], h.deps);
     expect(h.stored.map((t) => t.title)).toEqual(["לקנות חלב", "לקנות ביצים"]);
     expect(r).toMatchObject({ proposed: 2, created: 2, droppedByKind: { past: 1 } });
+  });
+
+  it("stores a grocery item as grocery and a task as task, and counts each", async () => {
+    const h = harness({
+      suggest: () => items([1, "חלב", "grocery"], [1, "להזמין אינסטלטור"], [1, "לחם", "grocery"]),
+    });
+    const r = await aggregateMessages([msg(1, 1, "a")], h.deps);
+    expect(h.stored.map((t) => [t.title, t.kind])).toEqual([
+      ["חלב", "grocery"],
+      ["להזמין אינסטלטור", "task"],
+      ["לחם", "grocery"],
+    ]);
+    expect(r).toMatchObject({ created: 3, createdByKind: { task: 1, grocery: 2 } });
+  });
+
+  it("dedup is per kind: a grocery item is compared with grocery items only", async () => {
+    const prompts: string[] = [];
+    const h = harness({
+      suggest: () =>
+        items([1, "לתקן ברז"], [1, "חלב", "task"], [2, "חלב", "grocery"], [2, "ביצים", "grocery"]),
+      dedup: (p) => {
+        prompts.push(p);
+        return '{"same_as": null}';
+      },
+    });
+    const r = await aggregateMessages([msg(1, 1, "a"), msg(2, 1, "b")], h.deps);
+    // The same title under the other kind is not a duplicate.
+    expect(r.merged.exact).toBe(0);
+    expect(h.stored.filter((t) => t.titleKey === "חלב").map((t) => t.kind)).toEqual([
+      "task",
+      "grocery",
+    ]);
+    // Asking about a grocery item never shows the model a task.
+    const last = prompts.at(-1)!;
+    expect(last).toContain("New item: ביצים");
+    expect(last).not.toContain("לתקן ברז");
   });
 
   it("never sends a tagged message to the model", async () => {

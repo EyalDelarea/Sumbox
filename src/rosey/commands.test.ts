@@ -13,6 +13,7 @@ function task(id: number, title: string, over: Partial<RoseyTask> = {}): RoseyTa
     title,
     titleKey: titleKey(title),
     origin: "tag",
+    kind: "task",
     status: "open",
     statusSource: "tag",
     raisedByParticipantId: null,
@@ -28,12 +29,13 @@ function store(initial: RoseyTask[]) {
   const tasks = [...initial];
   const marks: Array<{ taskId: number; status: string; sourceMessageId: number }> = [];
   const s: CommandStore = {
-    liveTasksRaisedBetween: async (since, until) =>
+    liveTasksRaisedBetween: async (since, until, kind) =>
       tasks.filter(
         (t) =>
           (t.status === "open" || t.status === "suggested") &&
           t.raisedAt >= since &&
-          t.raisedAt <= until,
+          t.raisedAt <= until &&
+          (kind === undefined || t.kind === kind),
       ),
     insertTagged: async (input) => {
       if (
@@ -71,7 +73,11 @@ const ctx = (over: Partial<CommandContext> = {}): CommandContext => ({
 describe("applyCommand — add", () => {
   it("creates one open task per new item", async () => {
     const { s, tasks } = store([]);
-    const out = await applyCommand({ kind: "add", items: ["לקנות חלב", "לתקן ברז"] }, ctx(), s);
+    const out = await applyCommand(
+      { kind: "add", itemKind: "task", items: ["לקנות חלב", "לתקן ברז"] },
+      ctx(),
+      s,
+    );
     expect(out).toEqual({ kind: "added", created: 2, confirmed: 0, alreadyOpen: 0 });
     expect(tasks.map((t) => [t.title, t.sourceItemIndex])).toEqual([
       ["לקנות חלב", 0],
@@ -83,7 +89,11 @@ describe("applyCommand — add", () => {
     const { s, tasks, marks } = store([
       task(1, "לקנות חלב", { status: "suggested", origin: "suggested" }),
     ]);
-    const out = await applyCommand({ kind: "add", items: ["לקנות חלב!"] }, ctx(), s);
+    const out = await applyCommand(
+      { kind: "add", itemKind: "task", items: ["לקנות חלב!"] },
+      ctx(),
+      s,
+    );
     expect(out).toEqual({ kind: "added", created: 0, confirmed: 1, alreadyOpen: 0 });
     expect(marks).toEqual([{ taskId: 1, status: "open", sourceMessageId: 500 }]);
     expect(tasks).toHaveLength(1);
@@ -91,13 +101,19 @@ describe("applyCommand — add", () => {
 
   it("is a no-op for an item that is already open, and for a replay of the same message", async () => {
     const { s, tasks } = store([task(1, "לקנות חלב")]);
-    expect(await applyCommand({ kind: "add", items: ["לקנות חלב"] }, ctx(), s)).toMatchObject({
+    expect(
+      await applyCommand({ kind: "add", itemKind: "task", items: ["לקנות חלב"] }, ctx(), s),
+    ).toMatchObject({
       alreadyOpen: 1,
       created: 0,
     });
-    await applyCommand({ kind: "add", items: ["לתקן ברז"] }, ctx(), s);
+    await applyCommand({ kind: "add", itemKind: "task", items: ["לתקן ברז"] }, ctx(), s);
     // The same message seen again (live, then catch-up) — nothing new.
-    const again = await applyCommand({ kind: "add", items: ["לתקן ברז"] }, ctx(), s);
+    const again = await applyCommand(
+      { kind: "add", itemKind: "task", items: ["לתקן ברז"] },
+      ctx(),
+      s,
+    );
     expect(again).toMatchObject({ created: 0 });
     expect(tasks).toHaveLength(2);
   });
@@ -105,9 +121,43 @@ describe("applyCommand — add", () => {
   it("an old task outside the dedup window does not swallow a recurring errand", async () => {
     const old = task(1, "לקנות חלב", { raisedAt: new Date(NOW.getTime() - 30 * DAY) });
     const { s, tasks } = store([old]);
-    const out = await applyCommand({ kind: "add", items: ["לקנות חלב"] }, ctx(), s);
+    const out = await applyCommand(
+      { kind: "add", itemKind: "task", items: ["לקנות חלב"] },
+      ctx(),
+      s,
+    );
     expect(out).toMatchObject({ created: 1 });
     expect(tasks).toHaveLength(2);
+  });
+});
+
+describe("applyCommand — kind", () => {
+  it("a grocery command stores grocery items", async () => {
+    const { s, tasks } = store([]);
+    await applyCommand({ kind: "add", itemKind: "grocery", items: ["חלב"] }, ctx(), s);
+    expect(tasks.map((t) => [t.title, t.kind])).toEqual([["חלב", "grocery"]]);
+  });
+
+  it("dedup is per kind: a task never confirms a grocery suggestion, a grocery item does", async () => {
+    const sugg = task(1, "חלב", { status: "suggested", origin: "suggested", kind: "grocery" });
+    const asTask = store([sugg]);
+    expect(
+      await applyCommand({ kind: "add", itemKind: "task", items: ["חלב"] }, ctx(), asTask.s),
+    ).toMatchObject({ created: 1, confirmed: 0 });
+    expect(asTask.tasks.map((t) => t.kind)).toEqual(["grocery", "task"]);
+
+    const asGrocery = store([{ ...sugg }]);
+    expect(
+      await applyCommand({ kind: "add", itemKind: "grocery", items: ["חלב"] }, ctx(), asGrocery.s),
+    ).toMatchObject({ created: 0, confirmed: 1 });
+  });
+
+  it("done closes a grocery item too: completion looks across both kinds", async () => {
+    const { s } = store([task(1, "לתקן ברז"), task(2, "חלב", { kind: "grocery" })]);
+    expect(await applyCommand({ kind: "done", query: "חלב" }, ctx(), s)).toEqual({
+      kind: "done",
+      taskId: 2,
+    });
   });
 });
 

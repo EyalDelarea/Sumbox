@@ -27,25 +27,44 @@ import { OllamaSummarizer } from "../summarization/summarizer.js";
 import { type AggregateReport, aggregateMessages } from "./aggregate.js";
 import { applyCommand, type CommandStore } from "./commands.js";
 import type { RoseyConfig } from "./config.js";
+import { SUGGEST_SYSTEM } from "./suggest.js";
 import { makeTagMatcher } from "./tags.js";
 
 export type Generate = (system: string, user: string) => Promise<string>;
 
 /**
+ * The suggestion reply budget, in tokens. A suggestion reply is one object per
+ * item, and a shopping list is one object per product: measured on the real
+ * chat, a 16-message batch filled ~4k characters, and at 2048 tokens a full
+ * batch (DEFAULT_BATCH_SIZE) was cut off mid-array — with main's prompt and
+ * with the grocery one alike. A truncated reply is a failed batch, retried
+ * every pass and never read. 8192 leaves room for a full batch inside the 32k
+ * context.
+ */
+export const SUGGEST_NUM_PREDICT = 8192;
+/** Every other call (a dedup answer is a few tokens): the old cap, so a looping reply stops early. */
+export const DEFAULT_NUM_PREDICT = 2048;
+
+/**
  * The local model as Rosey uses it: a plain prompt → text call through the
  * shared Ollama client. No `format: json` — on short Hebrew input gemma4 loops
  * when asked for structured output; the reply is parsed with lastJsonValue.
- * Low temperature: these are extraction calls, not prose.
+ * Low temperature: these are extraction calls, not prose. Only the suggestion
+ * call gets the large reply budget.
  */
 export function makeGenerate(cfg: RoseyConfig): Generate {
-  const llm = new OllamaSummarizer({
-    host: cfg.ollamaHost,
-    model: cfg.model,
-    numCtx: cfg.numCtx,
-    temperature: 0.2,
-    numPredict: 2048,
-  });
-  return async (system, user) => (await llm.summarize({ system, user })).overview;
+  const llm = (numPredict: number) =>
+    new OllamaSummarizer({
+      host: cfg.ollamaHost,
+      model: cfg.model,
+      numCtx: cfg.numCtx,
+      temperature: 0.2,
+      numPredict,
+    });
+  const suggest = llm(SUGGEST_NUM_PREDICT);
+  const other = llm(DEFAULT_NUM_PREDICT);
+  return async (system, user) =>
+    (await (system === SUGGEST_SYSTEM ? suggest : other).summarize({ system, user })).overview;
 }
 
 /**
@@ -94,8 +113,8 @@ export async function setRoseyEnabled(
 export function commandStore(pool: pg.Pool, groupId: number): CommandStore {
   return {
     // A generous cap: a "done" looks across every live task of the group.
-    liveTasksRaisedBetween: (since, until) =>
-      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP),
+    liveTasksRaisedBetween: (since, until, kind) =>
+      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP, { kind }),
     insertTagged: async (input) => {
       const raisedBy = await resolveRaisedBy(pool, groupId, [input.sourceMessageId]);
       return insertTask(pool, {
@@ -246,8 +265,8 @@ export async function runAggregation(
     generate: opts.generate,
     isTagged: tags.isTagged,
     resolveRaisedBy: (ids) => resolveRaisedBy(pool, groupId, ids),
-    liveTasksRaisedBetween: (since, until) =>
-      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP),
+    liveTasksRaisedBetween: (since, until, kind) =>
+      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP, { kind }),
     insertSuggestion: (input) => insertTask(pool, { ...input, groupId, origin: "suggested" }),
     onBatchError: opts.onBatchError,
   });

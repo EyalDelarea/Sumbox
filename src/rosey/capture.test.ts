@@ -115,7 +115,7 @@ describe("captureMessage — routing", () => {
     expect(r).toMatchObject({ kind: "command", groupId: 9 });
     expect(calls.applied).toEqual([
       {
-        cmd: { kind: "add", items: ["לקנות חלב", "לתקן ברז"] },
+        cmd: { kind: "add", itemKind: "task", items: ["לקנות חלב", "לתקן ברז"] },
         ctx: {
           groupId: 9,
           messageId: 501,

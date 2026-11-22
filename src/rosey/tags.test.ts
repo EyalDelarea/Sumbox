@@ -48,6 +48,7 @@ describe("command parsing", () => {
     expect(rosey.parse("@Rosey לקנות חלב, ביצים ולחם")).toEqual({
       kind: "add",
       items: ["לקנות חלב, ביצים ולחם"],
+      itemKind: "task",
     });
   });
 
@@ -55,6 +56,7 @@ describe("command parsing", () => {
     expect(rosey.parse("@רוזי\n- חלב\n* ביצים\n2) לחם\n✅ קפה\n\n")).toEqual({
       kind: "add",
       items: ["חלב", "ביצים", "לחם", "קפה"],
+      itemKind: "task",
     });
   });
 
@@ -68,7 +70,56 @@ describe("command parsing", () => {
     expect(rosey.parse("@Rosey doneness check")).toEqual({
       kind: "add",
       items: ["doneness check"],
+      itemKind: "task",
     });
+  });
+
+  it("a grocery word with a colon makes the items grocery, on the same line or below", () => {
+    expect(rosey.parse("@Rosey קניות: חלב")).toEqual({
+      kind: "add",
+      items: ["חלב"],
+      itemKind: "grocery",
+    });
+    expect(rosey.parse("@רוזי קניות:\n- חלב\n- לחם")).toEqual({
+      kind: "add",
+      items: ["חלב", "לחם"],
+      itemKind: "grocery",
+    });
+    expect(rosey.parse("@Rosey Shopping: milk")).toEqual({
+      kind: "add",
+      items: ["milk"],
+      itemKind: "grocery",
+    });
+  });
+
+  it("reads the prefix through WhatsApp's invisible direction marks and a full-width colon", () => {
+    expect(rosey.parse("@Rosey ‏קניות‏: חלב")).toMatchObject({
+      items: ["חלב"],
+      itemKind: "grocery",
+    });
+    expect(rosey.parse("@Rosey קניות：חלב")).toMatchObject({ items: ["חלב"], itemKind: "grocery" });
+  });
+
+  it("a grocery word alone on the first line heads a grocery list", () => {
+    expect(rosey.parse("@רוזי קניות\nחלב\nלחם")).toEqual({
+      kind: "add",
+      items: ["חלב", "לחם"],
+      itemKind: "grocery",
+    });
+  });
+
+  it("a grocery word that is just the start of a sentence is an ordinary task", () => {
+    expect(rosey.parse("@Rosey קניות לשבת")).toEqual({
+      kind: "add",
+      items: ["קניות לשבת"],
+      itemKind: "task",
+    });
+    expect(rosey.parse("@Rosey קניותי: x")).toMatchObject({ itemKind: "task" });
+  });
+
+  it("a grocery prefix with no item is nothing to do", () => {
+    expect(rosey.parse("@Rosey קניות:")).toBeNull();
+    expect(rosey.parse("@Rosey קניות")).toBeNull();
   });
 
   it("a bare tag, or an untagged message, is nothing to do", () => {

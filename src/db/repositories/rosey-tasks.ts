@@ -8,6 +8,7 @@
  */
 
 import type pg from "pg";
+import type { RoseyItemKind } from "../../rosey/kind.js";
 import { type EventSource, shouldApply, type TaskStatus } from "../../rosey/status.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -20,6 +21,7 @@ export type RoseyTask = {
   title: string;
   titleKey: string;
   origin: RoseyTaskOrigin;
+  kind: RoseyItemKind;
   status: TaskStatus;
   statusSource: EventSource;
   raisedByParticipantId: number | null;
@@ -34,6 +36,7 @@ type TaskRow = {
   title: string;
   title_key: string;
   origin: RoseyTaskOrigin;
+  kind: RoseyItemKind;
   status: TaskStatus;
   status_source: EventSource;
   raised_by_participant_id: string | null;
@@ -42,7 +45,7 @@ type TaskRow = {
   raised_at: Date;
 };
 
-const TASK_COLUMNS = `id, group_id, title, title_key, origin, status, status_source,
+const TASK_COLUMNS = `id, group_id, title, title_key, origin, kind, status, status_source,
   raised_by_participant_id, source_message_id, source_item_index, raised_at`;
 
 function mapTask(r: TaskRow): RoseyTask {
@@ -52,6 +55,7 @@ function mapTask(r: TaskRow): RoseyTask {
     title: r.title,
     titleKey: r.title_key,
     origin: r.origin,
+    kind: r.kind,
     status: r.status,
     statusSource: r.status_source,
     raisedByParticipantId: r.raised_by_participant_id ? Number(r.raised_by_participant_id) : null,
@@ -88,6 +92,7 @@ export type InsertTaskInput = {
   title: string;
   titleKey: string;
   origin: RoseyTaskOrigin;
+  kind: RoseyItemKind;
   raisedByParticipantId: number | null;
   sourceMessageId: number;
   sourceItemIndex: number;
@@ -100,9 +105,12 @@ export type InsertTaskInput = {
  *
  * Idempotent on (source message, title key), which the database enforces
  * (rosey_tasks_source_title_unique): re-reading a message cannot fork a second
- * copy of an item it already yielded — whatever its status — and returns null
- * for it. The identity is NOT the item's position: the model labels the items
- * of a message differently from run to run, so the same position can name a
+ * copy of an item it already yielded — whatever its status or kind — and
+ * returns null for it, leaving the stored row as it is: a rerun that labels the
+ * item's kind differently never rewrites it (a kind set by hand stands).
+ *
+ * The identity is NOT the item's position: the model labels the items of a
+ * message differently from run to run, so the same position can name a
  * different item on a rerun, and keying on it silently dropped the new one.
  */
 export async function insertTask(db: Db, input: InsertTaskInput): Promise<number | null> {
@@ -110,10 +118,10 @@ export async function insertTask(db: Db, input: InsertTaskInput): Promise<number
     input.origin === "tag" ? ["open", "tag"] : ["suggested", "model"];
   return inTransaction(db, async (c) => {
     const { rows } = await c.query<{ id: string }>(
-      `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
+      `INSERT INTO rosey_tasks (group_id, title, title_key, origin, kind, status, status_source,
                                 raised_by_participant_id, source_message_id, source_item_index,
                                 raised_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT ON CONSTRAINT rosey_tasks_source_title_unique DO NOTHING
        RETURNING id`,
       [
@@ -121,6 +129,7 @@ export async function insertTask(db: Db, input: InsertTaskInput): Promise<number
         input.title,
         input.titleKey,
         input.origin,
+        input.kind,
         status,
         source,
         input.raisedByParticipantId,
@@ -198,6 +207,31 @@ export async function recordStatusEvent(
   });
 }
 
+export type SetKindResult =
+  | { found: false }
+  | { found: true; previous: RoseyItemKind; current: RoseyItemKind };
+
+/**
+ * Set an item's kind by hand (`rosey set --kind`). The only writer of `kind`
+ * after creation: insertTask never rewrites a stored row and a dedup merge
+ * writes nothing, so no automated path can undo a manual kind.
+ */
+export async function setTaskKind(
+  db: Db,
+  taskId: number,
+  kind: RoseyItemKind,
+): Promise<SetKindResult> {
+  const { rows } = await db.query<{ previous: RoseyItemKind }>(
+    `UPDATE rosey_tasks t SET kind = $2, updated_at = now()
+       FROM (SELECT id, kind AS previous FROM rosey_tasks WHERE id = $1 FOR UPDATE) old
+      WHERE t.id = old.id
+      RETURNING old.previous`,
+    [taskId, kind],
+  );
+  const row = rows[0];
+  return row ? { found: true, previous: row.previous, current: kind } : { found: false };
+}
+
 // ── Reads ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -205,6 +239,8 @@ export async function recordStatusEvent(
  * first, capped. The dedup step compares a new candidate against these only:
  * recurring errands ("milk") must become a NEW task each time they come back,
  * not merge forever into one that was raised months ago and never ticked off.
+ *
+ * `kind` narrows to one kind (dedup is per kind); without it, both.
  */
 export async function liveTasksRaisedBetween(
   db: Db,
@@ -212,14 +248,16 @@ export async function liveTasksRaisedBetween(
   since: Date,
   until: Date,
   limit = 60,
+  opts: { kind?: RoseyItemKind } = {},
 ): Promise<RoseyTask[]> {
   const { rows } = await db.query<TaskRow>(
     `SELECT ${TASK_COLUMNS} FROM rosey_tasks
       WHERE group_id = $1 AND status IN ('suggested', 'open')
         AND raised_at >= $2 AND raised_at <= $3
+        AND ($5::text IS NULL OR kind = $5)
       ORDER BY raised_at DESC, id DESC
       LIMIT $4`,
-    [groupId, since, until, limit],
+    [groupId, since, until, limit, opts.kind ?? null],
   );
   return rows.map(mapTask);
 }
@@ -233,7 +271,7 @@ export async function listTasks(
   opts: { includeClosed?: boolean } = {},
 ): Promise<RoseyTaskView[]> {
   const { rows } = await db.query<TaskRow & { raised_by: string | null }>(
-    `SELECT t.id, t.group_id, t.title, t.title_key, t.origin, t.status, t.status_source,
+    `SELECT t.id, t.group_id, t.title, t.title_key, t.origin, t.kind, t.status, t.status_source,
             t.raised_by_participant_id, t.source_message_id, t.source_item_index, t.raised_at,
             p.display_name AS raised_by
        FROM rosey_tasks t

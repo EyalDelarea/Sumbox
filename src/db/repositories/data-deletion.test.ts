@@ -186,6 +186,13 @@ describe("purgeUnselectedChats", () => {
         `INSERT INTO rosey_task_events (task_id, status, source, applied) VALUES ($1, 'open', 'tag', true)`,
         [rows[0]!.id],
       );
+      // A grocery item of the same chat goes with it just the same.
+      await admin.query(
+        `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
+                                  source_message_id, raised_at, kind)
+         VALUES ($1, 'חלב', 'חלב', 'suggested', 'suggested', 'model', $2, now(), 'grocery')`,
+        [g, msg],
+      );
       await admin.query(
         `INSERT INTO rosey_messages (group_id, external_id, kind) VALUES ($1, $2, 'reply')`,
         [g, `ROSEY-${g}`],
@@ -197,7 +204,8 @@ describe("purgeUnselectedChats", () => {
     expect(await count("rosey_tasks", "group_id = $1", [unselected])).toBe(0);
     expect(await count("rosey_messages", "group_id = $1", [unselected])).toBe(0);
     expect(await count("rosey_task_events", "true", [])).toBe(1);
-    expect(await count("rosey_tasks", "group_id = $1", [included])).toBe(1);
+    expect(await count("rosey_tasks", "group_id = $1", [included])).toBe(2);
+    expect(await count("rosey_tasks", "group_id = $1 AND kind = 'grocery'", [included])).toBe(1);
     expect(await count("rosey_messages", "group_id = $1", [included])).toBe(1);
   });
 

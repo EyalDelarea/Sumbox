@@ -21,6 +21,19 @@ describe("buildSuggestPrompt", () => {
     expect(p).toContain("[11] 2026-11-01");
   });
 
+  it("puts the grocery rule second, right under the task rule, above the output format", () => {
+    const lines = buildSuggestPrompt(batch).split("\n");
+    expect(lines[1]).toMatch(/^RULE 2\. /);
+    expect(lines[1]).toContain('"grocery"');
+    // Buying a gift and ordering a service stay tasks: only products are grocery.
+    expect(lines[1]).toContain("להזמין אינסטלטור");
+    expect(lines[1]).toContain("לקנות מתנה");
+  });
+
+  it("never teaches a grocery product as a task example", () => {
+    expect(buildSuggestPrompt(batch)).not.toContain("לקנות חלב");
+  });
+
   it("flattens multi-line messages, marks voice notes, and never shows a raw JID", () => {
     const p = buildSuggestPrompt([msg(12, "חלב\nביצים", { isVoice: true, sender: "123@lid" })]);
     expect(p).toContain("[12] 2026-11-01 משתתף לא ידוע (voice note): חלב / ביצים");
@@ -38,10 +51,59 @@ describe("parseSuggestions", () => {
     });
     const out = parseSuggestions(reply, batch);
     expect(out?.items).toEqual([
-      { sourceMessageId: 10, itemIndex: 0, title: "לקנות חלב" },
-      { sourceMessageId: 10, itemIndex: 1, title: "לקנות ביצים" },
+      { sourceMessageId: 10, itemIndex: 0, title: "לקנות חלב", kind: "task" },
+      { sourceMessageId: 10, itemIndex: 1, title: "לקנות ביצים", kind: "task" },
     ]);
     expect(out?.droppedByKind).toEqual({ past: 1 });
+  });
+
+  it("keeps grocery items with their kind, apart from tasks, and indexes them in one sequence", () => {
+    const reply = JSON.stringify({
+      items: [
+        { m: 10, kind: "grocery", text: "חלב" },
+        { m: 10, kind: "task", text: "להתקשר לאינסטלטור" },
+        { m: 10, kind: "grocery", text: "ביצים" },
+      ],
+    });
+    const out = parseSuggestions(reply, batch);
+    expect(out?.items).toEqual([
+      { sourceMessageId: 10, itemIndex: 0, title: "חלב", kind: "grocery" },
+      { sourceMessageId: 10, itemIndex: 1, title: "להתקשר לאינסטלטור", kind: "task" },
+      { sourceMessageId: 10, itemIndex: 2, title: "ביצים", kind: "grocery" },
+    ]);
+    expect(out?.droppedByKind).toEqual({});
+  });
+
+  it("an answer of grocery items only is a result, not a batch failure", () => {
+    const out = parseSuggestions('{"items":[{"m":10,"kind":"grocery","text":"חלב"}]}', batch);
+    expect(out?.items).toHaveLength(1);
+  });
+
+  it("one garbled id does not sink the batch: the other items are kept, the bad one counted", () => {
+    // Measured on the real chat: the local model sometimes emits a corrupted id
+    // ("m": 10625cut57), which made the WHOLE reply unparseable — every item lost.
+    const reply = `{"items": [
+  {"m": 10, "kind": "grocery", "text": "חלב"},
+  {"m": 1x0, "kind": "grocery", "text": "לחם"},
+  {"m": 11, "kind": "past", "text": "לתקן ברז"}
+]}`;
+    const out = parseSuggestions(reply, batch);
+    expect(out?.items).toEqual([
+      { sourceMessageId: 10, itemIndex: 0, title: "חלב", kind: "grocery" },
+    ]);
+    expect(out?.rejected).toEqual({ malformed_object: 1 });
+    expect(out?.droppedByKind).toEqual({ past: 1 });
+  });
+
+  it("a cut-off reply is still a batch failure, even when its first items are whole", () => {
+    const reply = '{"items": [{"m": 10, "kind": "grocery", "text": "חלב"}, {"m": 10, "kind": "gro';
+    expect(parseSuggestions(reply, batch)).toBeNull();
+  });
+
+  it("an items array whose every object is broken is a batch failure", () => {
+    expect(
+      parseSuggestions('{"items": [{"m": 1x0, "kind": "task", "text": "x"}]}', batch),
+    ).toBeNull();
   });
 
   it("rejects a citation to a message outside the batch (an invented id)", () => {
@@ -62,7 +124,7 @@ describe("parseSuggestions", () => {
     const reply = `{"items": [{"m": 10, "kind": "task", "text": "לקנות חלב"}]}
 Notes: {"confidence": "high"}`;
     expect(parseSuggestions(reply, batch)?.items).toEqual([
-      { sourceMessageId: 10, itemIndex: 0, title: "לקנות חלב" },
+      { sourceMessageId: 10, itemIndex: 0, title: "לקנות חלב", kind: "task" },
     ]);
   });
 
@@ -83,7 +145,7 @@ Notes: {"confidence": "high"}`;
     const reply = `{"items": [{"m": 10, "kind": "task", "text": "לקנות חלב"}]}
 The task comes from message [10].`;
     expect(parseSuggestions(reply, batch)?.items).toEqual([
-      { sourceMessageId: 10, itemIndex: 0, title: "לקנות חלב" },
+      { sourceMessageId: 10, itemIndex: 0, title: "לקנות חלב", kind: "task" },
     ]);
   });
 
