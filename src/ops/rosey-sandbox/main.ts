@@ -39,6 +39,9 @@ const FONTS_DIR = path.resolve(
 
 const CLEANUP_HINT = "npm run dev -- rosey-sandbox --cleanup";
 
+/** How long a crashed run waits for its teardown before it exits anyway. */
+const CRASH_TEARDOWN_MS = 15_000;
+
 const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 const CRASH_EVENTS = ["uncaughtException", "unhandledRejection"] as const;
 
@@ -97,6 +100,12 @@ export async function runRoseySandbox(opts: RoseySandboxOptions): Promise<void> 
     },
     crash: (err) => {
       out(`rosey-sandbox crashed: ${(err as Error)?.stack ?? String(err)}`);
+      // Exit even if teardown hangs (an unreachable database): the --cleanup
+      // hint is printed below either way.
+      setTimeout(() => {
+        out(`Teardown did not finish. If ${target.name} is left: ${CLEANUP_HINT}`);
+        process.exit(1);
+      }, CRASH_TEARDOWN_MS).unref();
       void teardown()
         .catch(() => undefined) // teardown already printed the --cleanup hint
         .finally(() => process.exit(1));
