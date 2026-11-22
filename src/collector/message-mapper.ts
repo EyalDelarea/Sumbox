@@ -8,7 +8,7 @@
  */
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { ImportedMessageType } from "../importer/types.js";
-import { classifyMedia, type MediaKind } from "./media-descriptor.js";
+import { classifyMedia, type MediaKind } from "./media-kind.js";
 import { timestampToMs } from "./timestamp.js";
 
 export type MappedMessage = {
