@@ -481,6 +481,8 @@ export async function startServe(options: { port?: string; collect?: boolean }):
         summaryCommand: cmdDeps,
         // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
         askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, turns: new GroupTurnQueue() },
+        // Rosey: receive-only task capture, off unless ROSEY_ENABLED=true.
+        rosey: (await import("../rosey/live.js")).roseyLiveFromEnv(pool, log.collector),
         telemetry: config.langfuse.enabled
           ? {
               baseUrl: config.langfuse.baseUrl,
