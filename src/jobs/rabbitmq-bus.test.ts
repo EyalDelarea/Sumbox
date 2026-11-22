@@ -1,4 +1,5 @@
 import { RabbitMQContainer, type StartedRabbitMQContainer } from "@testcontainers/rabbitmq";
+import type * as amqplib from "amqplib";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +9,7 @@ import {
 } from "../db/repositories/job-runs.js";
 import { createTestDatabase } from "../test/db.js";
 import { InMemoryJobRunRecorder, PostgresJobRunRecorder } from "./job-run-recorder.js";
+import type { JobType } from "./job-types.js";
 import { RabbitMqJobBus } from "./rabbitmq-bus.js";
 
 /**
@@ -368,6 +370,209 @@ describe("RabbitMqJobBus — integration (testcontainers)", () => {
       await pool.end();
     }
   }, 60_000);
+
+  // ── Recovery: a worker must keep consuming after the broker drops it ──────
+  // Each test owns a job type no other test here uses, so consumer counts are exact.
+
+  it("re-subscribes after the broker closes the connection: a job enqueued afterwards is consumed", async () => {
+    const consumerBus = makeBus(new InMemoryJobRunRecorder());
+    const probeBus = makeBus(new InMemoryJobRunRecorder());
+
+    try {
+      const received: string[] = [];
+      await consumerBus.consume(
+        "analyze.image",
+        async (job) => {
+          received.push(job.payload.messageId);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await consumersOn(probeBus, "analyze.image")) === 1, 5_000);
+
+      // What a RabbitMQ restart does to a running worker: every connection drops.
+      const res = await container.exec([
+        "rabbitmqctl",
+        "close_all_connections",
+        "test: broker restart",
+      ]);
+      expect(res.exitCode).toBe(0);
+
+      // The consumer must come back on its own, with nobody calling consume() again.
+      await waitUntil(async () => (await consumersOn(probeBus, "analyze.image")) === 1, 15_000);
+      await probeBus.enqueue("analyze.image", { messageId: "after-reconnect" });
+      await waitUntil(() => received.includes("after-reconnect"), 10_000);
+    } finally {
+      await probeBus.close();
+      await consumerBus.close();
+    }
+  }, 60_000);
+
+  it("recovers from a channel-only close: the same bus consumes and enqueues again", async () => {
+    const bus = makeBus(new InMemoryJobRunRecorder());
+    const probeBus = makeBus(new InMemoryJobRunRecorder());
+
+    try {
+      const received: string[] = [];
+      await bus.consume(
+        "analyze.video",
+        async (job) => {
+          received.push(job.payload.messageId);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await consumersOn(probeBus, "analyze.video")) === 1, 5_000);
+
+      // A channel-level error closes the channel but leaves the connection up (the
+      // same shape as a broker-side consumer_timeout). A 404 is the easy way to cause one.
+      const channel = (bus as unknown as { channel: amqplib.Channel }).channel;
+      await expect(channel.checkQueue("jobs.no-such-queue")).rejects.toThrow(/NOT_FOUND/);
+
+      await waitUntil(async () => (await consumersOn(probeBus, "analyze.video")) === 1, 15_000);
+      // Enqueue through the bus whose channel died: it must not reuse the dead one.
+      await bus.enqueue("analyze.video", { messageId: "after-channel-close" });
+      await waitUntil(() => received.includes("after-channel-close"), 10_000);
+    } finally {
+      await probeBus.close();
+      await bus.close();
+    }
+  }, 60_000);
+
+  /**
+   * Consumers on a queue as the broker reports them, or -1 if the queue does not
+   * exist. Probes through rabbitmqctl, not a second bus: a bus would assert
+   * (re-create) the queue itself and hide whether the consumer's own bus did.
+   */
+  async function brokerConsumersOn(queue: string): Promise<number> {
+    const res = await container.exec(["rabbitmqctl", "-q", "list_queues", "name", "consumers"]);
+    const row = res.output
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .find(([name]) => name === queue);
+    return row ? Number(row[1]) : -1;
+  }
+
+  it("re-subscribes after the broker cancels its consumer (queue deleted), with the connection still up", async () => {
+    // analyze.image's earlier test has closed its buses, so this one's counts are exact.
+    const bus = makeBus(new InMemoryJobRunRecorder());
+
+    try {
+      const received: string[] = [];
+      await bus.consume(
+        "analyze.image",
+        async (job) => {
+          received.push(job.payload.messageId);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await brokerConsumersOn("jobs.analyze.image")) === 1, 5_000);
+
+      // The broker cancels the consumer (basic.cancel) but keeps the channel open,
+      // so no close event fires: amqplib hands the consumer a null message instead.
+      const res = await container.exec(["rabbitmqctl", "delete_queue", "jobs.analyze.image"]);
+      expect(res.exitCode).toBe(0);
+
+      await waitUntil(async () => (await brokerConsumersOn("jobs.analyze.image")) === 1, 15_000);
+      const producer = makeBus(new InMemoryJobRunRecorder());
+      try {
+        await producer.enqueue("analyze.image", { messageId: "after-cancel" });
+      } finally {
+        await producer.close();
+      }
+      await waitUntil(() => received.includes("after-cancel"), 10_000);
+    } finally {
+      await bus.close();
+    }
+  }, 60_000);
+
+  it("re-creates its queue when the broker comes back empty, then consumes", async () => {
+    const bus = makeBus(new InMemoryJobRunRecorder());
+    const brokerConsumers = () => brokerConsumersOn("jobs.summarize.total");
+
+    try {
+      const received: string[] = [];
+      await bus.consume(
+        "summarize.total",
+        async (job) => {
+          received.push(job.payload.since);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await brokerConsumers()) === 1, 5_000);
+
+      // A broker restarted on a fresh node has no queues, and drops every connection.
+      const deleted = await container.exec(["rabbitmqctl", "delete_queue", "jobs.summarize.total"]);
+      expect(deleted.exitCode).toBe(0);
+      expect(await brokerConsumers()).toBe(-1);
+      const closed = await container.exec([
+        "rabbitmqctl",
+        "close_all_connections",
+        "test: fresh broker",
+      ]);
+      expect(closed.exitCode).toBe(0);
+
+      await waitUntil(async () => (await brokerConsumers()) === 1, 15_000);
+      const producer = makeBus(new InMemoryJobRunRecorder());
+      try {
+        await producer.enqueue("summarize.total", { since: "after-empty-broker" });
+      } finally {
+        await producer.close();
+      }
+      await waitUntil(() => received.includes("after-empty-broker"), 10_000);
+    } finally {
+      await bus.close();
+    }
+  }, 60_000);
+
+  it("still has exactly one consumer after two reconnects, and delivers each job once", async () => {
+    // analyze.video's earlier test has closed its buses, so this one's counts are exact.
+    const bus = makeBus(new InMemoryJobRunRecorder());
+    const queue = "jobs.analyze.video";
+
+    // Replay subscribes one consumer at a time, so a duplicate shows up a moment
+    // after the first: wait for any consumer, give replay time to finish, then count.
+    const settledConsumers = async (): Promise<number> => {
+      await waitUntil(async () => (await brokerConsumersOn(queue)) >= 1, 15_000);
+      await new Promise((r) => setTimeout(r, 1_000));
+      return brokerConsumersOn(queue);
+    };
+
+    try {
+      const received: string[] = [];
+      await bus.consume(
+        "analyze.video",
+        async (job) => {
+          received.push(job.payload.messageId);
+        },
+        { prefetch: 1 },
+      );
+      expect(await settledConsumers()).toBe(1);
+
+      for (const round of [1, 2]) {
+        const res = await container.exec([
+          "rabbitmqctl",
+          "close_all_connections",
+          `test: drop ${round}`,
+        ]);
+        expect(res.exitCode).toBe(0);
+        // Let the broker drop the old consumer. The bus waits 2s before reconnecting,
+        // so whatever settledConsumers() counts next is the re-subscribed set.
+        await new Promise((r) => setTimeout(r, 500));
+        expect(await settledConsumers()).toBe(1);
+      }
+
+      const producer = makeBus(new InMemoryJobRunRecorder());
+      try {
+        await producer.enqueue("analyze.video", { messageId: "after-two-drops" });
+      } finally {
+        await producer.close();
+      }
+      await waitUntil(() => received.includes("after-two-drops"), 10_000);
+      await new Promise((r) => setTimeout(r, 500)); // room for a duplicate delivery
+      expect(received.filter((id) => id === "after-two-drops")).toEqual(["after-two-drops"]);
+    } finally {
+      await bus.close();
+    }
+  }, 90_000);
 });
 
 // ── Fix 4: connect-race unit test (fake amqplib, no Testcontainers) ──────────
@@ -501,6 +706,19 @@ describe("RabbitMqJobBus — connect race (unit)", () => {
 });
 
 // ── util ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Consumers on a type's queue, or -1 while the probe's own connection is down.
+ * A broker-wide connection drop hits the probe bus too, and that must read as
+ * "not yet", not fail the test for the wrong reason.
+ */
+async function consumersOn(bus: RabbitMqJobBus, type: JobType): Promise<number> {
+  try {
+    return (await bus.queueStats(type)).consumers;
+  } catch {
+    return -1;
+  }
+}
 
 async function waitUntil(
   predicate: () => boolean | Promise<boolean>,
