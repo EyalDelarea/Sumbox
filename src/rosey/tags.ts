@@ -15,6 +15,8 @@
  *   "@Rosey קניות\n- item\n- item"      → the grocery word alone on its line: a grocery list
  *   "@Rosey done <text>" / "@רוזי בוצע <text>" → mark the matching task done
  *   "@Rosey done" quoting a message     → mark that message's task done
+ *   "@Rosey מה המשימות?" / "@Rosey list" → a LIST REQUEST (see LIST_PHRASES):
+ *                                          never an item; the live path may reply
  *
  * Without a grocery prefix, an added item is a task. The prefix must be the
  * grocery word followed by a colon, or alone on the first line: "@Rosey קניות
@@ -36,6 +38,53 @@ const DONE_WORDS = ["done", "בוצע", "בוצעה", "סיימתי"];
 /** The words that make an add a grocery list. Matched as the first word, with a colon or alone. */
 const GROCERY_WORDS = ["קניות", "grocery", "groceries", "shopping"];
 
+/**
+ * The whole of a list request, once the tag is taken out (case, direction
+ * marks, closing punctuation and spacing aside). A fixed set, never the model:
+ * a reply is a send, and only these exact asks may cause one. "@Rosey מה יש
+ * לאכול" is not here, so it stays an ordinary item.
+ */
+export const LIST_PHRASES: readonly string[] = [
+  "list",
+  "the list",
+  "task list",
+  "the task list",
+  "tasks",
+  "the tasks",
+  "what's the list",
+  "what is the list",
+  "what's the task list",
+  "what is the task list",
+  "what's on the list",
+  "what are the tasks",
+  "show the list",
+  "רשימה",
+  "הרשימה",
+  "רשימת משימות",
+  "רשימת המשימות",
+  "משימות",
+  "המשימות",
+  "מה המשימות",
+  "מה הרשימה",
+  "מה ברשימה",
+  "מה יש",
+  "מה יש ברשימה",
+  "מה פתוח",
+];
+
+/** A list request's text with the tag already removed, in LIST_PHRASES' form. */
+function listKey(rest: string): string {
+  return rest
+    .replace(/[\u200e\u200f]/g, "")
+    .replace(/[\u2018\u2019`]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[\s?？!.,…]+$/u, "")
+    .toLowerCase();
+}
+
+const LIST_KEYS = new Set(LIST_PHRASES);
+
 export type RoseyCommand =
   | { kind: "add"; items: string[]; itemKind: RoseyItemKind }
   | { kind: "done"; query: string };
@@ -43,7 +92,9 @@ export type RoseyCommand =
 export type TagMatcher = {
   /** True when `text` carries any Rosey alias. */
   isTagged(text: string): boolean;
-  /** Parse the explicit command, or null when untagged / nothing to do. */
+  /** True when `text` is a tagged list request and nothing else (LIST_PHRASES). */
+  isListRequest(text: string): boolean;
+  /** Parse the explicit command, or null when untagged / nothing to do / a list request. */
   parse(text: string): RoseyCommand | null;
 };
 
@@ -90,9 +141,16 @@ export function makeTagMatcher(aliases: readonly string[]): TagMatcher {
   const gap = "[\\s\\u200e\\u200f]*";
   const groceryHead = new RegExp(`^${gap}${groceryWord}${gap}(?:[:：]${gap}|$)`, "iu");
 
+  const isListRequest = (text: string) =>
+    !!text && tagTest.test(text) && LIST_KEYS.has(listKey(text.replace(tagStrip, " ")));
+
   return {
     isTagged: (text) => !!text && tagTest.test(text),
+    isListRequest,
     parse(text) {
+      // A list request asks; it adds nothing. Null here keeps a replay of it
+      // (the catch-up parses stored messages) from storing it as an item.
+      if (isListRequest(text)) return null;
       if (!text || !tagTest.test(text)) return null;
       // Remove the tag but keep the line structure — lines are the item unit.
       const body = text
