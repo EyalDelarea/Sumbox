@@ -44,3 +44,21 @@ export async function recordRun(
     [slotKey, runAt],
   );
 }
+
+/**
+ * Starts a slot at the database's now, unless the slot already has a run.
+ * Never moves an existing slot (unlike recordRun, which moves one forward).
+ */
+export async function startSlotIfAbsent(
+  client: pg.Pool | pg.PoolClient,
+  slotKey: string,
+): Promise<void> {
+  await client.query(
+    `
+    INSERT INTO scheduler_state (slot_key, last_run_at, updated_at)
+    VALUES ($1, clock_timestamp(), now())
+    ON CONFLICT (tenant_id, slot_key) DO NOTHING
+    `,
+    [slotKey],
+  );
+}

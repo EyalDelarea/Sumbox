@@ -20,9 +20,8 @@ import {
   recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
-  startCursorIfAbsent,
 } from "../db/repositories/rosey-tasks.js";
-import { getLastRun, recordRun } from "../db/repositories/scheduler-state.js";
+import { getLastRun, recordRun, startSlotIfAbsent } from "../db/repositories/scheduler-state.js";
 import { OllamaSummarizer } from "../summarization/summarizer.js";
 import { type AggregateReport, aggregateMessages } from "./aggregate.js";
 import { applyCommand, type CommandStore } from "./commands.js";
@@ -65,6 +64,11 @@ export function cursorKey(groupId: number): string {
  * enable starts the group's cursor at now, so messages from before she
  * listened are never replayed as commands by the catch-up. A later re-enable
  * leaves the cursor where it is.
+ *
+ * The same cursor bounds what a pass reads, so passes after enabling suggest
+ * only from new messages. To suggest from the history too, run
+ * `rosey aggregate --group <id> --from-scratch` once: it re-reads the window
+ * while commands stay gated on the cursor, so none from before is replayed.
  */
 export async function setRoseyEnabled(
   pool: pg.Pool,
@@ -72,7 +76,7 @@ export async function setRoseyEnabled(
   enabled: boolean,
 ): Promise<void> {
   await upsertCommandPermission(pool, { groupId, command: ROSEY_COMMAND_KEY, enabled });
-  if (enabled) await startCursorIfAbsent(pool, cursorKey(groupId));
+  if (enabled) await startSlotIfAbsent(pool, cursorKey(groupId));
 }
 
 /**

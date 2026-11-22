@@ -223,6 +223,23 @@ describe("runAggregation", () => {
     expect(await getLastRun(pool, cursorKey(g))).toEqual(before);
   });
 
+  it("a backfill after enabling reads the history for suggestions, never its commands", async () => {
+    const g = await group({ cursor: null });
+    await message(g, "@Rosey לתקן מזגן", 10 * 60_000); // before she listened
+    await message(g, "צריך להחליף נורה");
+    await tick();
+    await setRoseyEnabled(pool, g, true);
+    const run = await runAggregation(pool, g, {
+      cfg,
+      generate: model().generate,
+      days: 30,
+      fromScratch: true,
+    });
+    expect(run.report.messagesRead).toBe(2);
+    expect(run.tagged).toMatchObject({ commands: 0 });
+    expect((await listTasks(pool, g)).map((t) => t.origin)).toEqual(["suggested"]);
+  });
+
   it("never replays a message addressed to @Aida as a command", async () => {
     const g = await group();
     await message(g, "@Aida מה @Rosey הוסיפה?", 10 * 60_000);

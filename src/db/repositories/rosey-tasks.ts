@@ -413,16 +413,3 @@ export async function messagesWithTagEvents(
   );
   return new Set(rows.map((r) => Number(r.source_message_id)));
 }
-
-/**
- * Start a cursor at the database's now, unless one exists. Never moves an
- * existing cursor (scheduler-state's recordRun only moves one forward).
- */
-export async function startCursorIfAbsent(db: Db, slotKey: string): Promise<void> {
-  await db.query(
-    `INSERT INTO scheduler_state (slot_key, last_run_at, updated_at)
-     VALUES ($1, clock_timestamp(), now())
-     ON CONFLICT (tenant_id, slot_key) DO NOTHING`,
-    [slotKey],
-  );
-}
