@@ -9,12 +9,14 @@ import type pg from "pg";
 import {
   insertTask,
   liveTasksRaisedBetween,
+  recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
 } from "../db/repositories/rosey-tasks.js";
 import { getLastRun, recordRun } from "../db/repositories/scheduler-state.js";
 import { OllamaSummarizer } from "../summarization/summarizer.js";
 import { type AggregateReport, aggregateMessages } from "./aggregate.js";
+import { applyCommand, type CommandStore } from "./commands.js";
 import type { RoseyConfig } from "./config.js";
 import { makeTagMatcher } from "./tags.js";
 
@@ -49,8 +51,48 @@ export function cursorKey(groupId: number): string {
   return `rosey-aggregate:${groupId}`;
 }
 
+/**
+ * The store an explicit @Rosey command writes through. Shared by the live path
+ * and the catch-up below, so a command reads and writes the same way whichever
+ * of them sees it first.
+ */
+export function commandStore(pool: pg.Pool, groupId: number): CommandStore {
+  return {
+    // A generous cap: a "done" looks across every live task of the group.
+    liveTasksRaisedBetween: (since, until) =>
+      liveTasksRaisedBetween(pool, groupId, since, until, 500),
+    insertTagged: async (input) => {
+      const raisedBy = await resolveRaisedBy(pool, groupId, [input.sourceMessageId]);
+      return insertTask(pool, {
+        ...input,
+        groupId,
+        origin: "tag",
+        raisedByParticipantId: raisedBy.get(input.sourceMessageId) ?? null,
+      });
+    },
+    markStatus: (input) => recordStatusEvent(pool, { ...input, source: "tag", groupId }),
+  };
+}
+
+export type TagCatchUp = {
+  /** Tagged text messages read in this run. */
+  commands: number;
+  created: number;
+  confirmed: number;
+  done: number;
+};
+
 export type RunAggregationResult = {
   report: AggregateReport;
+  /**
+   * Explicit commands found in the read window. The live path applies a command
+   * within seconds, but only for a message that arrives live; one sent while the
+   * collector was down (or before Rosey was enabled) is applied here instead.
+   * Applying twice is harmless: an item's insert is idempotent per (message,
+   * index), a confirmed suggestion is already open, and a done task is no longer
+   * live to match.
+   */
+  tagged: TagCatchUp;
   /** False when any batch failed: those messages are read again next run. */
   cursorAdvanced: boolean;
 };
@@ -83,6 +125,27 @@ export async function runAggregation(
   });
 
   const tags = makeTagMatcher(opts.cfg.tags);
+  const tagged: TagCatchUp = { commands: 0, created: 0, confirmed: 0, done: 0 };
+  const store = commandStore(pool, groupId);
+  // Commands first: an explicit tag wins (D3), so suggestions dedup against it.
+  for (const m of messages) {
+    if (m.isVoice) continue; // a spoken word is not a typed command
+    const cmd = tags.parse(m.content.trim());
+    if (!cmd) continue;
+    tagged.commands++;
+    const out = await applyCommand(
+      cmd,
+      { groupId, messageId: m.messageId, sentAt: m.sentAt, quotedMessageId: null },
+      store,
+    );
+    if (out.kind === "added") {
+      tagged.created += out.created;
+      tagged.confirmed += out.confirmed;
+    } else if (out.kind === "done") {
+      tagged.done++;
+    }
+  }
+
   const report = await aggregateMessages(messages, {
     generate: opts.generate,
     isTagged: tags.isTagged,
@@ -95,7 +158,7 @@ export async function runAggregation(
 
   const cursorAdvanced = report.batchFailures === 0;
   if (cursorAdvanced) await recordRun(pool, cursorKey(groupId), startedAt);
-  return { report, cursorAdvanced };
+  return { report, tagged, cursorAdvanced };
 }
 
 async function databaseNow(pool: pg.Pool): Promise<Date> {

@@ -67,7 +67,13 @@ describe("runAggregation", () => {
 
     const m1 = model();
     const first = await runAggregation(pool, g, { cfg, generate: m1.generate, days: 30 });
-    expect(first).toMatchObject({ cursorAdvanced: true, report: { created: 1, taggedSkipped: 1 } });
+    // The tagged message is not shown to the model; it is applied as a command.
+    expect(first).toMatchObject({
+      cursorAdvanced: true,
+      report: { created: 1, taggedSkipped: 1 },
+      tagged: { commands: 1, created: 1 },
+    });
+    expect(m1.seen.join("\n")).not.toContain("לקנות לחם");
     expect(await getLastRun(pool, cursorKey(g))).not.toBeNull();
 
     await message(g, "להתקשר לאינסטלטור");
@@ -76,8 +82,39 @@ describe("runAggregation", () => {
     expect(second.report.messagesRead).toBe(1);
     expect(m2.seen.join("\n")).not.toContain("להחליף נורה");
 
-    const titles = (await listTasks(pool, g)).map((t) => t.title).sort();
-    expect(titles).toEqual(["להתקשר לאינסטלטור", "להחליף נורה"].sort());
+    const tasks = (await listTasks(pool, g)).map((t) => [t.title, t.origin]).sort();
+    expect(tasks).toEqual(
+      [
+        ["להתקשר לאינסטלטור", "suggested"],
+        ["להחליף נורה", "suggested"],
+        ["לקנות לחם", "tag"],
+      ].sort(),
+    );
+  });
+
+  it("catches up on commands the live path missed, and applying one twice is harmless", async () => {
+    const g = await group();
+    await message(g, "@Rosey לתקן מזגן\nלקנות מסנן");
+    await message(g, "@Rosey בוצע מזגן");
+    const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    expect(run.tagged).toEqual({ commands: 2, created: 2, confirmed: 0, done: 1 });
+
+    const again = await runAggregation(pool, g, {
+      cfg,
+      generate: model().generate,
+      days: 30,
+      fromScratch: true,
+    });
+    expect(again.tagged).toEqual({ commands: 2, created: 0, confirmed: 0, done: 0 });
+    const tasks = (await listTasks(pool, g, { includeClosed: true }))
+      .map((t) => [t.title, t.status])
+      .sort();
+    expect(tasks).toEqual(
+      [
+        ["לתקן מזגן", "done"],
+        ["לקנות מסנן", "open"],
+      ].sort(),
+    );
   });
 
   it("keeps the cursor on the database clock, so a host clock running ahead skips nothing", async () => {
