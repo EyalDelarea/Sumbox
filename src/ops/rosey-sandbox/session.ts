@@ -132,6 +132,8 @@ export class RoseySandbox {
   private posted = new Map<string, string>();
   private events: SandboxEvent[] = [];
   private passRunning = false;
+  /** Bumped by every start/reset: a reply echo from a stopped engine is dropped. */
+  private generation = 0;
   listStyle: ListStyle = "poll";
 
   constructor(private readonly deps: SandboxDeps) {
@@ -144,6 +146,8 @@ export class RoseySandbox {
   /** Load the group and start a fresh engine (also after a reset). */
   async start(): Promise<void> {
     this.engine?.stop();
+    this.engine = null;
+    const generation = ++this.generation;
     this.group = await groupInfo(this.deps.scratch, this.deps.groupId);
     if (!this.group) throw new Error(`group ${this.deps.groupId} has no WhatsApp id`);
     this.members = await listMembers(this.deps.scratch, this.deps.groupId);
@@ -158,7 +162,7 @@ export class RoseySandbox {
       generate: this.deps.generate,
       ownEchoGraceMs: this.deps.ownEchoGraceMs,
       log: { info: log("info"), warn: log("warn"), error: log("error") },
-      sender: this.textSink(),
+      sender: this.textSink(generation),
       pollSender: this.pollSink(),
       listStyle: () => this.listStyle,
       newMessageId: sandboxMessageId,
@@ -173,6 +177,25 @@ export class RoseySandbox {
   stop(): void {
     this.engine?.stop();
     this.engine = null;
+  }
+
+  /**
+   * Stop, re-copy the group (`reclone`), and start again. Refused while a
+   * suggestion pass runs: it would write into the fresh copy. A failure is
+   * logged and leaves the engine stopped (state shows it) until a reset works.
+   */
+  async reset(reclone: () => Promise<void>): Promise<void> {
+    if (this.passRunning) throw new Error("a suggestion pass is running; reset when it ends");
+    this.stop();
+    this.generation++;
+    try {
+      await reclone();
+      await this.start();
+      this.event("info", "reset: the group was copied again from live");
+    } catch (err) {
+      this.event("error", `reset failed: ${(err as Error).message} (try reset again)`);
+      throw err;
+    }
   }
 
   private live(): RoseyLive {
@@ -191,7 +214,7 @@ export class RoseySandbox {
     return this.members.find((m) => m.owner) ?? { name: "Sumbox", jid: null, owner: true };
   }
 
-  private textSink(): RoseySender {
+  private textSink(generation: number): RoseySender {
     return {
       sendText: async (_jid, text, opts) => {
         const id = opts.messageId ?? sandboxMessageId();
@@ -199,6 +222,7 @@ export class RoseySandbox {
         this.posted.set(id, text);
         // WhatsApp echoes her post back as the owner's own message, after the send.
         setImmediate(() => {
+          if (generation !== this.generation) return; // reset since: not this copy's
           void this.deliver(this.owner(), text, null, id).catch((err: unknown) =>
             this.event("error", `echo of her reply failed: ${(err as Error).message}`),
           );
@@ -294,25 +318,35 @@ export class RoseySandbox {
     const mine = new Set(poll.votes[input.member] ?? []);
     if (mine.has(input.option)) mine.delete(input.option);
     else mine.add(input.option);
-    poll.votes[input.member] = [...mine].sort((a, b) => a - b);
-    await this.live().onPollVote({
-      jid: this.group!.jid,
-      pollId: poll.id,
-      voter: m.jid ?? `member:${input.member}`,
-      selected: poll.votes[input.member]!,
-    });
+    const before = poll.votes[input.member];
+    const selected = [...mine].sort((a, b) => a - b);
+    poll.votes[input.member] = selected;
+    // The tick shows only if her vote path took it.
+    try {
+      const out = await this.live().onPollVote({
+        jid: this.group!.jid,
+        pollId: poll.id,
+        voter: m.jid ?? `member:${input.member}`,
+        selected,
+      });
+      if (out.kind !== "applied") throw new Error(`vote not applied: ${out.kind}`);
+    } catch (err) {
+      if (before) poll.votes[input.member] = before;
+      else delete poll.votes[input.member];
+      this.event("error", `vote on poll ${poll.id.slice(-6)} failed: ${(err as Error).message}`);
+      throw err;
+    }
   }
 
   /** Run the suggestion pass now (local Ollama); returns at once. */
   suggestNow(): void {
     if (this.passRunning) return;
+    const live = this.live(); // throws first if stopped, so the flag never sticks
     this.passRunning = true;
     this.event("info", "suggestion pass started (local model)");
-    void this.live()
-      .suggestNow(this.deps.groupId)
-      .finally(() => {
-        this.passRunning = false;
-      });
+    void live.suggestNow(this.deps.groupId).finally(() => {
+      this.passRunning = false;
+    });
   }
 
   /** Set an item's status by hand: the `rosey set` path (manual, D4's top layer). */
@@ -337,6 +371,7 @@ export class RoseySandbox {
     events: SandboxEvent[];
     listStyle: ListStyle;
     passRunning: boolean;
+    running: boolean;
     model: string;
   }> {
     const since = new Date(Date.now() - HISTORY_DAYS * 86_400_000);
@@ -354,6 +389,7 @@ export class RoseySandbox {
       events: this.events,
       listStyle: this.listStyle,
       passRunning: this.passRunning,
+      running: this.engine !== null,
       model: this.cfg.model,
     };
   }

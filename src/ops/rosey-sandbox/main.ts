@@ -3,7 +3,7 @@
  * WhatsApp connection at all.
  *
  *   1. Create <live>_rosey_sandbox on the same Postgres server and migrate it
- *      to the current schema.
+ *      to the current schema (refused if another run is using it).
  *   2. Clone the group from live through a read-only pool (clone.ts).
  *   3. Run her real engine over the copy, with an in-memory sink for sends
  *      (session.ts), behind a page on 127.0.0.1 (server.ts).
@@ -59,50 +59,74 @@ export async function runRoseySandbox(opts: RoseySandboxOptions): Promise<void> 
   }
   const port = opts.port ?? DEFAULT_SANDBOX_PORT;
 
+  // Listen for Ctrl-C from the start: one during migrate/clone lets startup
+  // finish its current step and then tears down, instead of killing the
+  // process with a copy of the chat left behind.
+  let stopRequested = false;
+  let wake: (() => void) | null = null;
+  const onSignal = () => {
+    stopRequested = true;
+    wake?.();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+
+  let created = false;
   let live: pg.Pool | null = null;
   let scratch: pg.Pool | null = null;
   let sandbox: RoseySandbox | null = null;
   let server: ReturnType<typeof createSandboxServer> | null = null;
 
   const teardown = async () => {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
     sandbox?.stop();
-    if (server) await new Promise<void>((r) => server!.close(() => r()));
+    if (server?.listening) await new Promise<void>((r) => server!.close(() => r()));
     server?.closeAllConnections();
     await scratch?.end().catch(() => undefined);
     await live?.end().catch(() => undefined);
-    await dropScratch(target);
-    out(`Dropped ${target.name}.`);
+    if (!created) return; // never drop a database this run did not create
+    try {
+      await dropScratch(target);
+      out(`Dropped ${target.name}.`);
+    } catch (err) {
+      out(
+        `Could NOT drop ${target.name} (${(err as Error).message}): it holds a copy of the chat. ` +
+          "Run: npm run dev -- rosey-sandbox --cleanup",
+      );
+      throw err;
+    }
   };
 
   try {
     out(`Creating ${target.name} and migrating it…`);
     await createScratch(target);
+    created = true;
     await runMigrationsUp(target.url);
     live = readOnlyPool(opts.liveUrl);
     scratch = new pg.Pool({ connectionString: target.url, max: 5 });
-    const report = await cloneGroup(live, scratch, groupId, target.liveName);
+    const lv = live;
+    const sc = scratch;
+    const report = await cloneGroup(lv, sc, groupId, target.liveName, out);
     out(
       `Cloned group ${groupId} (read-only from ${target.liveName}): ${Object.entries(report)
         .map(([t, n]) => `${t} ${n}`)
         .join(", ")}`,
     );
 
-    sandbox = new RoseySandbox({ scratch, groupId });
-    await sandbox.start();
-    const s = sandbox;
-    const sc = scratch;
-    const lv = live;
+    const s = new RoseySandbox({ scratch: sc, groupId });
+    sandbox = s;
+    await s.start();
     server = createSandboxServer({
       sandbox: s,
       page: SANDBOX_PAGE,
       fontsDir: FONTS_DIR,
       port,
-      reset: async () => {
-        s.stop();
-        await wipeScratch(sc, target.liveName);
-        await cloneGroup(lv, sc, groupId, target.liveName);
-        await s.start();
-      },
+      reset: () =>
+        s.reset(async () => {
+          await wipeScratch(sc, target.liveName);
+          await cloneGroup(lv, sc, groupId, target.liveName, out);
+        }),
     });
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
@@ -113,17 +137,13 @@ export async function runRoseySandbox(opts: RoseySandboxOptions): Promise<void> 
     throw err;
   }
 
-  out(
-    `Rosey sandbox on http://127.0.0.1:${port}  (no WhatsApp; Ctrl-C drops the scratch database)`,
-  );
-  await new Promise<void>((resolve) => {
-    const stop = () => {
-      process.off("SIGINT", stop);
-      process.off("SIGTERM", stop);
-      resolve();
-    };
-    process.on("SIGINT", stop);
-    process.on("SIGTERM", stop);
-  });
+  if (!stopRequested) {
+    out(
+      `Rosey sandbox on http://127.0.0.1:${port}  (no WhatsApp; Ctrl-C drops the scratch database)`,
+    );
+    await new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+  }
   await teardown();
 }

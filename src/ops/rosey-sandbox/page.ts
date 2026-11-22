@@ -354,7 +354,7 @@ button:disabled{opacity:.5;cursor:default}
     $("gname").textContent = state.group.name;
     $("model").textContent = state.model;
     var st = $("status");
-    st.textContent = state.passRunning ? "סבב הצעות רץ…" : "מוכנה";
+    st.textContent = !state.running ? "מושבתת — לחצו איפוס" : state.passRunning ? "סבב הצעות רץ…" : "מוכנה";
     $("suggest").disabled = state.passRunning;
     document.querySelectorAll(".seg button").forEach(function (b) {
       b.setAttribute("aria-pressed", b.dataset.style === state.listStyle ? "true" : "false");

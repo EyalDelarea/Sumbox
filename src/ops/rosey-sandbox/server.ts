@@ -114,7 +114,12 @@ export function createSandboxServer(deps: SandboxServerDeps): http.Server {
           const file = path.join(deps.fontsDir, font[1]!);
           if (!fs.existsSync(file)) return send(res, 404, { error: "not found" });
           res.writeHead(200, { "content-type": "font/woff2", "cache-control": "max-age=86400" });
-          return fs.createReadStream(file).pipe(res);
+          // An unreadable font must end this response, not crash the process
+          // (which would skip dropping the scratch database).
+          return fs
+            .createReadStream(file)
+            .on("error", () => res.destroy())
+            .pipe(res);
         }
         return send(res, 404, { error: "not found" });
       }

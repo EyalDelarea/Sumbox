@@ -64,7 +64,7 @@ async function sandbox(env: NodeJS.ProcessEnv = {}) {
   await s.start();
   const st = await s.state();
   const member = st.members.findIndex((m) => !m.owner);
-  return { s, member, owner: st.members.findIndex((m) => m.owner) };
+  return { s, member, owner: st.members.findIndex((m) => m.owner), groupId };
 }
 
 describe("RoseySandbox", () => {
@@ -147,6 +147,68 @@ describe("RoseySandbox", () => {
     await s.vote({ pollId: polls[0]!.id, member: owner, option: 0 });
     expect((await s.state()).tasks[0]).toMatchObject({ status: "dropped", statusSource: "manual" });
     s.stop();
+  });
+
+  it("a vote her vote path did not take does not stay ticked", async () => {
+    const { s, member, owner, groupId } = await sandbox();
+    await s.post({ member, text: "@Rosey לתקן ברז" });
+    await until(
+      () => s.state(),
+      (v) => v.tasks.length === 1,
+    );
+    await s.post({ member, text: "@רוזי רשימה" });
+    const { polls } = await until(
+      () => s.state(),
+      (v) => v.polls.length === 1,
+    );
+    // The group is switched off underneath her: the engine answers not_enabled.
+    await setRoseyEnabled(pool, groupId, false);
+    await expect(s.vote({ pollId: polls[0]!.id, member: owner, option: 0 })).rejects.toThrow(
+      /not applied/,
+    );
+    const st = await s.state();
+    expect(st.polls[0]!.votes).toEqual({});
+    expect(st.tasks[0]!.status).toBe("open");
+    s.stop();
+  });
+
+  it("reset is refused while a pass runs, and a failed reset is visible", async () => {
+    const groupId = await seed();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const slow = async (sys: string, u: string) => {
+      await gate; // the pass is "running" until the test lets the model answer
+      return generate(sys, u);
+    };
+    const s = new RoseySandbox({ scratch: pool, groupId, generate: slow, ownEchoGraceMs: 0 });
+    await s.start();
+    const member = (await s.state()).members.findIndex((m) => !m.owner);
+    await s.post({ member, text: "צריך להזמין אינסטלטור" });
+    await until(
+      () => s.state(),
+      (v) => v.events.some((e) => /chatter/.test(e.line)),
+    );
+    s.suggestNow();
+    await expect(s.reset(async () => {})).rejects.toThrow(/suggestion pass is running/);
+    release();
+    await until(
+      () => s.state(),
+      (v) => !v.passRunning,
+    );
+
+    await expect(
+      s.reset(async () => {
+        throw new Error("clone boom");
+      }),
+    ).rejects.toThrow("clone boom");
+    const st = await s.state();
+    expect(st.running).toBe(false);
+    expect(st.events.at(-1)?.line).toMatch(/reset failed: clone boom/);
+    // Stopped: suggesting throws, rather than leaving "running" stuck on.
+    expect(() => s.suggestNow()).toThrow(/not running/);
+    expect((await s.state()).passRunning).toBe(false);
   });
 
   it("runs the suggestion pass on demand", async () => {
