@@ -15,8 +15,9 @@ export const shorthands: ColumnDefinitions | undefined = undefined;
  * Additive: every existing row is a 'task', which is what it was before. The
  * kind is written when an item is created (the model's label, or the
  * explicit command's) and afterwards only by hand (`rosey set --kind`): no
- * automated path rewrites the kind of an existing row, so a manual change
- * always stands.
+ * rerun and no chat command rewrites the kind of an existing row, so a manual
+ * change stands. (One exception, accepted: when a chat merge finds the same
+ * item on both sides, it keeps the survivor's row as it is, kind included.)
  */
 export async function up(pgm: MigrationBuilder): Promise<void> {
   pgm.sql(`

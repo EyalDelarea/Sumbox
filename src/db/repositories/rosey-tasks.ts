@@ -107,8 +107,10 @@ export type InsertTaskInput = {
  * (rosey_tasks_source_title_unique): re-reading a message cannot fork a second
  * copy of an item it already yielded — whatever its status or kind — and
  * returns null for it, leaving the stored row as it is: a rerun that labels the
- * item's kind differently never rewrites it (a kind set by hand stands). The identity is NOT the item's position: the model labels the items
- * of a message differently from run to run, so the same position can name a
+ * item's kind differently never rewrites it (a kind set by hand stands).
+ *
+ * The identity is NOT the item's position: the model labels the items of a
+ * message differently from run to run, so the same position can name a
  * different item on a rerun, and keying on it silently dropped the new one.
  */
 export async function insertTask(db: Db, input: InsertTaskInput): Promise<number | null> {
