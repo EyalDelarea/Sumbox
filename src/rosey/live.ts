@@ -104,28 +104,36 @@ export function makeRoseyLive(deps: {
     replay: boolean;
   };
   const handling = new Map<string, Handling>();
+  /** Releases to the catch-up, counted per group (null: group never resolved). */
+  const replays = new Map<number | null, number>();
+  const replaysFor = (groupId: number) => (replays.get(groupId) ?? 0) + (replays.get(null) ?? 0);
   const release = (id: string, h: Handling, replay: boolean) => {
     h.state = "released";
     h.replay = replay;
     if (handling.get(id) === h) handling.delete(id);
+    if (replay) replays.set(h.groupId, (replays.get(h.groupId) ?? 0) + 1);
   };
   const graceMs = deps.ownEchoGraceMs ?? OWN_ECHO_GRACE_MS;
 
   const suggestNow = (groupId: number) =>
     queue
       .run(groupId, async () => {
-        // Snapshot at pass start; null groupId = not yet resolved, maybe this one.
-        const ours = [...handling].filter(([, h]) => h.groupId === groupId || h.groupId === null);
-        const decided = ours.filter(([, h]) => h.state === "decided");
-        const pending = ours.filter(([, h]) => h.state === "pending").map(([, h]) => h);
+        const ours = (h: Handling) => h.groupId === groupId || h.groupId === null; // null: unresolved
+        const decided = [...handling].filter(([, h]) => ours(h) && h.state === "decided");
+        const replaysAtStart = replaysFor(groupId);
         const result = await runAggregation(pool, groupId, {
           cfg,
           generate,
           days: LIVE_SUGGEST_DAYS,
           skipCommand: (m) => m.externalId !== null && handling.has(m.externalId),
-          // A message pending when the pass read may still turn out to need the
-          // catch-up (its apply threw); keep it past the cursor until it is known.
-          holdCursor: () => pending.some((h) => h.state === "pending" || h.replay),
+          // Judged when the pass ENDS: a message the pass skipped as pending may
+          // still turn out to need the catch-up (its apply threw), and the new
+          // cursor must not pass it. So hold while any of this group's messages
+          // is pending, or was released to the catch-up during the pass. The
+          // cost: such a pass re-reads its window next time.
+          holdCursor: () =>
+            [...handling.values()].some((h) => ours(h) && h.state === "pending") ||
+            replaysFor(groupId) !== replaysAtStart,
           onBatchError: (err, b) =>
             log?.warn(
               { err, groupId, batch: b.index, size: b.size },

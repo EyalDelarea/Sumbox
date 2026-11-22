@@ -327,6 +327,96 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
+  describe("a command that lands while a pass is running, already ingested, then fails", () => {
+    /**
+     * The pass is paused after it read the messages (and took its cursor), the
+     * command arrives, and the pass skips it as still being handled. Then its
+     * handling fails: after the pass, for an apply queued behind it; or while
+     * the pass is still suggesting, for a slow quote lookup. Either way the
+     * cursor must not move past it, or the catch-up never sees it.
+     */
+    async function run(failure: "apply" | "quote") {
+      const boomQuote = `WA-${randomUUID()}`;
+      let pause: Promise<void> | null = null;
+      let paused = false;
+      let resume!: () => void;
+      let failInsert = failure === "apply";
+      let cmdRow = -1;
+      const wrapQuery =
+        (query: (...a: unknown[]) => unknown) =>
+        async (...args: unknown[]) => {
+          const sql = String(args[0]);
+          const params = args[1] as unknown[] | undefined;
+          if (pause && sql.includes("FROM rosey_task_events")) {
+            const p = pause;
+            pause = null;
+            paused = true;
+            await p;
+          }
+          if (Array.isArray(params) && params.includes(boomQuote)) {
+            await new Promise((r) => setTimeout(r, 100)); // outlives the command loop
+            throw new Error("db blip");
+          }
+          // The command's own task insert (its row lock), not the pass's suggestions.
+          if (failInsert && sql.includes("FOR NO KEY UPDATE") && params?.[0] === cmdRow) {
+            failInsert = false;
+            throw new Error("db blip");
+          }
+          return query(...args);
+        };
+      const flakyPool = new Proxy(pool, {
+        get(target, prop) {
+          if (prop === "query") return wrapQuery(target.query.bind(target) as never);
+          if (prop === "connect") {
+            return async () => {
+              const client = await target.connect();
+              (client as { query: unknown }).query = wrapQuery(client.query.bind(client) as never);
+              return client;
+            };
+          }
+          const v = Reflect.get(target, prop);
+          return typeof v === "function" ? v.bind(target) : v;
+        },
+      });
+      // The pass's suggestion step waits until the command's handling settled.
+      let settled: Promise<unknown> = Promise.resolve();
+      const slowGenerate = async (system: string, user: string) => {
+        if (system !== DEDUP_SYSTEM) await settled;
+        return generate(system, user);
+      };
+      const live = makeRoseyLive({ pool: flakyPool, cfg, generate: slowGenerate });
+      const g = await group(true);
+      const cmdId = `WA-${randomUUID()}`;
+      const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+      cmdRow = await ingest(g.id, cmdId, "@Rosey לתקן מזגן", sentAt); // before the pass reads
+
+      pause = new Promise((r) => (resume = r));
+      await deliver(live, g, "צריך לקנות מסנן"); // its pass reads, then pauses
+      await vi.waitFor(() => expect(paused).toBe(true));
+      const handled = live
+        .onMessage(
+          wa(g.jid, cmdId, "@Rosey לתקן מזגן", sentAt, failure === "quote" ? boomQuote : undefined),
+        )
+        .catch((e: unknown) => e);
+      if (failure === "quote") settled = handled;
+      await new Promise((r) => setTimeout(r, 20));
+      resume();
+      expect(await handled).toBeInstanceOf(Error);
+
+      await deliver(live, g, "צריך לקנות נורה"); // the next pass
+      await vi.waitFor(async () => {
+        const tags = (await listTasks(pool, g.id, { includeClosed: true })).filter(
+          (t) => t.origin === "tag",
+        );
+        expect(tags.map((t) => t.title)).toEqual(["לתקן מזגן"]);
+      });
+      live.stop();
+    }
+
+    it("its apply, queued behind the pass, throws: the next pass replays it", () => run("apply"));
+    it("its quote lookup throws during the pass: the next pass replays it", () => run("quote"));
+  });
+
   it("applies commands in arrival order even when the first one's lookups are slower", async () => {
     const add = `WA-${randomUUID()}`;
     const done = `WA-${randomUUID()}`;

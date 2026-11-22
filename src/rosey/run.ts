@@ -109,7 +109,8 @@ export type RunAggregationResult = {
    *  - only messages past the cursor are candidates, even from scratch: each
    *    command gets one attempt per successful pass (a failed pass holds the
    *    cursor back, so it is retried), and an old no-op "done" is never tried
-   *    again against tasks that exist only now;
+   *    again against tasks that exist only now. A group's FIRST run has no
+   *    cursor, so every command in its window is a candidate;
    *  - a message that wakes @Aida is hers, never a command (see capture.ts).
    */
   tagged: TagCatchUp;
