@@ -128,6 +128,25 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
+  it("suggestNow runs the pass at once, without waiting for the quiet period", async () => {
+    const slow = { ...cfg, suggestDebounceMs: 60 * 60_000 };
+    const seen: [string, string][] = [];
+    const live = makeRoseyLive({
+      pool,
+      cfg: slow,
+      generate,
+      onCapture: (id, r) => seen.push([id, r.kind]),
+    });
+    const g = await group(true);
+    const m = await deliver(live, g, "צריך להזמין אינסטלטור");
+    expect(seen).toEqual([[m.externalId, "scheduled"]]);
+    expect(await listTasks(pool, g.id)).toEqual([]); // an hour's debounce: nothing yet
+    await live.suggestNow(g.id);
+    const tasks = await listTasks(pool, g.id);
+    expect(tasks.map((t) => [t.title, t.status])).toEqual([["צריך להזמין אינסטלטור", "suggested"]]);
+    live.stop();
+  });
+
   it("never acts on a message recorded in her own sent ledger", async () => {
     const live = makeRoseyLive({ pool, cfg, generate });
     const g = await group(true);
