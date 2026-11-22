@@ -35,6 +35,14 @@ async function message(groupId: number, text: string): Promise<number> {
   return Number(rows[0]!.id);
 }
 
+/**
+ * The cursor is a JS Date (millisecond resolution) and created_at has
+ * microseconds, so a message stored in the same millisecond a run starts is
+ * read again next run. That direction is safe (re-reads are idempotent); a
+ * test that counts reads lets the clock move on first.
+ */
+const tick = () => new Promise((r) => setTimeout(r, 5));
+
 /** A scripted local model: every message becomes one task titled after its text. */
 function model(opts: { fail?: boolean } = {}) {
   const seen: string[] = [];
@@ -55,6 +63,7 @@ describe("runAggregation", () => {
     const g = await group();
     await message(g, "להחליף נורה");
     await message(g, "@Rosey לקנות לחם");
+    await tick();
 
     const m1 = model();
     const first = await runAggregation(pool, g, { cfg, generate: m1.generate, days: 30 });
@@ -69,6 +78,25 @@ describe("runAggregation", () => {
 
     const titles = (await listTasks(pool, g)).map((t) => t.title).sort();
     expect(titles).toEqual(["להתקשר לאינסטלטור", "להחליף נורה"].sort());
+  });
+
+  it("keeps the cursor on the database clock, so a host clock running ahead skips nothing", async () => {
+    const g = await group();
+    await message(g, "להחליף נורה");
+    await tick();
+    // The host clock is a minute ahead of the database that stamps created_at.
+    const ahead = () => new Date(Date.now() + 60_000);
+    await runAggregation(pool, g, { cfg, generate: model().generate, days: 30, now: ahead });
+    await message(g, "להתקשר לאינסטלטור");
+    const m2 = model();
+    const second = await runAggregation(pool, g, {
+      cfg,
+      generate: m2.generate,
+      days: 30,
+      now: ahead,
+    });
+    expect(second.report.messagesRead).toBe(1);
+    expect(m2.seen.join("\n")).toContain("להתקשר לאינסטלטור");
   });
 
   it("does not advance the cursor when a batch fails, so the messages are read again", async () => {

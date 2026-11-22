@@ -71,11 +71,14 @@ export async function runAggregation(
 ): Promise<RunAggregationResult> {
   const now = opts.now ?? (() => new Date());
   // Taken BEFORE reading, so a message ingested during the run is newer than
-  // the cursor it leaves behind and is read next time.
-  const startedAt = now();
+  // the cursor it leaves behind and is read next time. Read from the DATABASE
+  // clock: the cursor is compared with messages.created_at, which the database
+  // stamps, and a host clock running ahead of it would skip every message
+  // ingested in the gap.
+  const startedAt = await databaseNow(pool);
   const changedSince = opts.fromScratch ? null : await getLastRun(pool, cursorKey(groupId));
   const messages = await selectSourceMessages(pool, groupId, {
-    sentSince: new Date(startedAt.getTime() - opts.days * 86_400_000),
+    sentSince: new Date(now().getTime() - opts.days * 86_400_000),
     changedSince,
   });
 
@@ -93,4 +96,9 @@ export async function runAggregation(
   const cursorAdvanced = report.batchFailures === 0;
   if (cursorAdvanced) await recordRun(pool, cursorKey(groupId), startedAt);
   return { report, cursorAdvanced };
+}
+
+async function databaseNow(pool: pg.Pool): Promise<Date> {
+  const { rows } = await pool.query<{ t: Date }>("SELECT clock_timestamp() AS t");
+  return rows[0]!.t;
 }
