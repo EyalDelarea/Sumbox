@@ -11,6 +11,7 @@ export function titleKey(title: string): string {
   return title
     .normalize("NFKC")
     .toLowerCase()
+    .replace(/\u05be/g, " ") // maqaf: a Hebrew hyphen, so a word break like "-"
     .replace(/[֑-ׇ]/g, "") // Hebrew cantillation + niqqud
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")

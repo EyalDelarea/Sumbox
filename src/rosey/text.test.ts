@@ -7,6 +7,11 @@ describe("titleKey", () => {
     expect(titleKey("Call the PLUMBER.")).toBe(titleKey("call the plumber"));
   });
 
+  it("reads a maqaf as a space, like a hyphen", () => {
+    expect(titleKey("בית־ספר")).toBe("בית ספר");
+    expect(titleKey("בית־ספר")).toBe(titleKey("בית-ספר"));
+  });
+
   it("keeps different items different", () => {
     expect(titleKey("לקנות חלב")).not.toBe(titleKey("לקנות ביצים"));
   });
