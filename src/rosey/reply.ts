@@ -36,6 +36,24 @@ export function parseSendMode(raw: string | undefined): RoseySendMode {
   return raw === "dry-run" || raw === "live" ? raw : "off";
 }
 
+/**
+ * The shared outbound guard's allowlist with Rosey in it: summary ∪ rosey, and
+ * only in live mode — off and dry-run never send, so they never widen the
+ * guard. Both are re-read on every send, and a failed read throws, which the
+ * guard turns into a blocked send.
+ */
+export function guardAllowlist(
+  base: () => Promise<ReadonlySet<string>>,
+  rosey: () => Promise<ReadonlySet<string>>,
+  mode: RoseySendMode,
+): () => Promise<ReadonlySet<string>> {
+  if (mode !== "live") return base;
+  return async () => {
+    const [a, b] = await Promise.all([base(), rosey()]);
+    return new Set([...a, ...b]);
+  };
+}
+
 const HOUR = 3_600_000;
 
 /** Per group, list replies: at most 6 an hour and 20 a day (docs/PLAN-task-bot §4). */

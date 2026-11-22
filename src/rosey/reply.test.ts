@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
 import type { RoseyTask } from "../db/repositories/rosey-tasks.js";
 import {
+  guardAllowlist,
   LIST_REPLY_LIMITS,
   type ListReplyDeps,
   type ListSnapshot,
@@ -255,5 +256,31 @@ describe("renderListReply", () => {
     const text = renderListReply({ live: many, doneRecently: [] });
     expect(text.split("\n").filter((l) => l.startsWith("⬜"))).toHaveLength(MAX_ITEMS_PER_GROUP);
     expect(text).toContain("…ועוד 5");
+  });
+});
+
+describe("guardAllowlist — the shared outbound guard's union", () => {
+  const base = async () => new Set(["summary@g.us"]);
+  it("adds Rosey's groups only in live mode", async () => {
+    let read = 0;
+    const rosey = async () => {
+      read++;
+      return new Set(["rosey@g.us"]);
+    };
+    for (const mode of ["off", "dry-run"] as const) {
+      expect([...(await guardAllowlist(base, rosey, mode)())]).toEqual(["summary@g.us"]);
+    }
+    expect(read).toBe(0);
+    expect([...(await guardAllowlist(base, rosey, "live")())].sort()).toEqual([
+      "rosey@g.us",
+      "summary@g.us",
+    ]);
+  });
+
+  it("a failed read of Rosey's list throws, which blocks the send (the guard fails closed)", async () => {
+    const broken = async (): Promise<ReadonlySet<string>> => {
+      throw new Error("db down");
+    };
+    await expect(guardAllowlist(base, broken, "live")()).rejects.toThrow("db down");
   });
 });
