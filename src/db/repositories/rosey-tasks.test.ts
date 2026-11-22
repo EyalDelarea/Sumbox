@@ -173,23 +173,45 @@ describe("recordStatusEvent", () => {
     });
   });
 
-  it("applies an explicit act and records who made it", async () => {
+  it("applies a chat act and records who made it", async () => {
     const g = await group();
     const id = (await task(g, await message(g)))!;
     expect(
-      await recordStatusEvent(pool, { taskId: id, status: "open", source: "manual" }),
+      await recordStatusEvent(pool, { taskId: id, status: "open", source: "tag" }),
     ).toMatchObject({
       applied: true,
       current: "open",
     });
     expect(
-      await recordStatusEvent(pool, { taskId: id, status: "done", source: "tag" }),
+      await recordStatusEvent(pool, { taskId: id, status: "done", source: "react" }),
     ).toMatchObject({
       applied: true,
       current: "done",
     });
     const [t] = await listTasks(pool, g, { includeClosed: true });
-    expect(t).toMatchObject({ status: "done", statusSource: "tag" });
+    expect(t).toMatchObject({ status: "done", statusSource: "react" });
+  });
+
+  it("D4: a task closed by hand is never reopened by a later @Rosey tag", async () => {
+    const g = await group();
+    const id = (await task(g, await message(g), { origin: "tag" }))!;
+    expect(
+      await recordStatusEvent(pool, { taskId: id, status: "done", source: "manual" }),
+    ).toMatchObject({ applied: true, current: "done" });
+    expect(await recordStatusEvent(pool, { taskId: id, status: "open", source: "tag" })).toEqual({
+      found: true,
+      applied: false,
+      previous: "done",
+      current: "done",
+    });
+    // The refused act is still on the record.
+    expect((await events(id)).at(-1)).toEqual({ status: "open", source: "tag", applied: false });
+    // Only another manual change moves it.
+    expect(
+      await recordStatusEvent(pool, { taskId: id, status: "open", source: "manual" }),
+    ).toMatchObject({ applied: true, current: "open" });
+    const [t] = await listTasks(pool, g, { includeClosed: true });
+    expect(t).toMatchObject({ status: "open", statusSource: "manual" });
   });
 
   it("refuses a task from another group, and an unknown task", async () => {

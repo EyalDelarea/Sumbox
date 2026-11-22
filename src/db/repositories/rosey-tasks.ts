@@ -162,15 +162,22 @@ export async function recordStatusEvent(
   input: StatusEventInput,
 ): Promise<StatusEventResult> {
   return inTransaction(db, async (c) => {
-    const { rows } = await c.query<{ status: TaskStatus; group_id: string }>(
-      `SELECT status, group_id FROM rosey_tasks WHERE id = $1 FOR UPDATE`,
-      [input.taskId],
-    );
+    const { rows } = await c.query<{
+      status: TaskStatus;
+      status_source: EventSource;
+      group_id: string;
+    }>(`SELECT status, status_source, group_id FROM rosey_tasks WHERE id = $1 FOR UPDATE`, [
+      input.taskId,
+    ]);
     const row = rows[0];
     if (!row || (input.groupId !== undefined && Number(row.group_id) !== input.groupId)) {
       return { found: false };
     }
-    const applied = shouldApply(row.status, input.status, input.source);
+    const applied = shouldApply(
+      { status: row.status, source: row.status_source },
+      input.status,
+      input.source,
+    );
     await c.query(
       `INSERT INTO rosey_task_events (task_id, status, source, applied, source_message_id)
        VALUES ($1, $2, $3, $4, $5)`,
