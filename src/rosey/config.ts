@@ -6,6 +6,7 @@
  * rest of Sumbox because those describe the machine, not a bot.
  */
 
+import { parseSendMode, type RoseySendMode } from "./reply.js";
 import { parseTagAliases } from "./tags.js";
 
 export type RoseyConfig = {
@@ -26,6 +27,11 @@ export type RoseyConfig = {
    * messages is read together.
    */
   suggestDebounceMs: number;
+  /**
+   * ROSEY_SEND_MODE: off (default, and the kill switch) | dry-run | live. Her
+   * only send is a list reply (reply.ts); anything but dry-run or live is off.
+   */
+  sendMode: RoseySendMode;
 };
 
 /** The default tag aliases: Latin and Hebrew. */
@@ -41,5 +47,6 @@ export function loadRoseyConfig(env: NodeJS.ProcessEnv = process.env): RoseyConf
     model: env.ROSEY_MODEL ?? env.SUMMARY_MODEL ?? "gemma4:26b",
     numCtx: Number(env.SUMMARY_NUM_CTX ?? 32768),
     suggestDebounceMs: Number.isFinite(debounce) && debounce >= 0 ? debounce : 5 * 60_000,
+    sendMode: parseSendMode(env.ROSEY_SEND_MODE),
   };
 }

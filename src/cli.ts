@@ -199,8 +199,10 @@ program
     // The outbound guard reads the SAME live DB resolver the matcher uses, per
     // send — never a startup snapshot — so a group toggled on or off in the UI
     // takes effect on the very next message, with no restart.
+    // Rosey's groups join it only when ROSEY_SEND_MODE=live (her list reply).
+    const { outboundAllowlistFromEnv, roseyLiveFromEnv } = await import("./rosey/live.js");
     const session = await startSession(authDir, config.whatsapp.allowSend, {
-      allowlist: cmdDeps.resolveEnabledJids,
+      allowlist: outboundAllowlistFromEnv(pool, cmdDeps.resolveEnabledJids),
     });
 
     session.on("qr", () => {
@@ -222,8 +224,11 @@ program
       summaryCommand: cmdDeps,
       // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
       askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, turns: new GroupTurnQueue() },
-      // Rosey: receive-only task capture, off unless ROSEY_ENABLED=true.
-      rosey: (await import("./rosey/live.js")).roseyLiveFromEnv(pool, collectorLog),
+      // Rosey: task capture, off unless ROSEY_ENABLED=true. Her one send (a list
+      // reply) stays off unless ROSEY_SEND_MODE=live; see src/rosey/reply.ts.
+      rosey: roseyLiveFromEnv(pool, collectorLog, process.env, {
+        sendText: (jid, text, opts) => session.sendText(jid, text, opts),
+      }),
       telemetry: config.langfuse.enabled
         ? {
             baseUrl: config.langfuse.baseUrl,

@@ -17,6 +17,10 @@
  *
  * Everything per group runs through one never-dropping serial queue, so a
  * command and a suggestion pass on the same group never interleave.
+ *
+ * A list request ("@Rosey מה המשימות?") goes to her send gate (reply.ts) on a
+ * queue of its own, so a reply never waits minutes behind a suggestion pass,
+ * and two replies to one group never race the rate-limit count.
  */
 
 import type { WAMessage } from "@whiskeysockets/baileys";
@@ -27,10 +31,19 @@ import {
   ROSEY_COMMAND_KEY,
 } from "../db/repositories/group-command-permissions.js";
 import { getMessageIdByExternalId } from "../db/repositories/messages.js";
-import { groupIdForJid, isRoseyPost, jidForGroupId } from "../db/repositories/rosey-tasks.js";
+import {
+  countRoseyMessagesSince,
+  groupIdForJid,
+  isRoseyPost,
+  jidForGroupId,
+  listTasks,
+  recordRoseyMessage,
+  tasksDoneSince,
+} from "../db/repositories/rosey-tasks.js";
 import { captureMessage, quotedStanzaId } from "./capture.js";
 import { applyCommand } from "./commands.js";
 import { loadRoseyConfig, type RoseyConfig } from "./config.js";
+import { DONE_WINDOW_MS, guardAllowlist, type RoseySender, replyWithList } from "./reply.js";
 import { commandStore, type Generate, makeGenerate, runAggregation } from "./run.js";
 import { GroupSerialQueue } from "./serial-queue.js";
 import { makeTagMatcher } from "./tags.js";
@@ -77,6 +90,8 @@ export function makeRoseyLive(deps: {
   ownEchoGraceMs?: number;
   /** Injectable for tests; defaults to REGISTRATION_SLACK_MS. */
   registrationSlackMs?: number;
+  /** The collector's session, for her one reply. Absent: the gate sends nothing. */
+  sender?: RoseySender;
 }): RoseyLive {
   const { pool, cfg, log } = deps;
   const clock = deps.now ?? Date.now;
@@ -87,6 +102,9 @@ export function makeRoseyLive(deps: {
   // awaited before it reaches `queue`, and those can finish out of order; without
   // this, "add X" then "done X" could apply as done-then-add.
   const arrivals = new GroupSerialQueue<string>();
+  /** List replies, per group: the rate-limit count and the record never interleave. */
+  const replies = new GroupSerialQueue();
+  const roseyJids = async () => new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY));
   const timers = new Map<number, NodeJS.Timeout>();
   /** When each group's pending pass was first deferred (the debounce cap). */
   const firstDeferred = new Map<number, number>();
@@ -255,8 +273,7 @@ export function makeRoseyLive(deps: {
         captureMessage(msg, {
           now: () => arrivedAt,
           matcher,
-          resolveEnabledJids: async () =>
-            new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY)),
+          resolveEnabledJids: roseyJids,
           groupIdForJid: async (jid) => {
             h.groupId = await groupIdForJid(pool, jid);
             return h.groupId;
@@ -277,6 +294,30 @@ export function makeRoseyLive(deps: {
             return out;
           },
           scheduleSuggestions,
+          replyList: (req) =>
+            replies.run(req.groupId, () =>
+              replyWithList(
+                {
+                  mode: cfg.sendMode,
+                  resolveEnabledJids: roseyJids,
+                  countRepliesSince: (g, since) => countRoseyMessagesSince(pool, g, "reply", since),
+                  loadList: async (g, now) => ({
+                    live: await listTasks(pool, g),
+                    doneRecently: await tasksDoneSince(
+                      pool,
+                      g,
+                      new Date(now.getTime() - DONE_WINDOW_MS),
+                    ),
+                  }),
+                  record: (g, externalId) =>
+                    recordRoseyMessage(pool, { groupId: g, externalId, kind: "reply" }),
+                  sender: deps.sender,
+                  now: Date.now,
+                  log,
+                },
+                { jid: req.jid, groupId: req.groupId, quoted: req.request },
+              ),
+            ),
           log,
         }).then(
           (r) => {
@@ -313,9 +354,34 @@ export function roseyLiveFromEnv(
   pool: pg.Pool,
   log?: Log,
   env: NodeJS.ProcessEnv = process.env,
+  sender?: RoseySender,
 ): RoseyLive | undefined {
   const cfg = loadRoseyConfig(env);
   if (!cfg.enabled) return undefined;
-  log?.info({ tags: cfg.tags, debounceMs: cfg.suggestDebounceMs }, "rosey: live capture on");
-  return makeRoseyLive({ pool, cfg, log });
+  log?.info(
+    { tags: cfg.tags, debounceMs: cfg.suggestDebounceMs, sendMode: cfg.sendMode },
+    cfg.sendMode === "live"
+      ? "rosey: live capture on; list replies LIVE to groups on her list"
+      : "rosey: live capture on",
+  );
+  return makeRoseyLive({ pool, cfg, log, sender });
+}
+
+/**
+ * The outbound guard's allowlist for a collector: `base` (the /סיכום and @Aida
+ * groups), plus Rosey's groups when she is enabled and ROSEY_SEND_MODE=live.
+ * Otherwise exactly `base`, so the default guard is unchanged.
+ */
+export function outboundAllowlistFromEnv(
+  pool: pg.Pool,
+  base: () => Promise<ReadonlySet<string>>,
+  env: NodeJS.ProcessEnv = process.env,
+): () => Promise<ReadonlySet<string>> {
+  const cfg = loadRoseyConfig(env);
+  if (!cfg.enabled) return base;
+  return guardAllowlist(
+    base,
+    async () => new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY)),
+    cfg.sendMode,
+  );
 }
