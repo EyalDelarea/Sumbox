@@ -132,3 +132,45 @@ describe("command parsing", () => {
     expect(parsed?.kind === "add" && parsed.items[0]?.length).toBe(200);
   });
 });
+
+describe("list request", () => {
+  it("recognizes the fixed phrasings, Hebrew and English, with the tag anywhere", () => {
+    for (const text of [
+      "@Rosey what's the task list?",
+      "@Rosey what’s the list",
+      "@rosey list",
+      "@Rosey tasks?",
+      "@רוזי מה המשימות?",
+      "@רוזי רשימה",
+      "@רוזי מה יש?",
+      "@רוזי מה יש ברשימה",
+      "@רוזי מה פתוח?!",
+      "מה המשימות @רוזי",
+      "@רוזי ‏מה המשימות‏?",
+    ]) {
+      expect(rosey.isListRequest(text), text).toBe(true);
+    }
+  });
+
+  it("is a fixed pattern: anything else is not a list request", () => {
+    for (const text of [
+      "מה המשימות?", // untagged
+      "@Rosey list the groceries for Friday",
+      "@Rosey לקנות רשימה של מתנות",
+      "@רוזי מה יש לאכול",
+      "@רוזי רשימה של קניות לשבת",
+      "@Rosey done list",
+      "@Rosey",
+      "",
+    ]) {
+      expect(rosey.isListRequest(text), text).toBe(false);
+    }
+  });
+
+  it("a list request is never parsed as an item to add, so no replay can store it", () => {
+    expect(rosey.parse("@רוזי מה המשימות?")).toBeNull();
+    expect(rosey.parse("@Rosey what's the task list?")).toBeNull();
+    // A near miss is still an ordinary add.
+    expect(rosey.parse("@רוזי מה יש לאכול")).toMatchObject({ kind: "add" });
+  });
+});

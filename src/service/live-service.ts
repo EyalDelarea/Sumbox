@@ -118,10 +118,12 @@ export type AttachCollectorDeps = {
    */
   telemetry?: { baseUrl: string; publicKey: string; secretKey: string };
   /**
-   * Optional Rosey live task capture (ROSEY_ENABLED). RECEIVE ONLY: it is handed
-   * each message after that message's ingest has settled (a task cites the stored
-   * row) and it has no send function. Its own allowlist key ('rosey') and its own
-   * per-group queue; see src/rosey/live.ts. stop() cancels its pending timers.
+   * Optional Rosey live task capture (ROSEY_ENABLED). It is handed each message
+   * after that message's ingest has settled (a task cites the stored row). Her
+   * one send, a list reply, is bound at construction and gated by her own
+   * ROSEY_SEND_MODE (off by default); see src/rosey/reply.ts. Its own allowlist
+   * key ('rosey') and its own per-group queue; see src/rosey/live.ts. stop()
+   * cancels its pending timers.
    */
   rosey?: { onMessage: (msg: WAMessage) => Promise<void>; stop: () => void };
 };

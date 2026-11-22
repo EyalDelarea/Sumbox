@@ -1,19 +1,22 @@
 /**
  * Rosey's live path against a real database: the exact wiring the collector
  * uses (makeRoseyLive), driven with WhatsApp-shaped messages. The model is a
- * scripted fake; nothing here can send — makeRoseyLive is never given a session.
+ * scripted fake. Nothing here can reach WhatsApp: the list-reply tests hand her
+ * a probe sender that only records what she would have sent.
  */
 
 import { randomUUID } from "node:crypto";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { applyOutboundGuard } from "../collector/outbound-guard.js";
 import { recordAidaMessage } from "../db/repositories/aida-messages.js";
-import { listTasks } from "../db/repositories/rosey-tasks.js";
+import { isRoseyPost, listTasks } from "../db/repositories/rosey-tasks.js";
 import { createTestDatabase } from "../test/db.js";
 import { loadRoseyConfig } from "./config.js";
 import { DEDUP_SYSTEM } from "./dedup.js";
-import { makeRoseyLive, roseyLiveFromEnv } from "./live.js";
+import { makeRoseyLive, roseyLiveFromEnv, roseyScopedAllowlistsFromEnv } from "./live.js";
+import { LIST_REPLY_LIMITS, type RoseySender, type RoseySendMode } from "./reply.js";
 import { setRoseyEnabled } from "./run.js";
 
 let pool: pg.Pool;
@@ -684,5 +687,198 @@ describe("makeRoseyLive", () => {
     await new Promise((r) => setTimeout(r, 120));
     expect(generate).not.toHaveBeenCalled();
     expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+  });
+});
+
+describe("makeRoseyLive — the list reply", () => {
+  /** A probe in place of the WhatsApp session: records, never sends. */
+  function probe() {
+    const sent: Array<{ jid: string; text: string; quotedId: string | null | undefined }> = [];
+    const sender: RoseySender = {
+      sendText: async (jid, text, opts) => {
+        sent.push({ jid, text, quotedId: opts.quoted?.key?.id });
+        // Baileys sends under the id it is given (options.messageId).
+        return { key: { id: opts.messageId } } as WAMessage;
+      },
+    };
+    return { sent, sender };
+  }
+  const withMode = (sendMode: RoseySendMode) => ({ ...cfg, sendMode });
+  const ledger = async (groupId: number) =>
+    (
+      await pool.query(`SELECT external_id, kind FROM rosey_messages WHERE group_id = $1`, [
+        groupId,
+      ])
+    ).rows;
+
+  it("is off by default: a list request sends nothing", async () => {
+    expect(loadRoseyConfig({ ROSEY_ENABLED: "true" }).sendMode).toBe("off");
+    const p = probe();
+    const live = makeRoseyLive({ pool, cfg, generate, sender: p.sender });
+    const g = await group(true);
+    await deliver(live, g, "@רוזי מה המשימות?");
+    expect(p.sent).toEqual([]);
+    expect(await ledger(g.id)).toEqual([]);
+    live.stop();
+  });
+
+  it("dry-run sends nothing and records nothing", async () => {
+    const p = probe();
+    const live = makeRoseyLive({ pool, cfg: withMode("dry-run"), generate, sender: p.sender });
+    const g = await group(true);
+    await deliver(live, g, "@רוזי מה המשימות?");
+    expect(p.sent).toEqual([]);
+    expect(await ledger(g.id)).toEqual([]);
+    live.stop();
+  });
+
+  it("live: replies once into the group, quoting the request, lists what is stored, and records the send", async () => {
+    const p = probe();
+    const live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender: p.sender });
+    const g = await group(true);
+    await deliver(live, g, "@Rosey לתקן ברז");
+    await deliver(live, g, "@Rosey קניות: חלב");
+    const ask = await deliver(live, g, "@Rosey what's the task list?");
+    expect(p.sent).toHaveLength(1);
+    expect(p.sent[0]!.jid).toBe(g.jid);
+    expect(p.sent[0]!.quotedId).toBe(ask.externalId);
+    const text = p.sent[0]!.text;
+    expect(text.startsWith("🤖 רוזי")).toBe(true);
+    expect(text).toContain("⬜ לתקן ברז");
+    expect(text.slice(text.indexOf("🛒"))).toContain("⬜ חלב");
+    expect(await ledger(g.id)).toEqual([{ external_id: expect.any(String), kind: "reply" }]);
+    // The request itself was never stored as an item.
+    expect((await listTasks(pool, g.id)).map((t) => t.title).sort()).toEqual(["חלב", "לתקן ברז"]);
+    live.stop();
+  });
+
+  it("live: WhatsApp delivering the same request twice gets one reply", async () => {
+    const p = probe();
+    const live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender: p.sender });
+    const g = await group(true);
+    const externalId = `WA-${randomUUID()}`;
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await ingest(g.id, externalId, "@רוזי רשימה", sentAt);
+    await live.onMessage(wa(g.jid, externalId, "@רוזי רשימה", sentAt));
+    await live.onMessage(wa(g.jid, externalId, "@רוזי רשימה", sentAt));
+    expect(p.sent).toHaveLength(1);
+    live.stop();
+  });
+
+  it("live: a group not on her list gets nothing", async () => {
+    const p = probe();
+    const live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender: p.sender });
+    const g = await group(false);
+    await deliver(live, g, "@רוזי מה המשימות?");
+    expect(p.sent).toEqual([]);
+    live.stop();
+  });
+
+  it("live: the hourly limit holds across a restart, counted from what she sent", async () => {
+    const p = probe();
+    const g = await group(true);
+    const max = LIST_REPLY_LIMITS[0]!.max;
+    let live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender: p.sender });
+    for (let i = 0; i < max; i++) await deliver(live, g, "@רוזי רשימה");
+    live.stop();
+    // A restart forgets everything in memory; the ledger does not.
+    live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender: p.sender });
+    await deliver(live, g, "@רוזי רשימה");
+    expect(p.sent).toHaveLength(max);
+    expect(await ledger(g.id)).toHaveLength(max);
+    live.stop();
+  });
+
+  it("live: nothing but a list request sends", async () => {
+    const p = probe();
+    const live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender: p.sender });
+    const g = await group(true);
+    for (const text of [
+      "@Rosey לקנות חלב",
+      "@Rosey done חלב",
+      "מה המשימות?",
+      "@Aida @Rosey list",
+    ]) {
+      await deliver(live, g, text);
+    }
+    expect(p.sent).toEqual([]);
+    live.stop();
+  });
+
+  it("the outbound guard gets her scoped list only when she is enabled and live", async () => {
+    const g = await group(true);
+    expect(roseyScopedAllowlistsFromEnv(pool, { ROSEY_ENABLED: "true" })).toEqual({});
+    expect(roseyScopedAllowlistsFromEnv(pool, { ROSEY_SEND_MODE: "live" })).toEqual({});
+    const live = roseyScopedAllowlistsFromEnv(pool, {
+      ROSEY_ENABLED: "true",
+      ROSEY_SEND_MODE: "live",
+    });
+    expect(Object.keys(live)).toEqual(["rosey"]);
+    const rosey = live["rosey"] as () => Promise<ReadonlySet<string>>;
+    expect((await rosey()).has(g.jid)).toBe(true);
+  });
+
+  it("end to end through the outbound guard: her reply reaches her group, a bare send does not", async () => {
+    const env = { ROSEY_ENABLED: "true", ROSEY_SEND_MODE: "live" };
+    const real: string[] = [];
+    const sock = {
+      sendMessage: async (jid: string, _c: unknown, o?: { messageId?: string }) => {
+        real.push(jid);
+        return { key: { id: o?.messageId } };
+      },
+      relayMessage: async () => undefined,
+    };
+    // The shared (@Aida, /סיכום) list is empty: only her scoped list knows the group.
+    applyOutboundGuard(
+      sock as never,
+      false,
+      new Set<string>(),
+      roseyScopedAllowlistsFromEnv(pool, env),
+    );
+    const session: RoseySender = {
+      sendText: (jid, _text, opts) =>
+        sock.sendMessage(jid, {}, { messageId: opts.messageId }) as Promise<WAMessage | undefined>,
+    };
+    const g = await group(true);
+    await expect(session.sendText(g.jid, "x", {})).rejects.toThrow(/blocked/);
+    const live = roseyLiveFromEnv(pool, undefined, env, session)!;
+    await deliver(live, g, "@רוזי רשימה");
+    expect(real).toEqual([g.jid]);
+    live.stop();
+  });
+
+  it("her post is already recorded as hers while the send is in flight", async () => {
+    let g: Awaited<ReturnType<typeof group>> | undefined;
+    const seenAsHers: boolean[] = [];
+    const sender: RoseySender = {
+      sendText: async (_jid, _text, opts) => {
+        // The echo can arrive before sendMessage resolves: check it from inside.
+        seenAsHers.push(await isRoseyPost(pool, g!.id, opts.messageId!));
+        return { key: { id: opts.messageId } } as WAMessage;
+      },
+    };
+    const live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender });
+    g = await group(true);
+    await deliver(live, g, "@רוזי רשימה");
+    expect(seenAsHers).toEqual([true]);
+    live.stop();
+  });
+
+  it("a hung send times out and releases the chat: a later command still applies", async () => {
+    const sender: RoseySender = { sendText: () => new Promise<WAMessage | undefined>(() => {}) };
+    const live = makeRoseyLive({
+      pool,
+      cfg: withMode("live"),
+      generate,
+      sender,
+      sendTimeoutMs: 50,
+    });
+    const g = await group(true);
+    await deliver(live, g, "@רוזי רשימה");
+    await deliver(live, g, "@Rosey לתקן ברז");
+    expect((await listTasks(pool, g.id)).map((t) => t.title)).toEqual(["לתקן ברז"]);
+    // The timed-out reply keeps its record: if it lands late, its echo is hers.
+    expect(await ledger(g.id)).toHaveLength(1);
+    live.stop();
   });
 });

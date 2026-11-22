@@ -317,8 +317,11 @@ export async function startServe(options: { port?: string; collect?: boolean }):
       // takes effect on the very next message, with no restart, and the guard can
       // never disagree with the matcher about who is enabled.
       const authDir = path.join(config.dataDir, "baileys-auth");
+      // Rosey's groups are a separate scoped list, admitted only to her own sends.
+      const { roseyLiveFromEnv, roseyScopedAllowlistsFromEnv } = await import("../rosey/live.js");
       const session = await startSession(authDir, config.whatsapp.allowSend, {
         allowlist: cmdDeps.resolveEnabledJids,
+        scopedAllowlists: roseyScopedAllowlistsFromEnv(pool),
       });
       liveSession = session;
 
@@ -481,8 +484,11 @@ export async function startServe(options: { port?: string; collect?: boolean }):
         summaryCommand: cmdDeps,
         // @Aida shares the /סיכום allowlist (same resolver), with its own lock.
         askCommand: { resolveEnabledJids: cmdDeps.resolveEnabledJids, turns: new GroupTurnQueue() },
-        // Rosey: receive-only task capture, off unless ROSEY_ENABLED=true.
-        rosey: (await import("../rosey/live.js")).roseyLiveFromEnv(pool, log.collector),
+        // Rosey: task capture, off unless ROSEY_ENABLED=true. Her one send (a list
+        // reply) stays off unless ROSEY_SEND_MODE=live; see src/rosey/reply.ts.
+        rosey: roseyLiveFromEnv(pool, log.collector, process.env, {
+          sendText: (jid, text, opts) => session.sendText(jid, text, opts),
+        }),
         telemetry: config.langfuse.enabled
           ? {
               baseUrl: config.langfuse.baseUrl,

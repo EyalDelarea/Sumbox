@@ -5,6 +5,7 @@ import {
   HARD_BLOCKED,
   PASSIVE_MODE_BANNER,
   SILENCED,
+  withSendScope,
 } from "./outbound-guard.js";
 
 /** A minimal fake Baileys socket exposing the methods the guard touches. */
@@ -150,5 +151,82 @@ describe("PASSIVE_MODE_BANNER", () => {
   it("is shown verbatim in the README", () => {
     const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
     expect(readme).toContain(PASSIVE_MODE_BANNER);
+  });
+});
+
+describe("applyOutboundGuard — a scoped allowlist (Rosey's own groups)", () => {
+  const ROSEY_ONLY = "rosey-only@g.us";
+  const SUMMARY = "summary@g.us";
+  function guarded() {
+    const sock = fakeSock();
+    const original = sock["sendMessage"];
+    applyOutboundGuard(sock as never, false, new Set([SUMMARY]), {
+      rosey: async () => new Set([ROSEY_ONLY]),
+    });
+    return { sock, original };
+  }
+
+  it("refuses an unscoped send (@Aida, /סיכום, a reaction) to a Rosey-only group", async () => {
+    const { sock, original } = guarded();
+    await expect(sock["sendMessage"](ROSEY_ONLY, { text: "hi" })).rejects.toThrow(/blocked/);
+    await expect(sock["relayMessage"](ROSEY_ONLY, {})).rejects.toThrow(/blocked/);
+    expect(original).not.toHaveBeenCalled();
+  });
+
+  it("lets a send in Rosey's scope through to her own group, and nowhere else new", async () => {
+    const { sock, original } = guarded();
+    await withSendScope("rosey", () => sock["sendMessage"](ROSEY_ONLY, { text: "list" }));
+    expect(original).toHaveBeenCalledTimes(1);
+    await expect(
+      withSendScope("rosey", () => sock["sendMessage"]("other@g.us", { text: "x" })),
+    ).rejects.toThrow(/blocked/);
+  });
+
+  it("an unknown scope gets nothing extra", async () => {
+    const { sock } = guarded();
+    await expect(
+      withSendScope("someone-else", () => sock["sendMessage"](ROSEY_ONLY, { text: "x" })),
+    ).rejects.toThrow(/blocked/);
+  });
+
+  it("the scope ends with its call: a send after it is unscoped again", async () => {
+    const { sock } = guarded();
+    await withSendScope("rosey", async () => undefined);
+    await expect(sock["sendMessage"](ROSEY_ONLY, { text: "x" })).rejects.toThrow(/blocked/);
+  });
+
+  it("the scope never reaches work the real send starts (Baileys' echo upsert on nextTick)", async () => {
+    const sock = fakeSock();
+    let echo: Promise<unknown> | undefined;
+    // Like Baileys: the real send emits its echo on nextTick, and a listener
+    // (@Aida, /סיכום) reacts with an UNSCOPED send through the guarded socket.
+    const real = vi.fn(async () => {
+      await new Promise<void>((done) =>
+        process.nextTick(() => {
+          echo ??= sock["sendMessage"](ROSEY_ONLY, { text: "x" }) as Promise<unknown>;
+          done();
+        }),
+      );
+      return "REAL_CALLED";
+    });
+    sock["sendMessage"] = real;
+    applyOutboundGuard(sock as never, false, new Set([SUMMARY]), {
+      rosey: async () => new Set([ROSEY_ONLY]),
+    });
+    await withSendScope("rosey", () => sock["sendMessage"](ROSEY_ONLY, { text: "list" }));
+    await expect(echo).rejects.toThrow(/blocked/);
+    expect(real).toHaveBeenCalledTimes(1);
+  });
+
+  it("a scoped list that fails to read blocks the send (fail closed)", async () => {
+    const sock = fakeSock();
+    applyOutboundGuard(sock as never, false, new Set([SUMMARY]), {
+      rosey: async () => {
+        throw new Error("db down");
+      },
+    });
+    await expect(
+      withSendScope("rosey", () => sock["sendMessage"](ROSEY_ONLY, { text: "x" })),
+    ).rejects.toThrow();
   });
 });

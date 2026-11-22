@@ -60,6 +60,22 @@ const MAX_CONSECUTIVE_CONNECT_FAILURES = 10;
  * worker thread, so a line logged right before process.exit can be lost — write
  * it to stderr synchronously too, then give pino a bounded chance to flush.
  */
+/**
+ * sendText's options. `messageId` sends under an id the caller chose, so a bot
+ * can record its post (and recognise the echo) BEFORE the send leaves.
+ */
+export type TextSendOpts = { quoted?: WAMessage; messageId?: string };
+
+/** The Baileys options for a text send, or undefined when there are none. */
+export function textSendOptions(
+  opts: TextSendOpts,
+): { quoted?: WAMessage; messageId?: string } | undefined {
+  const out: { quoted?: WAMessage; messageId?: string } = {};
+  if (opts.quoted) out.quoted = opts.quoted;
+  if (opts.messageId) out.messageId = opts.messageId;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function exitLoudly(message: string, err: unknown): void {
   const why = err instanceof Error ? err.message : String(err);
   process.stderr.write(`[collector] FATAL: ${message}: ${why}\n`);
@@ -138,6 +154,8 @@ export class CollectorSession extends EventEmitter {
    *  guard re-reads it per send and a group enabled at runtime can reply without a
    *  restart; an array is a fixed set. */
   private readonly allowlist: AllowlistSource;
+  /** Per-bot allowlists, admitted only inside that bot's send scope (see outbound-guard). */
+  private readonly scopedAllowlists: Readonly<Record<string, AllowlistSource>>;
   /**
    * Per-JID throttle for group-subject lookups: dedupes concurrent queries and
    * arms a cooldown after an attempt that yields no usable name, so a burst of
@@ -167,6 +185,7 @@ export class CollectorSession extends EventEmitter {
       syncFullHistory?: boolean;
       acceptAllHistory?: boolean;
       allowlist?: string[] | AllowlistSource;
+      scopedAllowlists?: Readonly<Record<string, AllowlistSource>>;
       /** Test seams; production omits this. */
       deps?: Partial<SessionDeps>;
     } = {},
@@ -192,6 +211,7 @@ export class CollectorSession extends EventEmitter {
     this.allowlist = Array.isArray(opts.allowlist)
       ? new Set(opts.allowlist)
       : (opts.allowlist ?? new Set<string>());
+    this.scopedAllowlists = opts.scopedAllowlists ?? {};
   }
 
   /**
@@ -203,11 +223,11 @@ export class CollectorSession extends EventEmitter {
   async sendText(
     jid: string,
     text: string,
-    opts: { quoted?: WAMessage } = {},
+    opts: TextSendOpts = {},
   ): Promise<WAMessage | undefined> {
     const sock = this.socket;
     if (!sock) throw new Error("Cannot send: socket not connected.");
-    return sock.sendMessage(jid, { text }, opts.quoted ? { quoted: opts.quoted } : undefined);
+    return sock.sendMessage(jid, { text }, textSendOptions(opts));
   }
 
   /**
@@ -547,7 +567,7 @@ export class CollectorSession extends EventEmitter {
     // SAFETY: unless sending is explicitly enabled, neutralize all outbound
     // methods so the linked device can never send messages, receipts, or
     // presence. Belt-and-suspenders on top of markOnlineOnConnect.
-    applyOutboundGuard(sock, this.allowSend, this.allowlist);
+    applyOutboundGuard(sock, this.allowSend, this.allowlist, this.scopedAllowlists);
 
     this.socket = sock;
 
@@ -694,6 +714,7 @@ export async function startSession(
     syncFullHistory?: boolean;
     acceptAllHistory?: boolean;
     allowlist?: string[] | AllowlistSource;
+    scopedAllowlists?: Readonly<Record<string, AllowlistSource>>;
   } = {},
 ): Promise<CollectorSession> {
   const session = new CollectorSession(authDir, allowSend, opts);
