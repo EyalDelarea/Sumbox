@@ -1,4 +1,5 @@
 import { RabbitMQContainer, type StartedRabbitMQContainer } from "@testcontainers/rabbitmq";
+import type * as amqplib from "amqplib";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +9,7 @@ import {
 } from "../db/repositories/job-runs.js";
 import { createTestDatabase } from "../test/db.js";
 import { InMemoryJobRunRecorder, PostgresJobRunRecorder } from "./job-run-recorder.js";
+import type { JobType } from "./job-types.js";
 import { RabbitMqJobBus } from "./rabbitmq-bus.js";
 
 /**
@@ -368,6 +370,72 @@ describe("RabbitMqJobBus — integration (testcontainers)", () => {
       await pool.end();
     }
   }, 60_000);
+
+  // ── Recovery: a worker must keep consuming after the broker drops it ──────
+  // Each test owns a job type no other test here uses, so consumer counts are exact.
+
+  it("re-subscribes after the broker closes the connection: a job enqueued afterwards is consumed", async () => {
+    const consumerBus = makeBus(new InMemoryJobRunRecorder());
+    const probeBus = makeBus(new InMemoryJobRunRecorder());
+
+    try {
+      const received: string[] = [];
+      await consumerBus.consume(
+        "analyze.image",
+        async (job) => {
+          received.push(job.payload.messageId);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await consumersOn(probeBus, "analyze.image")) === 1, 5_000);
+
+      // What a RabbitMQ restart does to a running worker: every connection drops.
+      const res = await container.exec([
+        "rabbitmqctl",
+        "close_all_connections",
+        "test: broker restart",
+      ]);
+      expect(res.exitCode).toBe(0);
+
+      // The consumer must come back on its own, with nobody calling consume() again.
+      await waitUntil(async () => (await consumersOn(probeBus, "analyze.image")) === 1, 15_000);
+      await probeBus.enqueue("analyze.image", { messageId: "after-reconnect" });
+      await waitUntil(() => received.includes("after-reconnect"), 10_000);
+    } finally {
+      await probeBus.close();
+      await consumerBus.close();
+    }
+  }, 60_000);
+
+  it("recovers from a channel-only close: the same bus consumes and enqueues again", async () => {
+    const bus = makeBus(new InMemoryJobRunRecorder());
+    const probeBus = makeBus(new InMemoryJobRunRecorder());
+
+    try {
+      const received: string[] = [];
+      await bus.consume(
+        "analyze.video",
+        async (job) => {
+          received.push(job.payload.messageId);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await consumersOn(probeBus, "analyze.video")) === 1, 5_000);
+
+      // A channel-level error closes the channel but leaves the connection up (the
+      // same shape as a broker-side consumer_timeout). A 404 is the easy way to cause one.
+      const channel = (bus as unknown as { channel: amqplib.Channel }).channel;
+      await expect(channel.checkQueue("jobs.no-such-queue")).rejects.toThrow(/NOT_FOUND/);
+
+      await waitUntil(async () => (await consumersOn(probeBus, "analyze.video")) === 1, 15_000);
+      // Enqueue through the bus whose channel died: it must not reuse the dead one.
+      await bus.enqueue("analyze.video", { messageId: "after-channel-close" });
+      await waitUntil(() => received.includes("after-channel-close"), 10_000);
+    } finally {
+      await probeBus.close();
+      await bus.close();
+    }
+  }, 60_000);
 });
 
 // ── Fix 4: connect-race unit test (fake amqplib, no Testcontainers) ──────────
@@ -501,6 +569,19 @@ describe("RabbitMqJobBus — connect race (unit)", () => {
 });
 
 // ── util ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Consumers on a type's queue, or -1 while the probe's own connection is down.
+ * A broker-wide connection drop hits the probe bus too, and that must read as
+ * "not yet", not fail the test for the wrong reason.
+ */
+async function consumersOn(bus: RabbitMqJobBus, type: JobType): Promise<number> {
+  try {
+    return (await bus.queueStats(type)).consumers;
+  } catch {
+    return -1;
+  }
+}
 
 async function waitUntil(
   predicate: () => boolean | Promise<boolean>,
