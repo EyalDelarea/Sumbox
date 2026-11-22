@@ -98,35 +98,23 @@ export type InsertTaskInput = {
  * Insert a task with its creation event. A suggestion starts 'suggested'
  * (source 'model'); a tagged item starts 'open' (source 'tag').
  *
- * Idempotent on (source message, title key): re-reading a message cannot fork a
- * second copy of an item it already yielded — whatever its status — and returns
- * null for it. The identity is NOT the item's position: the model labels the
- * items of a message differently from run to run, so the same position can name
- * a different item on a rerun, and keying on it silently dropped the new one.
- * `sourceItemIndex` is only the preferred slot; when another item holds it, the
- * task takes the next free one. Inserts for one message are serialized on that
- * message's row, so two concurrent readers cannot both pass the identity check.
+ * Idempotent on (source message, title key), which the database enforces
+ * (rosey_tasks_source_title_unique): re-reading a message cannot fork a second
+ * copy of an item it already yielded — whatever its status — and returns null
+ * for it. The identity is NOT the item's position: the model labels the items
+ * of a message differently from run to run, so the same position can name a
+ * different item on a rerun, and keying on it silently dropped the new one.
  */
 export async function insertTask(db: Db, input: InsertTaskInput): Promise<number | null> {
   const [status, source]: [TaskStatus, EventSource] =
     input.origin === "tag" ? ["open", "tag"] : ["suggested", "model"];
   return inTransaction(db, async (c) => {
-    await c.query(`SELECT 1 FROM messages WHERE id = $1 FOR NO KEY UPDATE`, [
-      input.sourceMessageId,
-    ]);
-    const { rows: held } = await c.query<{ title_key: string; source_item_index: number }>(
-      `SELECT title_key, source_item_index FROM rosey_tasks WHERE source_message_id = $1`,
-      [input.sourceMessageId],
-    );
-    if (held.some((h) => h.title_key === input.titleKey)) return null;
-    const taken = new Set(held.map((h) => h.source_item_index));
-    let slot = input.sourceItemIndex;
-    while (taken.has(slot)) slot++;
     const { rows } = await c.query<{ id: string }>(
       `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
                                 raised_by_participant_id, source_message_id, source_item_index,
                                 raised_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT ON CONSTRAINT rosey_tasks_source_title_unique DO NOTHING
        RETURNING id`,
       [
         input.groupId,
@@ -137,10 +125,11 @@ export async function insertTask(db: Db, input: InsertTaskInput): Promise<number
         source,
         input.raisedByParticipantId,
         input.sourceMessageId,
-        slot,
+        input.sourceItemIndex,
         input.raisedAt,
       ],
     );
+    if (rows.length === 0) return null; // this message already yielded this item
     const id = Number(rows[0]!.id);
     await c.query(
       `INSERT INTO rosey_task_events (task_id, status, source, applied, source_message_id)

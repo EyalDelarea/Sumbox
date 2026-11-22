@@ -269,8 +269,9 @@ export async function mergeGroups(
     [survivorId, dupId],
   );
   // Every other task on a colliding dup message moves to the survivor's message.
-  // Its position there may be held by another item, so it takes a fresh slot past
-  // the message's highest one (UNIQUE (source_message_id, source_item_index)).
+  // Its title is not on that message (a same-title task is a twin, above), so the
+  // move keeps (source_message_id, title_key) unique. It is placed after the
+  // message's last item, so the list keeps a distinct order.
   const repointedRoseyTasks = await client.query(
     `${dupToSurvivor},
      moving AS (

@@ -117,17 +117,29 @@ describe("insertTask", () => {
     expect(await task(g, m)).not.toBeNull();
     // The same item again, at another position: already stored.
     expect(await task(g, m, { sourceItemIndex: 3 })).toBeNull();
-    // A different item asking for a taken position: stored, in the next free slot.
-    const other = await task(g, m, { title: "משהו אחר", titleKey: "משהו אחר" });
-    expect(other).not.toBeNull();
-    const slots = (await listTasks(pool, g)).map((t) => [t.titleKey, t.sourceItemIndex]);
-    expect(slots.sort()).toEqual([
-      ["לקנות חלב", 0],
-      ["משהו אחר", 1],
+    // A different item at the same position: its own task (position is not identity).
+    expect(await task(g, m, { title: "משהו אחר", titleKey: "משהו אחר" })).not.toBeNull();
+    expect((await listTasks(pool, g)).map((t) => t.titleKey).sort()).toEqual([
+      "לקנות חלב",
+      "משהו אחר",
     ]);
   });
 
-  it("serializes concurrent inserts of one item on one message", async () => {
+  it("the database itself refuses a second copy of an item on one message", async () => {
+    const g = await group();
+    const m = await message(g);
+    await task(g, m);
+    const raw = (index: number) =>
+      pool.query(
+        `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
+                                  source_message_id, source_item_index, raised_at)
+         VALUES ($1, 'x', 'לקנות חלב', 'suggested', 'suggested', 'model', $2, $3, now())`,
+        [g, m, index],
+      );
+    await expect(raw(7)).rejects.toThrow(/rosey_tasks_source_title_unique/);
+  });
+
+  it("concurrent inserts of one item on one message store it once", async () => {
     const g = await group();
     const m = await message(g);
     const ids = await Promise.all([0, 1, 2, 3].map((i) => task(g, m, { sourceItemIndex: i })));

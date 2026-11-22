@@ -13,7 +13,10 @@ export const shorthands: ColumnDefinitions | undefined = undefined;
  * `todos.source_message_id` is UNIQUE, so one message can hold at most one
  * todo. Measured on the real chat Rosey is built for, messages are mostly
  * shopping/errand LISTS — one message, N tasks. Here the identity of a task is
- * (source_message_id, source_item_index): the Nth item of a message.
+ * (source_message_id, title_key): an item of a message, by its normalized title.
+ * Not its position: the model labels a message's items differently from run to
+ * run, so a position can name a different item on a rerun. `source_item_index`
+ * is only the item's place in the list, for display order.
  *
  * ── Constraints carry the safety properties ─────────────────────────────────
  * - `source_message_id NOT NULL` + ON DELETE CASCADE: every task cites the real
@@ -50,7 +53,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
       raised_at                timestamptz NOT NULL,
       created_at               timestamptz NOT NULL DEFAULT now(),
       updated_at               timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT rosey_tasks_source_item_unique UNIQUE (source_message_id, source_item_index),
+      CONSTRAINT rosey_tasks_source_title_unique UNIQUE (source_message_id, title_key),
       CONSTRAINT rosey_tasks_suggested_origin
         CHECK (status <> 'suggested' OR origin = 'suggested')
     );
