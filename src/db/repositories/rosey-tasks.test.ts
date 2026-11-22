@@ -192,6 +192,19 @@ describe("recordStatusEvent", () => {
     expect(t).toMatchObject({ status: "done", statusSource: "react" });
   });
 
+  it("D4: setting by hand the status a tag already set still locks it as manual", async () => {
+    const g = await group();
+    const id = (await task(g, await message(g), { origin: "tag" }))!; // open, by tag
+    expect(await recordStatusEvent(pool, { taskId: id, status: "open", source: "manual" })).toEqual(
+      { found: true, applied: true, previous: "open", current: "open" },
+    );
+    expect(
+      await recordStatusEvent(pool, { taskId: id, status: "done", source: "tag" }),
+    ).toMatchObject({ applied: false, current: "open" });
+    const [t] = await listTasks(pool, g, { includeClosed: true });
+    expect(t).toMatchObject({ status: "open", statusSource: "manual" });
+  });
+
   it("D4: a task closed by hand is never reopened by a later @Rosey tag", async () => {
     const g = await group();
     const id = (await task(g, await message(g), { origin: "tag" }))!;

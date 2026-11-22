@@ -9,6 +9,10 @@
  *    a task opened by hand must also be closed by hand.
  *  - Layer 2, the chat acts — `tag`, `reply`, `react`, `poll`: people acting on
  *    purpose in the group. Within this layer the latest act wins (time order).
+ *  - A higher layer re-asserting the CURRENT status still applies: it changes
+ *    no status but takes ownership of it. Setting by hand what a tag already
+ *    set must lock it as manual, or the next tag would undo a choice the owner
+ *    made explicitly.
  *  - Never applied — `inferred` and `model`. Measured on the real chat, "done"
  *    evidence is rare (3 of 87 tasks), so inference both misses most completions
  *    and would flip tasks silently: it is recorded as a hint only. `model` only
@@ -54,7 +58,8 @@ export function shouldApply(
   if (LAYER[source] === 0) return false;
   if (next === "suggested") return false;
   if (LAYER[source] < LAYER[current.source]) return false;
-  return current.status !== next;
+  if (current.status === next) return LAYER[source] > LAYER[current.source];
+  return true;
 }
 
 export function isTaskStatus(v: string): v is TaskStatus {

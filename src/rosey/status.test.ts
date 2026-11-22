@@ -41,8 +41,15 @@ describe("shouldApply (D4: manual > reply/react > inferred)", () => {
     expect(shouldApply(at("done", "manual"), "open", "manual")).toBe(true);
   });
 
-  it("a repeat of the current status is not a change", () => {
+  it("a repeat of the current status from the same layer is not a change", () => {
     expect(shouldApply(at("done", "tag"), "done", "tag")).toBe(false);
+    expect(shouldApply(at("done", "react"), "done", "tag")).toBe(false);
     expect(shouldApply(at("done", "manual"), "done", "manual")).toBe(false);
+  });
+
+  it("a higher layer re-asserting the current status takes ownership of it", () => {
+    // Setting by hand what the chat already set is recorded as manual, so it locks.
+    expect(shouldApply(at("open", "tag"), "open", "manual")).toBe(true);
+    expect(shouldApply(at("done", "react"), "done", "manual")).toBe(true);
   });
 });
