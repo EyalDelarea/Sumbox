@@ -232,8 +232,43 @@ export async function mergeGroups(
     survivorId,
     dupId,
   ]);
-  // A twin — both sides hold the same item (same title key: insertTask's
-  // identity) of the same message — keeps the survivor's row. A closed status on
+  // A task on a colliding dup message moves to the survivor's message unless
+  // that message already holds its item (same title key) — then it is a twin,
+  // below. Two dup messages can land on ONE survivor message (one matched by
+  // dedupe key, the other by external id), so at most one row per (survivor
+  // message, title key) moves; the others stay behind as its twins, which keeps
+  // rosey_tasks_source_title_unique. A moved task goes after the message's last
+  // item, so the list keeps a distinct order.
+  const repointedRoseyTasks = await client.query(
+    `${dupToSurvivor},
+     candidates AS (
+       SELECT t.id, m.surv_msg_id, t.source_message_id, t.source_item_index,
+              ROW_NUMBER() OVER (PARTITION BY m.surv_msg_id, t.title_key ORDER BY t.id) AS nth
+       FROM dup_to_surv m
+       JOIN rosey_tasks t ON t.source_message_id = m.dup_msg_id
+       WHERE NOT EXISTS (
+         SELECT 1 FROM rosey_tasks x
+         WHERE x.source_message_id = m.surv_msg_id AND x.title_key = t.title_key
+       )
+     ),
+     moving AS (
+       SELECT c.id, c.surv_msg_id,
+              (SELECT COALESCE(MAX(x.source_item_index), -1) FROM rosey_tasks x
+                WHERE x.source_message_id = c.surv_msg_id)
+              + ROW_NUMBER() OVER (PARTITION BY c.surv_msg_id
+                                   ORDER BY c.source_message_id, c.source_item_index) AS slot
+       FROM candidates c
+       WHERE c.nth = 1
+     )
+     UPDATE rosey_tasks t
+        SET source_message_id = mv.surv_msg_id, source_item_index = mv.slot, updated_at = now()
+     FROM moving mv
+     WHERE t.id = mv.id`,
+    [survivorId, dupId],
+  );
+  // A twin — both sides hold the same item (same title key: the task's
+  // identity) of the same message, including a row moved there just above —
+  // keeps the survivor's row. A closed status on
   // the dup's row (done/dropped: usually set by hand) carries across rather than
   // reopening, and everything that points at the dup row — its event history and
   // any post of hers about it (a poll) — moves to the survivor's row.
@@ -266,31 +301,6 @@ export async function mergeGroups(
      UPDATE rosey_messages r SET task_id = w.surv_id
      FROM twins w
      WHERE r.task_id = w.dup_id`,
-    [survivorId, dupId],
-  );
-  // Every other task on a colliding dup message moves to the survivor's message.
-  // Its title is not on that message (a same-title task is a twin, above), so the
-  // move keeps (source_message_id, title_key) unique. It is placed after the
-  // message's last item, so the list keeps a distinct order.
-  const repointedRoseyTasks = await client.query(
-    `${dupToSurvivor},
-     moving AS (
-       SELECT t.id, m.surv_msg_id,
-              (SELECT COALESCE(MAX(x.source_item_index), -1) FROM rosey_tasks x
-                WHERE x.source_message_id = m.surv_msg_id)
-              + ROW_NUMBER() OVER (PARTITION BY m.surv_msg_id
-                                   ORDER BY t.source_message_id, t.source_item_index) AS slot
-       FROM dup_to_surv m
-       JOIN rosey_tasks t ON t.source_message_id = m.dup_msg_id
-       WHERE NOT EXISTS (
-         SELECT 1 FROM rosey_tasks x
-         WHERE x.source_message_id = m.surv_msg_id AND x.title_key = t.title_key
-       )
-     )
-     UPDATE rosey_tasks t
-        SET source_message_id = mv.surv_msg_id, source_item_index = mv.slot, updated_at = now()
-     FROM moving mv
-     WHERE t.id = mv.id`,
     [survivorId, dupId],
   );
   // Evidence (ON DELETE SET NULL) is repointed rather than blanked.
