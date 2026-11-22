@@ -52,4 +52,16 @@ describe("shouldApply (D4: manual > reply/react > inferred)", () => {
     expect(shouldApply(at("open", "tag"), "open", "manual")).toBe(true);
     expect(shouldApply(at("done", "react"), "done", "manual")).toBe(true);
   });
+
+  it("a poll untick reopens only what a poll closed", () => {
+    // Ticked done by the poll, then un-ticked: back to open.
+    expect(shouldApply(at("done", "poll"), "open", "poll")).toBe(true);
+    // Closed or dropped by another chat act after the tick: the untick leaves it.
+    for (const other of ["tag", "reply", "react"] as const) {
+      expect(shouldApply(at("dropped", other), "open", "poll")).toBe(false);
+      expect(shouldApply(at("done", other), "open", "poll")).toBe(false);
+    }
+    // A tick still closes whatever the chat set (the latest act wins).
+    expect(shouldApply(at("dropped", "tag"), "done", "poll")).toBe(true);
+  });
 });

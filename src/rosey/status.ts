@@ -19,6 +19,9 @@
  *    ever CREATES a task (as 'suggested').
  *  - 'suggested' is a creation state, never a transition target: once a person
  *    has confirmed or closed a task, nothing turns it back into a guess.
+ *  - A poll UNTICK ('open' from 'poll') undoes only what a poll did: it reopens
+ *    a task whose status the poll set, never one a tag, reply or reaction closed
+ *    after the tick. A tick ('done') is an ordinary chat act.
  */
 
 export const TASK_STATUSES = ["suggested", "open", "done", "dropped"] as const;
@@ -58,6 +61,7 @@ export function shouldApply(
   if (LAYER[source] === 0) return false;
   if (next === "suggested") return false;
   if (LAYER[source] < LAYER[current.source]) return false;
+  if (source === "poll" && next === "open" && current.source !== "poll") return false;
   if (current.status === next) return LAYER[source] > LAYER[current.source];
   return true;
 }

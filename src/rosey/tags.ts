@@ -58,6 +58,10 @@ export const LIST_PHRASES: readonly string[] = [
   "what's on the list",
   "what are the tasks",
   "show the list",
+  "show list",
+  "show tasks",
+  "show the tasks",
+  "show the task list",
   "רשימה",
   "הרשימה",
   "רשימת משימות",
@@ -70,17 +74,68 @@ export const LIST_PHRASES: readonly string[] = [
   "מה יש",
   "מה יש ברשימה",
   "מה פתוח",
+  "תראי רשימה",
+  "תראי הרשימה",
+  "תראי משימות",
+  "תראי המשימות",
 ];
+
+/**
+ * Words a list request may carry around a phrase without changing it: "את",
+ * "בבקשה", "לי", possessives ("המשימות שלנו"), "please", "me". Dropped as
+ * whole words before the fixed-phrase lookup. English "our"/"my" read as
+ * "the" ("show my list" = "show the list").
+ */
+const LIST_FILLER = new Set(["את", "בבקשה", "לי", "שלנו", "שלי", "please", "pls", "me"]);
+const LIST_POSSESSIVE = new Set(["our", "my"]);
 
 /** A list request's text with the tag already removed, in LIST_PHRASES' form. */
 function listKey(rest: string): string {
   return rest
     .replace(/[\u200e\u200f]/g, "")
     .replace(/[\u2018\u2019`]/g, "'")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[\s?？!.,…]+$/u, "")
-    .toLowerCase();
+    .replace(/[?？!.,…:;]+/gu, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !LIST_FILLER.has(w))
+    .map((w) => (LIST_POSSESSIVE.has(w) ? "the" : w === "whats" ? "what's" : w))
+    .filter((w, i, all) => !(w === "the" && all[i - 1] === "the"))
+    .join(" ");
+}
+
+/**
+ * Names the list or its tasks as the thing asked ABOUT: "המשימות", "ברשימה",
+ * "מהרשימה", "והמשימות", "tasks", "the list". A Hebrew word counts bare or
+ * after ו / ש and ה / ב / מה; with any other letter in front it does not, so
+ * "לרשימה" / "למשימות" ("to the list") never match.
+ */
+const NAMES_LIST = /(?<!\p{L})[וש]?(?:ה|ב|מה)?(?:רשימ|משימ)|\b(?:lists?|tasks?|to-?dos?)\b/iu;
+/**
+ * Asks what to ADD ("מה להוסיף", "what should I add"): such a question is a
+ * command, not a question about the list. "what did we add" is about the list.
+ */
+const ADDS_TO_LIST =
+  /(?<!\p{L})(?:להוסיף|תוסיפי|הוסיפי)(?!\p{L})|\b(?:to add|(?:should|can|could|shall) (?:i|we) add)\b/iu;
+/** Opens like a question: "מה …", "איזה …", "which …", "anything …". */
+const QUESTION_START =
+  /^(?:מה|מהן|מהם|איזה|איזו|אילו|כמה|מי|האם|what|what's|whats|which|anything)(?![\p{L}\p{N}'])/iu;
+
+/**
+ * A one-line question about the list itself ("@Rosey מה עם המשימות של
+ * השבוע?") that missed LIST_PHRASES. It is not a list request (that stays a
+ * fixed pattern), but it is never an item either: storing a question about the
+ * list as a task is the worse mistake. Everything else falls through to the
+ * command parser: "לקנות רשימה של מתנות" is no question, and "מה לקנות
+ * לרשימה" asks what to add, so both become items.
+ */
+function isListQuestion(lines: readonly string[]): boolean {
+  if (lines.length !== 1) return false;
+  const line = lines[0]!.replace(/[\u200e\u200f]/g, "").replace(/^[\s,:]+/, "");
+  return (
+    NAMES_LIST.test(line) &&
+    !ADDS_TO_LIST.test(line) &&
+    (/[?？]\s*$/u.test(line) || QUESTION_START.test(line))
+  );
 }
 
 const LIST_KEYS = new Set(LIST_PHRASES);
@@ -163,6 +218,7 @@ export function makeTagMatcher(aliases: readonly string[]): TagMatcher {
         const rest = [first.replace(doneWord, ""), ...body.slice(1)].join(" ");
         return { kind: "done", query: rest.replace(/\s+/g, " ").trim() };
       }
+      if (isListQuestion(body)) return null;
       const grocery = groceryHead.test(first);
       const lines = grocery ? [first.replace(groceryHead, ""), ...body.slice(1)] : body;
       const items = lines.map(cleanItem).filter((i) => i.length > 0);

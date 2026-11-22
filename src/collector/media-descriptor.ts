@@ -9,8 +9,7 @@
  */
 import type { WAMessage } from "@whiskeysockets/baileys";
 import { proto } from "@whiskeysockets/baileys";
-
-export type MediaKind = "image" | "video" | "audio" | "sticker" | "document";
+import { classifyMedia, type MediaKind } from "./media-kind.js";
 
 export type MediaDescriptor = {
   mediaKind: MediaKind;
@@ -34,17 +33,6 @@ export type MediaDescriptor = {
   waMessage: Uint8Array;
 };
 
-type MediaContent = {
-  mediaKey?: Uint8Array | null;
-  directPath?: string | null;
-  url?: string | null;
-  mimetype?: string | null;
-  fileEncSha256?: Uint8Array | null;
-  fileSha256?: Uint8Array | null;
-  mediaKeyTimestamp?: number | { toNumber(): number } | null;
-  fileLength?: number | { toNumber(): number } | null;
-};
-
 function toNum(v: number | { toNumber(): number } | null | undefined): number | null {
   if (v == null) return null;
   if (typeof v === "number") return v;
@@ -61,25 +49,6 @@ function parseOeExpiry(...candidates: (string | null | undefined)[]): number | n
       if (Number.isFinite(secs) && secs > 0) return secs;
     }
   }
-  return null;
-}
-
-/**
- * Classify a Baileys message into its media {@link MediaKind} and the raw
- * content node, or null when it carries no downloadable media. This is the
- * single place the imageMessage/videoMessage/audioMessage/stickerMessage/
- * documentMessage union is switched — the message mapper reads `.kind` for its
- * `mediaKind` discriminant, this module reads `.content` for the download blob.
- */
-export function classifyMedia(
-  msg: NonNullable<WAMessage["message"]>,
-): { kind: MediaKind; content: MediaContent } | null {
-  if (msg.imageMessage) return { kind: "image", content: msg.imageMessage as MediaContent };
-  if (msg.videoMessage) return { kind: "video", content: msg.videoMessage as MediaContent };
-  if (msg.audioMessage) return { kind: "audio", content: msg.audioMessage as MediaContent };
-  if (msg.stickerMessage) return { kind: "sticker", content: msg.stickerMessage as MediaContent };
-  if (msg.documentMessage)
-    return { kind: "document", content: msg.documentMessage as MediaContent };
   return null;
 }
 

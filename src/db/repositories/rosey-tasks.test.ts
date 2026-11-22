@@ -8,8 +8,11 @@ import {
   isRoseyPost,
   listTasks,
   liveTasksRaisedBetween,
+  pollOptionTexts,
+  pollTaskIds,
   reconcileRoseyMessageId,
   recordRoseyMessage,
+  recordRoseyPoll,
   recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
@@ -460,6 +463,66 @@ describe("Rosey's sent-message ledger", () => {
     expect(await countRoseyMessagesSince(pool, g, "reply", new Date("2026-11-22T00:00:00Z"))).toBe(
       2,
     );
+  });
+});
+
+describe("her list polls in the ledger", () => {
+  it("maps each option back to its task, counts the poll once, and is hers only in its group", async () => {
+    const g = await group();
+    const other = await group();
+    const m = await message(g);
+    const a = (await task(g, m, { title: "א", titleKey: "א" }))!;
+    const b = (await task(g, m, { title: "ב", titleKey: "ב" }))!;
+    const secret = new Uint8Array(32).fill(7);
+    await recordRoseyPoll(pool, {
+      groupId: g,
+      externalId: "POLL1",
+      secret,
+      taskIds: [b, a],
+      options: ["ב #1", "א"], // a "#" in the text must not confuse the key
+    });
+
+    expect(await pollTaskIds(pool, g, "POLL1")).toEqual([b, a]);
+    expect(await pollTaskIds(pool, other, "POLL1")).toBeNull();
+    expect(await pollTaskIds(pool, g, "POLL")).toBeNull(); // a prefix is not the poll
+    expect(await isRoseyPost(pool, g, "POLL1")).toBe(true); // her own-echo guard
+    expect(await countRoseyMessagesSince(pool, g, "poll", new Date(0))).toBe(1);
+    const { rows } = await pool.query<{ message_secret: Buffer }>(
+      `SELECT message_secret FROM rosey_messages WHERE group_id = $1 AND external_id = 'POLL1'`,
+      [g],
+    );
+    expect(new Uint8Array(rows[0]!.message_secret)).toEqual(secret);
+    // Each option's text is recorded as sent (vote decryption hashes it).
+    expect(await pollOptionTexts(pool, g, "POLL1")).toEqual(["ב #1", "א"]);
+    expect(await pollOptionTexts(pool, other, "POLL1")).toBeNull();
+
+    // A poll whose option rows carry no readable key is not a poll she can map.
+    await pool.query(
+      `INSERT INTO rosey_messages (group_id, external_id, kind, message_secret)
+       VALUES ($1, 'OLD', 'poll', '\\x00'), ($1, 'OLD#0', 'poll', NULL)`,
+      [g],
+    );
+    expect(await pollTaskIds(pool, g, "OLD")).toBeNull();
+  });
+
+  it("an option whose task was deleted maps to null; a poll vote never moves a manual status", async () => {
+    const g = await group();
+    const m = await message(g);
+    const a = (await task(g, m, { title: "א", titleKey: "א" }))!;
+    const b = (await task(g, m, { title: "ב", titleKey: "ב" }))!;
+    await recordRoseyPoll(pool, {
+      groupId: g,
+      externalId: "POLL2",
+      secret: new Uint8Array(32),
+      taskIds: [a, b],
+      options: ["א", "ב"],
+    });
+    await pool.query(`DELETE FROM rosey_tasks WHERE id = $1`, [a]);
+    expect(await pollTaskIds(pool, g, "POLL2")).toEqual([null, b]);
+
+    await recordStatusEvent(pool, { taskId: b, status: "open", source: "manual" });
+    const r = await recordStatusEvent(pool, { taskId: b, status: "done", source: "poll" });
+    expect(r).toMatchObject({ found: true, applied: false, current: "open" });
   });
 });
 

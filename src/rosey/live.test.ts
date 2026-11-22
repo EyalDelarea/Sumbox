@@ -16,6 +16,7 @@ import { createTestDatabase } from "../test/db.js";
 import { loadRoseyConfig } from "./config.js";
 import { DEDUP_SYSTEM } from "./dedup.js";
 import { makeRoseyLive, roseyLiveFromEnv, roseyScopedAllowlistsFromEnv } from "./live.js";
+import type { RoseyPollSender } from "./poll.js";
 import { LIST_REPLY_LIMITS, type RoseySender, type RoseySendMode } from "./reply.js";
 import { setRoseyEnabled } from "./run.js";
 
@@ -125,6 +126,25 @@ describe("makeRoseyLive", () => {
     tasks = await listTasks(pool, g.id, { includeClosed: true });
     expect(tasks.every((t) => t.status === "done")).toBe(true);
     expect(tasks.every((t) => t.statusSource === "tag")).toBe(true);
+    live.stop();
+  });
+
+  it("suggestNow runs the pass at once, without waiting for the quiet period", async () => {
+    const slow = { ...cfg, suggestDebounceMs: 60 * 60_000 };
+    const seen: [string, string][] = [];
+    const live = makeRoseyLive({
+      pool,
+      cfg: slow,
+      generate,
+      onCapture: (id, r) => seen.push([id, r.kind]),
+    });
+    const g = await group(true);
+    const m = await deliver(live, g, "צריך להזמין אינסטלטור");
+    expect(seen).toEqual([[m.externalId, "scheduled"]]);
+    expect(await listTasks(pool, g.id)).toEqual([]); // an hour's debounce: nothing yet
+    await live.suggestNow(g.id);
+    const tasks = await listTasks(pool, g.id);
+    expect(tasks.map((t) => [t.title, t.status])).toEqual([["צריך להזמין אינסטלטור", "suggested"]]);
     live.stop();
   });
 
@@ -880,5 +900,101 @@ describe("makeRoseyLive — the list reply", () => {
     // The timed-out reply keeps its record: if it lands late, its echo is hers.
     expect(await ledger(g.id)).toHaveLength(1);
     live.stop();
+  });
+});
+
+describe("makeRoseyLive — the list as polls (D8)", () => {
+  type Sent = {
+    jid: string;
+    name: string;
+    options: string[];
+    id: string;
+    quotedId?: string | null;
+  };
+  function pollProbe() {
+    const polls: Sent[] = [];
+    const texts: string[] = [];
+    const pollSender: RoseyPollSender = {
+      sendPoll: async (jid, poll, opts) => {
+        polls.push({ jid, ...poll, id: opts.messageId, quotedId: opts.quoted?.key?.id });
+        return undefined;
+      },
+    };
+    const sender: RoseySender = {
+      sendText: async (_jid, text) => {
+        texts.push(text);
+        return undefined;
+      },
+    };
+    return { polls, texts, pollSender, sender };
+  }
+  const live = (p: ReturnType<typeof pollProbe>, style: "text" | "poll" = "poll") =>
+    makeRoseyLive({
+      pool,
+      cfg: { ...cfg, sendMode: "live" },
+      generate,
+      sender: p.sender,
+      pollSender: p.pollSender,
+      listStyle: () => style,
+    });
+
+  it("answers a list request with checklist polls; a tick marks done, the last un-tick reopens", async () => {
+    const p = pollProbe();
+    const r = live(p);
+    const g = await group(true);
+    await deliver(r, g, "@Rosey לתקן ברז");
+    await deliver(r, g, "@Rosey קניות: חלב");
+    const ask = await deliver(r, g, "@רוזי מה המשימות?");
+    expect(p.texts).toEqual([]);
+    expect(p.polls.map((x) => [x.name, x.options, x.quotedId])).toEqual([
+      ["📋 המשימות שלנו", ["לתקן ברז"], ask.externalId],
+      ["🛒 קניות", ["חלב"], ask.externalId],
+    ]);
+
+    const tasksPoll = p.polls[0]!.id;
+    const status = async () =>
+      (await listTasks(pool, g.id, { includeClosed: true })).find((t) => t.title === "לתקן ברז");
+    const vote = (voter: string, selected: number[]) =>
+      r.onPollVote({ jid: g.jid, pollId: tasksPoll, voter, selected });
+
+    await vote("dana", [0]);
+    expect(await status()).toMatchObject({ status: "done", statusSource: "poll" });
+    await vote("yossi", [0]);
+    await vote("dana", []);
+    expect((await status())?.status).toBe("done"); // yossi still has it ticked
+    await vote("yossi", []);
+    expect(await status()).toMatchObject({ status: "open", statusSource: "poll" });
+    r.stop();
+  });
+
+  it("a vote from a chat not on her list, or on a poll that is not hers, changes nothing", async () => {
+    const p = pollProbe();
+    const r = live(p);
+    const off = await group(false);
+    expect(await r.onPollVote({ jid: off.jid, pollId: "X", voter: "d", selected: [0] })).toEqual({
+      kind: "not_enabled",
+    });
+    const g = await group(true);
+    expect(await r.onPollVote({ jid: g.jid, pollId: "X", voter: "d", selected: [0] })).toEqual({
+      kind: "unknown_poll",
+    });
+    r.stop();
+  });
+
+  it("with nothing open, or with the text style chosen, the text list answers", async () => {
+    const p = pollProbe();
+    const empty = live(p);
+    const g = await group(true);
+    await deliver(empty, g, "@רוזי רשימה");
+    expect(p.polls).toEqual([]);
+    expect(p.texts).toHaveLength(1);
+    empty.stop();
+
+    const text = live(p, "text");
+    await deliver(text, g, "@Rosey לתקן ברז");
+    await deliver(text, g, "@רוזי רשימה");
+    expect(p.polls).toEqual([]);
+    expect(p.texts).toHaveLength(2);
+    text.stop();
   });
 });

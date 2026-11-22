@@ -167,6 +167,68 @@ describe("list request", () => {
     }
   });
 
+  it("tolerates punctuation, possessives, את / בבקשה and the English variants", () => {
+    for (const text of [
+      "@Rosey מה המשימות שלנו?",
+      "@רוזי מה המשימות שלי?!",
+      "@רוזי מה הרשימה שלנו.",
+      "@רוזי את הרשימה בבקשה",
+      "@רוזי בבקשה, מה המשימות שלנו?",
+      "@רוזי תראי לי את המשימות",
+      "@רוזי תראי את הרשימה שלנו בבקשה!",
+      "@Rosey what's the list?",
+      "@Rosey whats our list",
+      "@Rosey show tasks",
+      "@Rosey show me the tasks please",
+      "@Rosey show my list!",
+      "@Rosey, what are our tasks?",
+    ]) {
+      expect(rosey.isListRequest(text), text).toBe(true);
+      expect(rosey.parse(text), text).toBeNull();
+    }
+  });
+
+  it("a question that names the tasks or the list never becomes a task", () => {
+    for (const text of [
+      "@Rosey מה עם המשימות של השבוע?",
+      "@רוזי איזה משימות נשארו?",
+      "@רוזי מה נשאר ברשימה להיום",
+      "@Rosey which tasks are still open?",
+      "@Rosey anything left on the list?",
+      "@Rosey what did we add to the list?",
+      "@רוזי והמשימות של מחר?",
+      "@רוזי מה שברשימה עוד פתוח?",
+    ]) {
+      expect(rosey.parse(text), text).toBeNull();
+    }
+  });
+
+  it("a question that only ADDS to the list is not about it: it falls through to a command", () => {
+    for (const [text, item] of [
+      ["@Rosey מה לקנות לרשימה", "מה לקנות לרשימה"],
+      ["@רוזי מה להוסיף למשימות?", "מה להוסיף למשימות?"],
+      ["@Rosey what should I add to the list?", "what should I add to the list?"],
+    ] as const) {
+      expect(rosey.isListRequest(text), text).toBe(false);
+      expect(rosey.parse(text), text).toMatchObject({ kind: "add", items: [item] });
+    }
+  });
+
+  it("an ordinary task that mentions a list stays a task", () => {
+    for (const [text, item] of [
+      ["@Rosey לקנות רשימה של מתנות לחג", "לקנות רשימה של מתנות לחג"],
+      ["@Rosey להכין רשימת מוזמנים", "להכין רשימת מוזמנים"],
+      ["@רוזי לסדר את המשימות של הבית בלוח", "לסדר את המשימות של הבית בלוח"],
+      ["@Rosey print the shopping list", "print the shopping list"],
+      ["@רוזי מה יש לאכול", "מה יש לאכול"],
+      ["@Rosey do the garden tasks", "do the garden tasks"],
+      ["@Rosey is the list printed", "is the list printed"],
+    ] as const) {
+      expect(rosey.isListRequest(text), text).toBe(false);
+      expect(rosey.parse(text), text).toMatchObject({ kind: "add", items: [item] });
+    }
+  });
+
   it("a list request is never parsed as an item to add, so no replay can store it", () => {
     expect(rosey.parse("@רוזי מה המשימות?")).toBeNull();
     expect(rosey.parse("@Rosey what's the task list?")).toBeNull();
