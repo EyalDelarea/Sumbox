@@ -17,6 +17,7 @@ export const SANDBOX_PAGE = String.raw`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ארגז החול של רוזי</title>
+<link rel="icon" href="data:,">
 <style>
 @font-face{font-family:"Heebo";font-weight:400;font-display:swap;src:url("/fonts/heebo-400-hebrew.woff2") format("woff2");unicode-range:U+0590-05FF,U+FB1D-FB4F}
 @font-face{font-family:"Heebo";font-weight:400;font-display:swap;src:url("/fonts/heebo-400-latin.woff2") format("woff2");unicode-range:U+0000-024F}
@@ -30,6 +31,7 @@ export const SANDBOX_PAGE = String.raw`<!doctype html>
 @media (prefers-color-scheme:dark){:root{color-scheme:dark;--stage:#0c0e10;--bg:#16191c;--surface:#1e2226;--surface-2:#23282d;--ink:#e9ece9;--ink-2:#aab2ad;--muted:#7c847e;--line:rgba(255,255,255,.10);--hover:rgba(255,255,255,.05);--accent:#74a98c;--accent-ink:#bfe0cc;--accent-weak:rgba(116,169,140,.18);--on-accent:#0f211a;--warn-ink:#e6c489;--warn-weak:rgba(205,160,95,.16);--shadow-soft:0 1px 2px rgba(0,0,0,.4),0 4px 18px rgba(0,0,0,.35)}}
 
 *{box-sizing:border-box;margin:0;padding:0}
+[hidden]{display:none!important}
 html,body{height:100%}
 body{background:var(--stage);color:var(--ink);font:15px/1.45 var(--font-body)}
 button,select,textarea{font:inherit;color:inherit}
@@ -176,7 +178,19 @@ button:disabled{opacity:.5;cursor:default}
     if (text != null) e.textContent = text;
     return e;
   }
-  function auto(tag, cls, text) { var e = el(tag, cls, text); e.dir = "auto"; return e; }
+  // Chat text: RTL whenever it holds Hebrew (as WhatsApp lays it out), with each
+  // @mention isolated so "@Rosey" never renders as "Rosey@" inside Hebrew.
+  var HEBREW = /[\u0590-\u05FF]/, MENTION = /(@[A-Za-z][\w.-]*)/;
+  function auto(tag, cls, text) {
+    var e = el(tag, cls);
+    text = text == null ? "" : String(text);
+    e.dir = HEBREW.test(text) ? "rtl" : "auto";
+    text.split(MENTION).forEach(function (part, i) {
+      if (!part) return;
+      e.appendChild(i % 2 ? bdi(part) : document.createTextNode(part));
+    });
+    return e;
+  }
   function bdi(text) { var b = document.createElement("bdi"); b.textContent = text; return b; }
   function hhmm(t) { var d = new Date(t); return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2); }
   function dayOf(t) { return new Date(t).toLocaleDateString("he-IL", { weekday: "long", day: "numeric", month: "numeric" }); }
@@ -306,7 +320,7 @@ button:disabled{opacity:.5;cursor:default}
         var acts = el("div", "acts");
         ["open", "done", "dropped"].forEach(function (s) {
           if (s === status) return;
-          var b = el("button", "", ACTIONS[s]); b.type = "button";
+          var b = el("button", "", s === "open" && status !== "suggested" ? "פתיחה מחדש" : ACTIONS[s]); b.type = "button";
           b.onclick = function () { act("/api/task", { id: t.id, status: s }); };
           acts.appendChild(b);
         });
