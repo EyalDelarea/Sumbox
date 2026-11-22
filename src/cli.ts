@@ -5,6 +5,7 @@ import path from "node:path";
 import { Command } from "commander";
 import "dotenv/config";
 import { GroupTurnQueue } from "./collector/group-turn-queue.js";
+import { PASSIVE_MODE_BANNER } from "./collector/outbound-guard.js";
 import { loadConfig } from "./config.js";
 import { runImport } from "./importer/run-import.js";
 import type { JobBus } from "./jobs/job-bus.js";
@@ -192,9 +193,7 @@ program
         "⚠️  SENDING ENABLED (WHATSAPP_ALLOW_SEND=true): this tool may transmit to WhatsApp.",
       );
     } else {
-      collectorLog.info(
-        "🔒 Read-only mode: passive observer — will NOT send messages, read receipts, or presence (set WHATSAPP_ALLOW_SEND=true to enable). /סיכום replies still send to groups enabled in group_command_permissions — toggling one on or off takes effect on the next message, no restart.",
-      );
+      collectorLog.info(PASSIVE_MODE_BANNER);
     }
 
     // The outbound guard reads the SAME live DB resolver the matcher uses, per

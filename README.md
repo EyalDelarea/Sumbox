@@ -14,7 +14,7 @@
 
 > 📨 **Wake up to 200 unread messages?** Sumbox reads them for you — overnight, locally — so you open your phone to *the gist*, not the scroll.
 
-A **local, single-user** WhatsApp summarizer, built for fun. Messages are collected passively via a read-only linked device (using [Baileys](https://github.com/WhiskeySockets/Baileys)), stored in your own Postgres, transcribed locally (faster-whisper), captioned locally (Ollama vision), and summarized locally (Ollama) — then displayed in a mobile-first, RTL Hebrew web UI. **Nothing leaves your machine.** No cloud API keys, no hosted service, no login, no data sharing.
+A **local, single-user** WhatsApp summarizer, built for fun. Messages are collected passively via a linked device (using [Baileys](https://github.com/WhiskeySockets/Baileys)), stored in your own Postgres, transcribed locally (faster-whisper), captioned locally (Ollama vision), and summarized locally (Ollama) — then displayed in a mobile-first, RTL Hebrew web UI. **No message content goes to any AI or cloud API.** The only outbound traffic is WhatsApp itself: replies posted into the groups you enable for `/סיכום` and `@Aida`. No cloud API keys, no hosted service, no login, no data sharing.
 
 <p align="center">
   <img src="assets/screens/desktop.png" alt="Sumbox web UI — a chat's structured Hebrew catch-up summary (תקציר · נושאים עיקריים · החלטות ומשימות · שאלות פתוחות) beside the sage-green nav rail" width="820" />
@@ -28,7 +28,7 @@ A **local, single-user** WhatsApp summarizer, built for fun. Messages are collec
 
 ```mermaid
 flowchart LR
-    WA["📲 WhatsApp<br/>Baileys · read-only"] --> PG[("🗄️ Postgres<br/>your database")]
+    WA["📲 WhatsApp<br/>Baileys · linked device"] --> PG[("🗄️ Postgres<br/>your database")]
     PG --> W["🎙️ Whisper<br/>voice → text"]
     PG --> V["👁️ Ollama vision<br/>images/video → captions"]
     W --> S["🧠 Ollama<br/>structured summary"]
@@ -36,7 +36,7 @@ flowchart LR
     S --> UI["📱 Web UI<br/>mobile · RTL · Hebrew"]
 ```
 
-Every box runs on **your machine**. The only thing that touches the network is the read-only WhatsApp link itself.
+Every box runs on **your machine**. The only thing that touches the network is the WhatsApp link itself. It reads passively, and it posts only into the groups you enable for `/סיכום` and `@Aida` (see [Outbound safety](#outbound-safety)).
 
 The web UI has three surfaces: **עדכונים** (updates — the summaries feed, the landing view), **צ׳אטים** (chats — pick which chats feed summaries), and **פקודות** (commands — manage the in-chat `/סיכום` command).
 
@@ -161,8 +161,7 @@ This is the most important step. On first run (`make dev` or `npx tsx src/cli.ts
 **Before the QR appears, a safety banner prints:**
 
 ```
-🔒 Read-only mode: this tool will NOT send messages, read receipts, or presence.
-   It is a passive observer. (Sending stays off unless you set WHATSAPP_ALLOW_SEND=true.)
+🔒 Passive mode: no read receipts, presence, or typing. Messages and reactions go ONLY to groups enabled in the commands tab (/סיכום replies, @Aida answers, error replies, and ⏳ ⏸ ✅ ❌ reactions); toggling a group takes effect on its next message, no restart. Every other chat: nothing is sent (WHATSAPP_ALLOW_SEND=true lifts this for every chat).
 ```
 
 **To link:**
@@ -184,7 +183,17 @@ rm -rf data/baileys-auth/
 # Then restart make dev or serve --collect — a new QR will print
 ```
 
-**Outbound safety:** The linked device is hardened to never send anything. `sendMessage` and `relayMessage` throw if called. Presence updates, read receipts, and typing indicators are silenced to no-ops. This cannot be accidentally bypassed. To explicitly enable sending, set `WHATSAPP_ALLOW_SEND=true` in `.env`.
+### Outbound safety
+
+The linked device reads passively, but it **does send** to groups you enable. Here is exactly what leaves it:
+
+- **Sent, only to enabled groups:** `/סיכום` summary replies, `@Aida` answers, a short error reply when either fails, and ⏳ ⏸ ✅ ❌ status reactions on the triggering message. A group is enabled when you switch it on in the **פקודות** (commands) tab. Every group starts off, so a fresh install sends nothing.
+- **What is in them:** text generated locally from that same group's own messages, posted back into that group over WhatsApp's end-to-end encryption. Nothing from one chat is sent to another.
+- **Never sent, anywhere:** read receipts, presence, and typing indicators. They are silenced to no-ops.
+- **Blocked everywhere else:** `sendMessage` and `relayMessage` throw for any chat that is not enabled. The enabled set is re-read from the database on every send, so toggling a group takes effect on its next message without a restart, and a database error blocks the send.
+- **Lifting the guard:** `WHATSAPP_ALLOW_SEND=true` in `.env` removes the guard entirely. Leave it `false`.
+
+Only the live collector (`serve --collect` or `collect`) holds a session that can send. The worker and plain `serve` hold no session, and the one-off sessions opened by `full-sync` and `merge-duplicate-chats` have no enabled groups, so every send there is blocked.
 
 ---
 
@@ -365,7 +374,8 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 
 | Key | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/whatsapp_sum` | Postgres connection string |
+| `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/whatsapp_sum` | Postgres connection string. Its password must match `SUMBOX_POSTGRES_PASSWORD`. |
+| `SUMBOX_POSTGRES_PASSWORD` | `postgres` | Password Docker Compose gives the `postgres` user. It applies only when the database volume is first created; to change it on an existing install, also run `ALTER USER` (see `.env.example`). |
 | `DATA_DIR` | `./data` | Directory for auth state, media downloads, and exports |
 | `TRANSCRIPTION_PYTHON` | `python3` | Python interpreter with `faster-whisper` installed. `.env.example` sets this to `./.venv/bin/python` for the venv flow above. |
 | `TRANSCRIPTION_MODEL` | `ivrit-ai/whisper-large-v3-turbo-ct2` | HuggingFace model for Hebrew speech-to-text (downloaded on first use) |
@@ -384,7 +394,9 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 | `VISION_MAX_VIDEO_MB` | `25` | Maximum video file size (MB) accepted for analysis |
 | `VISION_NUM_CTX` | `8192` | Context window for the vision model (kept small to control KV-cache memory) |
 | `WEB_PORT` | `8787` | Port for the local web UI |
-| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` | RabbitMQ AMQP connection URL |
+| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` | RabbitMQ AMQP connection URL. Its user and password must match the two keys below. |
+| `SUMBOX_RABBITMQ_USER` | `guest` | RabbitMQ user Docker Compose creates |
+| `SUMBOX_RABBITMQ_PASSWORD` | `guest` | Password for `SUMBOX_RABBITMQ_USER` |
 | `LOG_LEVEL` | `info` | pino log level (`trace` / `debug` / `info` / `warn` / `error` / `fatal`) |
 | `WORKER_CONCURRENCY` | `1` | Concurrent jobs per worker process |
 | `WORKER_REQUEUE_GRACE_MS` | `300000` | On startup the worker re-sends media jobs whose queue messages were lost; rows younger than this (ms) are left alone |

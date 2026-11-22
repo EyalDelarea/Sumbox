@@ -11,9 +11,10 @@
 **Sumbox** is a **local, single-user personal WhatsApp summarizer** — a fun
 side project, not a hosted product. You wake up to 200 unread messages;
 Sumbox reads them for you — overnight, on your own machine — so you open
-your phone to *the gist*, not the scroll. **Nothing leaves your machine**
-except the read-only WhatsApp link itself. No cloud API keys, no hosted
-service, no data sharing, no login.
+your phone to *the gist*, not the scroll. **No message content goes to any AI
+or cloud API.** The only outbound traffic is WhatsApp itself: replies posted
+into the groups you enable for `/סיכום` and `@Aida`. No cloud API keys, no
+hosted service, no data sharing, no login.
 
 ---
 
@@ -36,7 +37,7 @@ service, no data sharing, no login.
 ## 3. How it works (end-to-end pipeline)
 
 ```
-WhatsApp ──(Baileys, read-only live link)──┐
+WhatsApp ──(Baileys, passive live link)────┐
                                            ├─► normalize + dedupe ─► PostgreSQL (source of truth)
 WhatsApp export (.txt/.zip) ──(importer)───┘                              │
                                                                           ├─► faster-whisper (voice notes → Hebrew transcripts)
@@ -74,7 +75,7 @@ WhatsApp export (.txt/.zip) ──(importer)───┘                        
 |---|---|
 | Runtime | Node.js ≥ 22, TypeScript, ES modules |
 | Storage | PostgreSQL (sole persistent store); media/exports on disk under `data/` |
-| Live collection | [Baileys](https://github.com/WhiskeySockets/Baileys) (unofficial WhatsApp lib), hardened read-only |
+| Live collection | [Baileys](https://github.com/WhiskeySockets/Baileys) (unofficial WhatsApp lib), passive except replies to enabled groups |
 | LLM (summaries) | **Local Ollama**, default `gemma4:26b`, ~32k context |
 | Vision (images/video) | Local Ollama vision, default `gemma4:26b` (multi-frame video) |
 | Speech-to-text | Python `faster-whisper`, model `ivrit-ai/whisper-large-v3-turbo-ct2` (Hebrew) |
@@ -134,7 +135,7 @@ The web app (`src/web/public/`) has three surfaces:
 
 | Dir | Responsibility |
 |---|---|
-| `collector/` | Baileys live collector, message mapping, name resolution, **outbound-guard** (hardened so it can never send), backfill, session. |
+| `collector/` | Baileys live collector, message mapping, name resolution, **outbound-guard** (sends only to enabled groups), backfill, session. |
 | `importer/` | WhatsApp `.txt`/`.zip` parsing, normalization, dedupe, bulk import, media extraction. |
 | `db/` | Postgres client, migrations, repositories (groups, messages, summaries, transcripts, media-analyses, job-runs, watermarks, scheduler-state, status-snapshots, chat-scopes, service-status). The schema still carries inert `tenant_id` columns and a single-row `tenants` table from a removed multi-tenancy design; the app has no tenant concept and connects as the DB owner. See `CLAUDE.md`. |
 | `serve/` | The `serve` composition root — wires the collector, scheduler, retention sweep, and web server into one process. |
@@ -160,7 +161,7 @@ The web app (`src/web/public/`) has three surfaces:
 ## 8. Observability & ops
 
 - **App status API** (http://localhost:8787/api/status).
-- **RabbitMQ management** (http://localhost:15672, guest/guest).
+- **RabbitMQ management** (http://localhost:15672, login `SUMBOX_RABBITMQ_USER` / `SUMBOX_RABBITMQ_PASSWORD` from `.env`; `guest/guest` if unset).
 - **Self-healing**: `ops-sweep` redrives/reaps dead jobs; status snapshots give
   an observable history.
 - Logs are plain pino JSON to stdout — pipe through `pino-pretty` (wired into
@@ -170,11 +171,12 @@ The web app (`src/web/public/`) has three surfaces:
 
 ## 9. Privacy & safety posture
 
-- **100% local inference.** The only network touch is the read-only WhatsApp
-  link.
-- **Outbound hardening.** `sendMessage`/`relayMessage` throw; presence, read
-  receipts, typing indicators are silenced to no-ops. Cannot be accidentally
-  bypassed. Sending requires explicit `WHATSAPP_ALLOW_SEND=true`.
+- **100% local inference.** The only network touch is the WhatsApp link.
+- **Outbound hardening.** `sendMessage`/`relayMessage` throw for any chat not
+  enabled in the commands tab; enabled groups receive `/סיכום` replies, `@Aida`
+  answers, error replies and status reactions. Presence, read receipts and
+  typing indicators are silenced to no-ops. `WHATSAPP_ALLOW_SEND=true` lifts
+  the guard for every chat.
 - **Media pruning.** Media files are deleted after captioning by default
   (`RETAIN_MEDIA=false`).
 - **Unofficial library disclaimer.** Baileys is reverse-engineered; not

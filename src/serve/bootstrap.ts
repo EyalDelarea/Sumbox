@@ -3,6 +3,7 @@ import path from "node:path";
 import { backfillGroup } from "../collector/backfill.js";
 import { GroupTurnQueue } from "../collector/group-turn-queue.js";
 import { OnboardingAdapter } from "../collector/onboarding-adapter.js";
+import { PASSIVE_MODE_BANNER } from "../collector/outbound-guard.js";
 import { recoverOnReconnect } from "../collector/reconnect-recovery.js";
 import { loadConfig } from "../config.js";
 import { createDbClient } from "../db/client.js";
@@ -289,15 +290,13 @@ export async function startServe(options: { port?: string; collect?: boolean }):
   let mediaPurgeHandle: { stop: () => void } | null = null;
 
   if (options.collect) {
-    // Safety banner (same wording as the standalone `collect` command)
+    // Safety banner (shared with the standalone `collect` command)
     if (config.whatsapp.allowSend) {
       log.collector.warn(
         "⚠️  SENDING ENABLED (WHATSAPP_ALLOW_SEND=true): this tool may transmit to WhatsApp.",
       );
     } else {
-      log.collector.info(
-        "🔒 Read-only mode: passive observer — will NOT send messages, read receipts, or presence (set WHATSAPP_ALLOW_SEND=true to enable). /סיכום replies to groups enabled at startup still send — see group_command_permissions; a group enabled after startup needs a restart before its first reply can send.",
-      );
+      log.collector.info(PASSIVE_MODE_BANNER);
     }
 
     // Keep the collector alive when a media-download HTTP/2 stream aborts.

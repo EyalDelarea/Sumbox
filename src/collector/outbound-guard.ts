@@ -1,26 +1,27 @@
 /**
- * outbound-guard.ts — a hard safety guardrail that makes the live WhatsApp
- * collector a strictly PASSIVE, read-only observer.
+ * outbound-guard.ts — a hard safety guardrail that keeps the live WhatsApp
+ * collector a PASSIVE observer everywhere except the groups the user enabled.
  *
- * By default (allowSend = false) the tool must never transmit anything that is
- * visible on the account: no chat messages, no read receipts, no presence /
- * typing. This guard neutralizes the Baileys socket's high-level outbound
- * methods so even buggy or future code cannot accidentally send.
+ * By default (allowSend = false) the tool never emits read receipts, presence or
+ * typing, and sends chat messages (including reactions) ONLY to allowlisted
+ * groups: the `/סיכום` replies and `@Aida` answers. This guard neutralizes the
+ * Baileys socket's high-level outbound methods so even buggy or future code
+ * cannot send anywhere else.
  *
  * - HARD_BLOCKED methods (actively send chat content) are replaced with a
- *   function that THROWS — these are only ever called by application code, so a
- *   loud failure is correct and safe.
+ *   function that THROWS unless the target JID is allowlisted — these are only
+ *   ever called by application code, so a loud failure is correct and safe.
  * - SILENCED methods (presence / read receipts) are replaced with no-ops, so
  *   that if anything (our code or a library path) calls them, no signal leaves
  *   the device and nothing crashes the receive loop.
  *
  * Low-level transport/keepalive frames that Baileys needs to stay connected are
  * NOT touched (they are not these high-level methods); the device still behaves
- * like any normal linked device at the protocol layer, but emits no
- * account-visible activity.
+ * like any normal linked device at the protocol layer, and its only
+ * account-visible activity is what it posts into enabled groups.
  *
- * Sending can only be enabled by an explicit opt-in (WHATSAPP_ALLOW_SEND=true →
- * config.whatsapp.allowSend), never by default.
+ * Lifting the guard for every chat takes an explicit opt-in
+ * (WHATSAPP_ALLOW_SEND=true → config.whatsapp.allowSend), never a default.
  */
 
 /**
@@ -33,6 +34,16 @@
 export type AllowlistSource =
   | ReadonlySet<string>
   | (() => ReadonlySet<string> | Promise<ReadonlySet<string>>);
+
+/**
+ * The startup banner both collector entry points (`serve --collect`, `collect`) log
+ * when sending is not globally enabled. It must describe what this guard actually
+ * lets through: the allowlisted groups below receive `/סיכום` replies, `@Aida`
+ * answers, error replies and ⏳ ⏸ ✅ ❌ status reactions. Shown verbatim in
+ * README § Linking WhatsApp.
+ */
+export const PASSIVE_MODE_BANNER =
+  "🔒 Passive mode: no read receipts, presence, or typing. Messages and reactions go ONLY to groups enabled in the commands tab (/סיכום replies, @Aida answers, error replies, and ⏳ ⏸ ✅ ❌ reactions); toggling a group takes effect on its next message, no restart. Every other chat: nothing is sent (WHATSAPP_ALLOW_SEND=true lifts this for every chat).";
 
 /** Methods that actively send chat content — blocked by throwing. */
 export const HARD_BLOCKED = ["sendMessage", "relayMessage"] as const;
@@ -88,8 +99,8 @@ export function applyOutboundGuard<T>(
           return original(...args);
         }
         throw new Error(
-          `Outbound WhatsApp send blocked: "${method}" is disabled (read-only mode). ` +
-            `Set WHATSAPP_ALLOW_SEND=true to explicitly enable sending.`,
+          `Outbound WhatsApp send blocked: "${method}" targets a chat that is not enabled ` +
+            `in the commands tab. Only enabled groups receive /סיכום and @Aida replies.`,
         );
       };
     }
