@@ -55,8 +55,11 @@ export function makeRoseyLive(deps: {
   log?: Log;
   /** Injectable for tests; defaults to the local Ollama model. */
   generate?: Generate;
+  /** Injectable clock for tests. */
+  now?: () => number;
 }): RoseyLive {
   const { pool, cfg, log } = deps;
+  const clock = deps.now ?? Date.now;
   const generate = deps.generate ?? makeGenerate(cfg);
   const matcher = makeTagMatcher(cfg.tags);
   const queue = new GroupSerialQueue();
@@ -131,8 +134,14 @@ export function makeRoseyLive(deps: {
     onMessage: async (msg) => {
       if (stopped) return;
       const chat = msg.key?.remoteJid ?? "";
+      // Liveness is judged at ARRIVAL. A message can wait in `arrivals` behind a
+      // command that waits behind a minutes-long suggestion pass; judged when it
+      // finally runs, a live command would read as a replay — and the catch-up
+      // skips on-time messages, so it would be lost.
+      const arrivedAt = clock();
       await arrivals.run(chat, () =>
         captureMessage(msg, {
+          now: () => arrivedAt,
           matcher,
           resolveEnabledJids: async () =>
             new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY)),

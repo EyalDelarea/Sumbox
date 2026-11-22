@@ -83,6 +83,8 @@ describe("captureMessage — gates (each fails closed)", () => {
     const r = await captureMessage(wa("@Rosey milk", { ageMs: LIVENESS_WINDOW_MS + 1000 }), d);
     expect(r).toEqual({ kind: "ignored", reason: "stale" });
     expect(calls.applied).toEqual([]);
+    // ...but it schedules the pass whose catch-up applies late commands.
+    expect(calls.scheduled).toEqual([9]);
   });
 
   it("never acts on one of her own posts", async () => {

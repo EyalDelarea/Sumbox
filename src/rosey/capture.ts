@@ -39,6 +39,7 @@ export type CaptureDeps = {
     info: (obj: unknown, msg?: string) => void;
     warn: (obj: unknown, msg?: string) => void;
   };
+  /** When the message ARRIVED (not when this runs): the liveness rule's clock. */
   now?: () => number;
 };
 
@@ -73,10 +74,6 @@ export async function captureMessage(msg: WAMessage, deps: CaptureDeps): Promise
     return { kind: "ignored", reason: "allowlist_error" };
   }
   if (!enabled.has(mapped.remoteJid)) return { kind: "ignored", reason: "not_enabled" };
-  if (now() - mapped.sentAt.getTime() > LIVENESS_WINDOW_MS) {
-    // Not lost: the group's next aggregation pass catches up on late commands.
-    return { kind: "ignored", reason: "stale" };
-  }
 
   const groupId = await deps.groupIdForJid(mapped.remoteJid);
   if (groupId === null) {
@@ -85,6 +82,13 @@ export async function captureMessage(msg: WAMessage, deps: CaptureDeps): Promise
   }
   if (await deps.isOwnPost(groupId, mapped.externalId)) {
     return { kind: "ignored", reason: "own_post" };
+  }
+  if (now() - mapped.sentAt.getTime() > LIVENESS_WINDOW_MS) {
+    // A replay. Never applied here — but it schedules a pass, and that pass's
+    // catch-up applies a late command (see run.ts), even if the group then goes
+    // quiet.
+    deps.scheduleSuggestions(groupId);
+    return { kind: "ignored", reason: "stale" };
   }
 
   const cmd = deps.matcher.parse((mapped.textContent ?? "").trim());

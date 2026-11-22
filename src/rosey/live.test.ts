@@ -171,6 +171,44 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
+  it("a command queued behind a long suggestion pass is judged live by its arrival, not lost", async () => {
+    let clockMs = Date.now();
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let passStarted = false;
+    const slowModel = async (system: string, user: string) => {
+      if (system !== DEDUP_SYSTEM) {
+        passStarted = true;
+        await released;
+      }
+      return generate(system, user);
+    };
+    const live = makeRoseyLive({ pool, cfg, generate: slowModel, now: () => clockMs });
+    const g = await group(true);
+
+    await deliver(live, g, "צריך לסדר את הארון"); // starts the debounced pass
+    await vi.waitFor(() => expect(passStarted).toBe(true));
+
+    // Two commands land while the model is busy; neither may wait for it to be judged.
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    const pending = ["@Rosey לקנות נורות", "@Rosey לקנות מברג"].map(async (text) => {
+      const id = `WA-${randomUUID()}`;
+      await ingest(g.id, id, text, sentAt);
+      return live.onMessage(wa(g.jid, id, text, sentAt));
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    clockMs += 10 * 60_000; // the pass takes minutes
+    release();
+    await Promise.all(pending);
+
+    const tags = (await listTasks(pool, g.id, { includeClosed: true }))
+      .filter((t) => t.origin === "tag")
+      .map((t) => t.title)
+      .sort();
+    expect(tags).toEqual(["לקנות מברג", "לקנות נורות"]);
+    live.stop();
+  });
+
   it("ignores a group that is not enabled for Rosey", async () => {
     const live = makeRoseyLive({ pool, cfg, generate });
     const g = await group(false);
