@@ -200,6 +200,17 @@ describe("list request", () => {
     }
   });
 
+  it("a question that only ADDS to the list is not about it: it falls through to a command", () => {
+    for (const [text, item] of [
+      ["@Rosey מה לקנות לרשימה", "מה לקנות לרשימה"],
+      ["@רוזי מה להוסיף למשימות?", "מה להוסיף למשימות?"],
+      ["@Rosey what should I add to the list?", "what should I add to the list?"],
+    ] as const) {
+      expect(rosey.isListRequest(text), text).toBe(false);
+      expect(rosey.parse(text), text).toMatchObject({ kind: "add", items: [item] });
+    }
+  });
+
   it("an ordinary task that mentions a list stays a task", () => {
     for (const [text, item] of [
       ["@Rosey לקנות רשימה של מתנות לחג", "לקנות רשימה של מתנות לחג"],

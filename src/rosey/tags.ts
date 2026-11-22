@@ -103,22 +103,35 @@ function listKey(rest: string): string {
     .join(" ");
 }
 
-/** Names the list or its tasks ("המשימות", "ברשימה", "tasks", "to-do"). */
-const NAMES_LIST = /רשימ|משימ|\b(?:lists?|tasks?|to-?dos?)\b/iu;
+/**
+ * Names the list or its tasks as the thing asked ABOUT: "המשימות", "ברשימה",
+ * "מהרשימה", "tasks", "the list". A Hebrew word with any other letter in front
+ * does not count, so "לרשימה" / "למשימות" ("to the list") never match.
+ */
+const NAMES_LIST = /(?<!\p{L})(?:ה|ב|מה)?(?:רשימ|משימ)|\b(?:lists?|tasks?|to-?dos?)\b/iu;
+/** Asks what to ADD: such a question is a command, not a question about the list. */
+const ADDS_TO_LIST =
+  /(?<!\p{L})(?:להוסיף|תוסיפי|הוסיפי)(?!\p{L})|\badd\b|\bto (?:the |our |my )?(?:list|tasks)\b/iu;
 /** Opens like a question: "מה …", "איזה …", "which …", "anything …". */
 const QUESTION_START =
   /^(?:מה|מהן|מהם|איזה|איזו|אילו|כמה|מי|האם|what|what's|whats|which|anything)(?![\p{L}\p{N}'])/iu;
 
 /**
- * A one-line question about the list ("@Rosey מה עם המשימות של השבוע?") that
- * missed LIST_PHRASES. It is not a list request (that stays a fixed pattern),
- * but it is never an item either: storing a question as a task is the worse
- * mistake. "לקנות רשימה של מתנות" is no question, and stays a task.
+ * A one-line question about the list itself ("@Rosey מה עם המשימות של
+ * השבוע?") that missed LIST_PHRASES. It is not a list request (that stays a
+ * fixed pattern), but it is never an item either: storing a question about the
+ * list as a task is the worse mistake. Everything else falls through to the
+ * command parser: "לקנות רשימה של מתנות" is no question, and "מה לקנות
+ * לרשימה" asks what to add, so both become items.
  */
 function isListQuestion(lines: readonly string[]): boolean {
   if (lines.length !== 1) return false;
   const line = lines[0]!.replace(/[\u200e\u200f]/g, "").replace(/^[\s,:]+/, "");
-  return NAMES_LIST.test(line) && (/[?？]\s*$/u.test(line) || QUESTION_START.test(line));
+  return (
+    NAMES_LIST.test(line) &&
+    !ADDS_TO_LIST.test(line) &&
+    (/[?？]\s*$/u.test(line) || QUESTION_START.test(line))
+  );
 }
 
 const LIST_KEYS = new Set(LIST_PHRASES);
