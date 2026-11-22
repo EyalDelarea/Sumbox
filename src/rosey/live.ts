@@ -28,7 +28,7 @@ import {
 } from "../db/repositories/group-command-permissions.js";
 import { getMessageIdByExternalId } from "../db/repositories/messages.js";
 import { groupIdForJid, isRoseyPost } from "../db/repositories/rosey-tasks.js";
-import { captureMessage } from "./capture.js";
+import { captureMessage, quotedStanzaId } from "./capture.js";
 import { applyCommand } from "./commands.js";
 import { loadRoseyConfig, type RoseyConfig } from "./config.js";
 import { commandStore, type Generate, makeGenerate, runAggregation } from "./run.js";
@@ -44,6 +44,14 @@ export const LIVE_SUGGEST_DAYS = 14;
  * collector first. Only the owner's own commands pay this.
  */
 export const OWN_ECHO_GRACE_MS = 5_000;
+
+/**
+ * A pass holds its cursor only for messages registered by this long after it
+ * began. Registration follows ingest within a tick, so a message registered
+ * later was ingested after the pass took its cursor and cannot be passed by it;
+ * holding for it too would starve a busy group's cursor.
+ */
+export const REGISTRATION_SLACK_MS = 1_000;
 
 type Log = {
   info: (obj: unknown, msg?: string) => void;
@@ -67,6 +75,8 @@ export function makeRoseyLive(deps: {
   now?: () => number;
   /** Injectable for tests; defaults to OWN_ECHO_GRACE_MS. */
   ownEchoGraceMs?: number;
+  /** Injectable for tests; defaults to REGISTRATION_SLACK_MS. */
+  registrationSlackMs?: number;
 }): RoseyLive {
   const { pool, cfg, log } = deps;
   const clock = deps.now ?? Date.now;
@@ -91,8 +101,12 @@ export function makeRoseyLive(deps: {
    * - decided: the live path took it as a command and finished (applied, or
    *   decided without effect). The catch-up never replays it; it is forgotten
    *   once a pass of its group moves the cursor past it.
-   * - anything else (a throw before the command applied, a stale replay, chatter)
-   *   leaves the registry, so the catch-up sees it like any other message.
+   * - anything else (a throw before the command applied, a stale replay, a
+   *   failed allowlist read, chatter) leaves the registry, so the catch-up sees
+   *   it like any other message — except a QUOTED command the catch-up would
+   *   have to replay: the catch-up cannot see quotes, so replaying it could close
+   *   a task the sender never pointed at. It is kept as decided, and logged.
+   * - a second delivery of an id already registered is ignored.
    *
    * In memory only: a restart forgets it, so a command decided without effect
    * (no match) just before a restart is tried once more by the next pass.
@@ -100,27 +114,33 @@ export function makeRoseyLive(deps: {
   type Handling = {
     groupId: number | null;
     state: "pending" | "decided" | "released";
-    /** Released to the catch-up: a command it must still replay. */
-    replay: boolean;
+    /** Date.now() at registration. */
+    registeredAt: number;
   };
   const handling = new Map<string, Handling>();
-  /** Releases to the catch-up, counted per group (null: group never resolved). */
-  const replays = new Map<number | null, number>();
-  const replaysFor = (groupId: number) => (replays.get(groupId) ?? 0) + (replays.get(null) ?? 0);
+  /** Running passes, told of each message released to the catch-up. */
+  const watchers = new Set<(h: Handling) => void>();
   const release = (id: string, h: Handling, replay: boolean) => {
     h.state = "released";
-    h.replay = replay;
     if (handling.get(id) === h) handling.delete(id);
-    if (replay) replays.set(h.groupId, (replays.get(h.groupId) ?? 0) + 1);
+    if (replay) for (const w of watchers) w(h);
   };
+  const slackMs = deps.registrationSlackMs ?? REGISTRATION_SLACK_MS;
   const graceMs = deps.ownEchoGraceMs ?? OWN_ECHO_GRACE_MS;
 
   const suggestNow = (groupId: number) =>
     queue
       .run(groupId, async () => {
-        const ours = (h: Handling) => h.groupId === groupId || h.groupId === null; // null: unresolved
+        // null: group not resolved yet, so maybe this one.
+        const cutoff = Date.now() + slackMs;
+        const ours = (h: Handling) =>
+          (h.groupId === groupId || h.groupId === null) && h.registeredAt <= cutoff;
         const decided = [...handling].filter(([, h]) => ours(h) && h.state === "decided");
-        const replaysAtStart = replaysFor(groupId);
+        let releasedDuring = false;
+        const watch = (h: Handling) => {
+          if (ours(h)) releasedDuring = true;
+        };
+        watchers.add(watch);
         const result = await runAggregation(pool, groupId, {
           cfg,
           generate,
@@ -129,11 +149,10 @@ export function makeRoseyLive(deps: {
           // Judged when the pass ENDS: a message the pass skipped as pending may
           // still turn out to need the catch-up (its apply threw), and the new
           // cursor must not pass it. So hold while any of this group's messages
-          // is pending, or was released to the catch-up during the pass. The
-          // cost: such a pass re-reads its window next time.
+          // from before the cutoff is pending, or was released to the catch-up
+          // during the pass. The cost: such a pass re-reads its window next time.
           holdCursor: () =>
-            [...handling.values()].some((h) => ours(h) && h.state === "pending") ||
-            replaysFor(groupId) !== replaysAtStart,
+            releasedDuring || [...handling.values()].some((h) => ours(h) && h.state === "pending"),
           onBatchError: (err, b) =>
             log?.warn(
               { err, groupId, batch: b.index, size: b.size },
@@ -141,7 +160,7 @@ export function makeRoseyLive(deps: {
             ),
           onCommandError: (err, messageId) =>
             log?.warn({ err, groupId, messageId }, "rosey: replayed command failed; will retry"),
-        });
+        }).finally(() => watchers.delete(watch));
         if (result.cursorAdvanced) {
           for (const [id, h] of decided) if (handling.get(id) === h) handling.delete(id);
         }
@@ -199,8 +218,19 @@ export function makeRoseyLive(deps: {
       // next pass instead of applying now.
       const arrivedAt = clock();
       const id = msg.key?.id ?? "";
-      const h: Handling = { groupId: null, state: "pending", replay: false };
+      if (id && handling.has(id)) return; // a second delivery: already handled
+      const h: Handling = { groupId: null, state: "pending", registeredAt: Date.now() };
       if (id) handling.set(id, h);
+      /** A quoted message is never released for a replay (see the registry). */
+      const releaseOrKeep = (replay: boolean) => {
+        if (replay && quotedStanzaId(msg) !== null) {
+          h.state = "decided";
+          log?.warn(
+            { groupId: h.groupId },
+            "rosey: quoted command not applied; not replayed, its quote would be lost",
+          );
+        } else release(id, h, replay);
+      };
       let claimed = false;
       let applied = false;
       await arrivals.run(chat, () =>
@@ -233,12 +263,15 @@ export function makeRoseyLive(deps: {
         }).then(
           (r) => {
             if (claimed) h.state = "decided";
-            else release(id, h, r.kind === "ignored" && r.reason === "stale");
+            else
+              releaseOrKeep(
+                r.kind === "ignored" && (r.reason === "stale" || r.reason === "allowlist_error"),
+              );
           },
           (err: unknown) => {
             // Thrown before any command applied: the catch-up must see it.
             if (claimed && applied) h.state = "decided";
-            else release(id, h, true);
+            else releaseOrKeep(true);
             throw err;
           },
         ),

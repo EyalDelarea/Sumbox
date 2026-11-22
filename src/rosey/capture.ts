@@ -69,7 +69,7 @@ export type CaptureResult =
   | { kind: "command"; groupId: number; outcome: CommandOutcome };
 
 /** The stanza id of the message this one quotes, if it is a reply. */
-function quotedStanzaId(msg: WAMessage): string | null {
+export function quotedStanzaId(msg: WAMessage): string | null {
   const m = msg.message;
   const ctx =
     m?.extendedTextMessage?.contextInfo ??

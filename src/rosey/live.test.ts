@@ -253,7 +253,7 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
-  it("a command that throws before its apply (its quote lookup failed) is replayed", async () => {
+  it("a quoted command that fails before its apply is never replayed without its quote", async () => {
     const boom = `WA-${randomUUID()}`;
     const flakyPool = new Proxy(pool, {
       get(target, prop) {
@@ -273,14 +273,14 @@ describe("makeRoseyLive", () => {
     const live = makeRoseyLive({ pool: flakyPool, cfg, generate });
     const g = await group(true);
     await expect(deliver(live, g, "@Rosey לתקן מזגן", boom)).rejects.toThrow("db blip");
-    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
     await deliver(live, g, "צריך לקנות מסנן"); // schedules the pass
     await vi.waitFor(async () => {
-      const tags = (await listTasks(pool, g.id, { includeClosed: true })).filter(
-        (t) => t.origin === "tag",
-      );
-      expect(tags.map((t) => t.title)).toEqual(["לתקן מזגן"]);
+      expect(await listTasks(pool, g.id, { includeClosed: true })).toHaveLength(1);
     });
+    // The pass ran (its suggestion is stored) and did not replay the command:
+    // without its quote it could act on a task the sender never pointed at.
+    const tasks = await listTasks(pool, g.id, { includeClosed: true });
+    expect(tasks.map((t) => t.origin)).toEqual(["suggested"]);
     live.stop();
   });
 
@@ -332,11 +332,14 @@ describe("makeRoseyLive", () => {
      * The pass is paused after it read the messages (and took its cursor), the
      * command arrives, and the pass skips it as still being handled. Then its
      * handling fails: after the pass, for an apply queued behind it; or while
-     * the pass is still suggesting, for a slow quote lookup. Either way the
-     * cursor must not move past it, or the catch-up never sees it.
+     * the pass is still suggesting, for a slow lookup that throws, or a slow
+     * allowlist read that fails (closed). Either way the cursor must not move
+     * past it, or the catch-up never sees it.
      */
-    async function run(failure: "apply" | "quote") {
-      const boomQuote = `WA-${randomUUID()}`;
+    async function run(failure: "apply" | "lookup" | "allowlist") {
+      const cmdId = `WA-${randomUUID()}`;
+      let failLookup = false;
+      let failAllowlist = false;
       let pause: Promise<void> | null = null;
       let paused = false;
       let resume!: () => void;
@@ -353,7 +356,11 @@ describe("makeRoseyLive", () => {
             paused = true;
             await p;
           }
-          if (Array.isArray(params) && params.includes(boomQuote)) {
+          const slowFail =
+            (failLookup && Array.isArray(params) && params.includes(cmdId)) ||
+            (failAllowlist && sql.includes("group_command_permissions"));
+          if (slowFail) {
+            failLookup = failAllowlist = false;
             await new Promise((r) => setTimeout(r, 100)); // outlives the command loop
             throw new Error("db blip");
           }
@@ -386,22 +393,24 @@ describe("makeRoseyLive", () => {
       };
       const live = makeRoseyLive({ pool: flakyPool, cfg, generate: slowGenerate });
       const g = await group(true);
-      const cmdId = `WA-${randomUUID()}`;
       const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
       cmdRow = await ingest(g.id, cmdId, "@Rosey לתקן מזגן", sentAt); // before the pass reads
 
       pause = new Promise((r) => (resume = r));
       await deliver(live, g, "צריך לקנות מסנן"); // its pass reads, then pauses
       await vi.waitFor(() => expect(paused).toBe(true));
+      failLookup = failure === "lookup";
+      failAllowlist = failure === "allowlist";
       const handled = live
-        .onMessage(
-          wa(g.jid, cmdId, "@Rosey לתקן מזגן", sentAt, failure === "quote" ? boomQuote : undefined),
-        )
+        .onMessage(wa(g.jid, cmdId, "@Rosey לתקן מזגן", sentAt))
         .catch((e: unknown) => e);
-      if (failure === "quote") settled = handled;
+      if (failure !== "apply") settled = handled;
       await new Promise((r) => setTimeout(r, 20));
       resume();
-      expect(await handled).toBeInstanceOf(Error);
+      // A failed allowlist read is caught (fail closed); the others throw.
+      const outcome = await handled;
+      if (failure === "allowlist") expect(outcome).toBeUndefined();
+      else expect(outcome).toBeInstanceOf(Error);
 
       await deliver(live, g, "צריך לקנות נורה"); // the next pass
       await vi.waitFor(async () => {
@@ -414,7 +423,70 @@ describe("makeRoseyLive", () => {
     }
 
     it("its apply, queued behind the pass, throws: the next pass replays it", () => run("apply"));
-    it("its quote lookup throws during the pass: the next pass replays it", () => run("quote"));
+    it("its lookup throws during the pass: the next pass replays it", () => run("lookup"));
+    it("its allowlist read fails during the pass: the next pass replays it", () =>
+      run("allowlist"));
+  });
+
+  it("a second delivery of the same WhatsApp message is handled once", async () => {
+    const applied: unknown[] = [];
+    const log = {
+      info: (obj: unknown, msg?: string) => {
+        if (msg === "rosey: command applied") applied.push(obj);
+      },
+      warn: () => {},
+      error: () => {},
+    };
+    const live = makeRoseyLive({ pool, cfg, generate, log });
+    const g = await group(true);
+    const externalId = `WA-${randomUUID()}`;
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await ingest(g.id, externalId, "@Rosey לקנות חלב", sentAt);
+    const msg = wa(g.jid, externalId, "@Rosey לקנות חלב", sentAt);
+    await Promise.all([live.onMessage(msg), live.onMessage(msg)]);
+    await live.onMessage(msg);
+    expect(applied).toHaveLength(1);
+    live.stop();
+  });
+
+  it("a command that arrives well after a pass began does not hold its cursor", async () => {
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let passStarted = false;
+    const slowModel = async (system: string, user: string) => {
+      if (system !== DEDUP_SYSTEM) {
+        passStarted = true;
+        await released;
+      }
+      return generate(system, user);
+    };
+    const passes: boolean[] = [];
+    const log = {
+      info: (obj: unknown, msg?: string) => {
+        if (msg?.startsWith("rosey: suggestion pass")) {
+          passes.push((obj as { cursorAdvanced: boolean }).cursorAdvanced);
+        }
+      },
+      warn: () => {},
+      error: () => {},
+    };
+    const live = makeRoseyLive({
+      pool,
+      cfg,
+      generate: slowModel,
+      log,
+      registrationSlackMs: 0,
+    });
+    const g = await group(true);
+    await deliver(live, g, "צריך לסדר את הארון");
+    await vi.waitFor(() => expect(passStarted).toBe(true));
+    // Ingested after the pass took its cursor: the cursor can never pass it.
+    const pending = deliver(live, g, "@Rosey לקנות נורות"); // queued behind the pass
+    await new Promise((r) => setTimeout(r, 30));
+    release();
+    await pending;
+    await vi.waitFor(() => expect(passes).toEqual([true]));
+    live.stop();
   });
 
   it("applies commands in arrival order even when the first one's lookups are slower", async () => {
