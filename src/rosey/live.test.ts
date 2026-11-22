@@ -178,7 +178,7 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
-  it("a command whose live apply threw is replayed by the next pass", async () => {
+  it("a command whose live apply threw is replayed by a pass it schedules, with no new chat", async () => {
     let failTaskInsert = true;
     const flakyPool = new Proxy(pool, {
       get(target, prop) {
@@ -203,9 +203,7 @@ describe("makeRoseyLive", () => {
     const live = makeRoseyLive({ pool: flakyPool, cfg, generate });
     const g = await group(true);
     await expect(deliver(live, g, "@Rosey לתקן מזגן")).rejects.toThrow("db blip");
-    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
-
-    await deliver(live, g, "צריך לקנות מסנן"); // any chatter schedules the pass
+    // Nothing else is said in the group: the failure itself schedules the pass.
     await vi.waitFor(async () => {
       const tags = (await listTasks(pool, g.id, { includeClosed: true })).filter(
         (t) => t.origin === "tag",

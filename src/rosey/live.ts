@@ -125,7 +125,10 @@ export function makeRoseyLive(deps: {
   const release = (id: string, h: Handling, replay: boolean) => {
     h.state = "released";
     if (handling.get(id) === h) handling.delete(id);
-    if (replay) for (const w of watchers) w(h);
+    if (!replay) return;
+    for (const w of watchers) w(h);
+    // Its group's catch-up must run even if the chat then goes quiet.
+    if (h.groupId !== null) scheduleSuggestions(h.groupId);
   };
   const slackMs = deps.registrationSlackMs ?? REGISTRATION_SLACK_MS;
   const graceMs = deps.ownEchoGraceMs ?? OWN_ECHO_GRACE_MS;
