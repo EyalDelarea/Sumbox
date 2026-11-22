@@ -11,8 +11,9 @@
  *     (being on the /סיכום or @Aida list does not count);
  *  3. not one of Rosey's own posts (rosey_messages) — no loops, ever;
  *  4. live: sent within the last 120 s, so a reconnect replay never acts;
- *  5. not addressed to @Aida: a message that wakes her (her tag, anywhere) is
- *     hers alone, so "@Aida what did @Rosey add?" is answered once, by her;
+ *  5. not addressed to @Aida: a message that wakes her is hers alone, so
+ *     "@Aida what did @Rosey add?" is answered once, by her. She wakes on her
+ *     tag anywhere in the text, or on a reply quoting one of her posts;
  *  6. not one of @Aida's posts (aida_messages). Her posts come from the owner's
  *     account (from_me), and her marker is written only after her send
  *     resolves — her echo can reach us first. So a from_me command waits a
@@ -139,6 +140,12 @@ export async function captureMessage(msg: WAMessage, deps: CaptureDeps): Promise
   }
   deps.claimCommand(messageId);
   const quoted = quotedStanzaId(msg);
+  // A reply quoting @Aida's post wakes her (src/collector/ask-command.ts), so it
+  // is hers. Checked after the claim: the catch-up cannot see quotes, so it must
+  // never replay this one as an unquoted command.
+  if (quoted && (await deps.isAidaPost(groupId, quoted))) {
+    return { kind: "ignored", reason: "aida_reply" };
+  }
   const quotedMessageId = quoted ? await deps.messageIdFor(groupId, quoted) : null;
   if (quoted && quotedMessageId === null) {
     // The quote is the command's scope. Matching without it could close a task

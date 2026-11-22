@@ -219,6 +219,22 @@ describe("captureMessage — @Aida is never answered twice", () => {
     expect(calls.applied).toHaveLength(1);
   });
 
+  it("ignores a reply quoting @Aida's post, which wakes her, and the catch-up may not replay it", async () => {
+    const { d, calls } = deps({ isAidaPost: async (_g, id) => id === "WA-AIDA" });
+    expect(await captureMessage(wa("@Rosey בוצע חלב", { quotedId: "WA-AIDA" }), d)).toEqual({
+      kind: "ignored",
+      reason: "aida_reply",
+    });
+    expect(calls.applied).toEqual([]);
+    expect(calls.claimed).toEqual([501]);
+  });
+
+  it("the other direction: a reply quoting anyone else's message is still Rosey's", async () => {
+    const { d, calls } = deps({ isAidaPost: async (_g, id) => id === "WA-AIDA" });
+    await captureMessage(wa("@רוזי בוצע", { quotedId: "WA-Q" }), d);
+    expect(calls.applied).toHaveLength(1);
+  });
+
   it("a member's command (not from_me) never waits: only the owner's account can be @Aida", async () => {
     const { d, calls } = deps();
     await captureMessage(wa("@Rosey לקנות חלב"), d);
