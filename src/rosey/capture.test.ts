@@ -32,6 +32,7 @@ function deps(over: Partial<CaptureDeps> = {}) {
     scheduled: [] as number[],
     graces: 0,
     claimed: [] as number[],
+    listed: [] as Array<{ groupId: number; jid: string; requestId: string | null | undefined }>,
   };
   const d: CaptureDeps = {
     matcher: makeTagMatcher(["@Rosey", "@רוזי"]),
@@ -52,6 +53,10 @@ function deps(over: Partial<CaptureDeps> = {}) {
       return { kind: "added", created: 1, confirmed: 0, alreadyOpen: 0 };
     },
     scheduleSuggestions: (g) => calls.scheduled.push(g),
+    replyList: async (req) => {
+      calls.listed.push({ groupId: req.groupId, jid: req.jid, requestId: req.request.key?.id });
+      return { kind: "dry_run", chars: 10 };
+    },
     now: () => NOW,
     ...over,
   };
@@ -240,5 +245,66 @@ describe("captureMessage — @Aida is never answered twice", () => {
     await captureMessage(wa("@Rosey לקנות חלב"), d);
     expect(calls.graces).toBe(0);
     expect(calls.applied).toHaveLength(1);
+  });
+});
+
+describe("captureMessage — list request (the one path that may reply)", () => {
+  it("a live tagged list request from a member asks for a reply, quoting that request", async () => {
+    const { d, calls } = deps();
+    const r = await captureMessage(wa("@רוזי מה המשימות?"), d);
+    expect(r).toEqual({ kind: "list", groupId: 9, outcome: { kind: "dry_run", chars: 10 } });
+    expect(calls.listed).toEqual([{ groupId: 9, jid: GROUP_JID, requestId: "WA-1" }]);
+    expect(calls.applied).toEqual([]);
+    expect(calls.claimed).toEqual([]);
+    expect(calls.scheduled).toEqual([]);
+  });
+
+  it("nothing but a list request reaches the reply", async () => {
+    for (const text of [
+      "מה המשימות?", // untagged
+      "@Rosey לקנות חלב", // an add
+      "@Rosey done חלב", // a done
+      "@רוזי מה יש לאכול", // a near miss is an add
+      "@Rosey", // a bare tag
+      "סתם הודעה",
+    ]) {
+      const { d, calls } = deps();
+      await captureMessage(wa(text), d);
+      expect(calls.listed, text).toEqual([]);
+    }
+  });
+
+  it("a list request that also wakes @Aida is hers: no reply", async () => {
+    const { d, calls } = deps();
+    expect(await captureMessage(wa("@Aida @Rosey list"), d)).toEqual({
+      kind: "ignored",
+      reason: "aida_trigger",
+    });
+    expect(calls.listed).toEqual([]);
+  });
+
+  it("a list request quoting @Aida's post wakes her: no reply", async () => {
+    const { d, calls } = deps({ isAidaPost: async (_g, id) => id === "WA-AIDA" });
+    const r = await captureMessage(wa("@Rosey list", { quotedId: "WA-AIDA" }), d);
+    expect(r).toEqual({ kind: "ignored", reason: "aida_reply" });
+    expect(calls.listed).toEqual([]);
+  });
+
+  it("an @Aida post that reads like a list request is never answered", async () => {
+    const { d, calls } = deps({ isAidaPost: async () => true });
+    const r = await captureMessage(wa("@Rosey list", { fromMe: true }), d);
+    expect(r).toEqual({ kind: "ignored", reason: "aida_post" });
+    expect(calls.graces).toBe(1);
+    expect(calls.listed).toEqual([]);
+  });
+
+  it("a replayed (stale) list request, another group, or her own post never gets a reply", async () => {
+    const stale = deps();
+    await captureMessage(wa("@Rosey list", { ageMs: LIVENESS_WINDOW_MS + 1000 }), stale.d);
+    const offList = deps({ resolveEnabledJids: async () => new Set(["other@g.us"]) });
+    await captureMessage(wa("@Rosey list"), offList.d);
+    const own = deps({ isOwnPost: async () => true });
+    await captureMessage(wa("@Rosey list"), own.d);
+    for (const h of [stale, offList, own]) expect(h.calls.listed).toEqual([]);
   });
 });

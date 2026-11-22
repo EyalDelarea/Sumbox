@@ -1,6 +1,7 @@
 /**
  * capture.ts — Rosey's live path: one incoming WhatsApp message in, at most a
- * store write out. RECEIVE ONLY — this path has no way to send anything.
+ * store write out — or, for a list request alone, a call to her send gate
+ * (reply.ts), which decides whether a reply may leave. This file sends nothing.
  *
  * Runs as a sibling of ingest, /סיכום and @Aida in the collector, AFTER the
  * message has been ingested (a task must cite the stored message row).
@@ -19,8 +20,10 @@
  *     resolves — her echo can reach us first. So a from_me command waits a
  *     short grace before the marker is read. A member's message is never hers,
  *     and never waits.
- * Then a tagged message is applied as an explicit command; an untagged one only
- * schedules the group's debounced suggestion pass.
+ * Then a tagged LIST REQUEST (tags.ts LIST_PHRASES, a fixed set) is handed to
+ * `replyList` — after the same @Aida checks a command gets — and nothing else
+ * ever is; a tagged message is applied as an explicit command; an untagged one
+ * only schedules the group's debounced suggestion pass.
  */
 
 import type { WAMessage } from "@whiskeysockets/baileys";
@@ -29,6 +32,7 @@ import type { WAMessage } from "@whiskeysockets/baileys";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
 import { mapWaMessage } from "../collector/message-mapper.js";
 import type { CommandOutcome } from "./commands.js";
+import type { ListReplyOutcome } from "./reply.js";
 import type { RoseyCommand, TagMatcher } from "./tags.js";
 
 /** Same liveness horizon as @Aida and /סיכום: older is a replay. */
@@ -55,6 +59,15 @@ export type CaptureDeps = {
     ctx: { groupId: number; messageId: number; sentAt: Date; quotedMessageId: number | null },
   ) => Promise<CommandOutcome>;
   scheduleSuggestions: (groupId: number) => void;
+  /**
+   * Answer a live list request from this group (her send gate, reply.ts).
+   * `request` is the message to quote. Called for nothing else.
+   */
+  replyList: (req: {
+    groupId: number;
+    jid: string;
+    request: WAMessage;
+  }) => Promise<ListReplyOutcome>;
   log?: {
     info: (obj: unknown, msg?: string) => void;
     warn: (obj: unknown, msg?: string) => void;
@@ -66,7 +79,8 @@ export type CaptureDeps = {
 export type CaptureResult =
   | { kind: "ignored"; reason: string }
   | { kind: "scheduled"; groupId: number }
-  | { kind: "command"; groupId: number; outcome: CommandOutcome };
+  | { kind: "command"; groupId: number; outcome: CommandOutcome }
+  | { kind: "list"; groupId: number; outcome: ListReplyOutcome };
 
 /** The stanza id of the message this one quotes, if it is a reply. */
 export function quotedStanzaId(msg: WAMessage): string | null {
@@ -113,6 +127,23 @@ export async function captureMessage(msg: WAMessage, deps: CaptureDeps): Promise
 
   const text = (mapped.textContent ?? "").trim();
   if (matchAskTrigger(text)) return { kind: "ignored", reason: "aida_trigger" };
+
+  if (deps.matcher.isListRequest(text)) {
+    // Not a command: nothing is stored and nothing is claimed, so the catch-up
+    // sees it — and parses it to nothing (tags.ts), so it never replays a reply.
+    if (mapped.fromMe) {
+      await deps.ownEchoGrace();
+      if (await deps.isAidaPost(groupId, mapped.externalId)) {
+        return { kind: "ignored", reason: "aida_post" };
+      }
+    }
+    const quoted = quotedStanzaId(msg);
+    if (quoted && (await deps.isAidaPost(groupId, quoted))) {
+      return { kind: "ignored", reason: "aida_reply" };
+    }
+    const outcome = await deps.replyList({ groupId, jid: mapped.remoteJid, request: msg });
+    return { kind: "list", groupId, outcome };
+  }
 
   const cmd = deps.matcher.parse(text);
   if (!cmd) {
