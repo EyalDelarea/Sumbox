@@ -79,6 +79,33 @@ describe("parseSuggestions", () => {
     expect(out?.items).toHaveLength(1);
   });
 
+  it("one garbled id does not sink the batch: the other items are kept, the bad one counted", () => {
+    // Measured on the real chat: the local model sometimes emits a corrupted id
+    // ("m": 10625cut57), which made the WHOLE reply unparseable — every item lost.
+    const reply = `{"items": [
+  {"m": 10, "kind": "grocery", "text": "חלב"},
+  {"m": 1x0, "kind": "grocery", "text": "לחם"},
+  {"m": 11, "kind": "past", "text": "לתקן ברז"}
+]}`;
+    const out = parseSuggestions(reply, batch);
+    expect(out?.items).toEqual([
+      { sourceMessageId: 10, itemIndex: 0, title: "חלב", kind: "grocery" },
+    ]);
+    expect(out?.rejected).toEqual({ malformed_object: 1 });
+    expect(out?.droppedByKind).toEqual({ past: 1 });
+  });
+
+  it("a cut-off reply is still a batch failure, even when its first items are whole", () => {
+    const reply = '{"items": [{"m": 10, "kind": "grocery", "text": "חלב"}, {"m": 10, "kind": "gro';
+    expect(parseSuggestions(reply, batch)).toBeNull();
+  });
+
+  it("an items array whose every object is broken is a batch failure", () => {
+    expect(
+      parseSuggestions('{"items": [{"m": 1x0, "kind": "task", "text": "x"}]}', batch),
+    ).toBeNull();
+  });
+
   it("rejects a citation to a message outside the batch (an invented id)", () => {
     const out = parseSuggestions('{"items":[{"m":999,"kind":"task","text":"x"}]}', batch);
     expect(out?.items).toEqual([]);

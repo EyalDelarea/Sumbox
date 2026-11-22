@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lastJsonValue, titleKey } from "./text.js";
+import { lastJsonValue, salvageItemObjects, titleKey } from "./text.js";
 
 describe("titleKey", () => {
   it("ignores case, punctuation, emoji, niqqud, and spacing", () => {
@@ -40,5 +40,31 @@ describe("lastJsonValue", () => {
   it("returns null when there is no JSON at all", () => {
     expect(lastJsonValue("no json here")).toBeNull();
     expect(lastJsonValue('{"unterminated": ')).toBeNull();
+  });
+});
+
+describe("salvageItemObjects", () => {
+  it("keeps every well-formed object of the items array and counts the broken ones", () => {
+    const reply =
+      '```json\n{"items": [{"m": 1, "text": "a"}, {"m": 10625cut57, "text": "b"}, {"m": 2, "text": "}{"}]}\n```';
+    expect(salvageItemObjects(reply)).toEqual({
+      objects: [
+        { m: 1, text: "a" },
+        { m: 2, text: "}{" },
+      ],
+      malformed: 1,
+    });
+  });
+
+  it("an items array that never closes is a truncated reply: nothing is salvaged", () => {
+    expect(salvageItemObjects('{"items": [{"m": 1, "text": "a"}, {"m": 2, "te')).toBeNull();
+    expect(
+      salvageItemObjects('{"items": [{"m": 1, "text": "a"}, {"m": 2, "text": "b"}'),
+    ).toBeNull();
+  });
+
+  it("no items array at all is nothing to salvage", () => {
+    expect(salvageItemObjects("no tasks here")).toBeNull();
+    expect(salvageItemObjects('{"tasks": [{"m": 1}]}')).toBeNull();
   });
 });

@@ -51,6 +51,42 @@ export function lastJsonValue(text: string, accept: (v: unknown) => boolean = ()
   return null;
 }
 
+/**
+ * The objects of a reply's LAST `"items": [...]` array, parsed one by one —
+ * for a reply that is not valid JSON as a whole.
+ *
+ * Measured on the real chat: the local model sometimes garbles one cited id
+ * (`"m": 10625cut57`), and that one object made the whole reply unparseable,
+ * so every item of the batch was lost. Here each top-level object of the array
+ * stands alone: a broken one is counted in `malformed`, never repaired (gluing
+ * digits back together would be a guess), and the rest are kept.
+ *
+ * An array that never closes is a TRUNCATED reply and yields null: salvaging
+ * its head would read as a complete answer, and the cursor would move past the
+ * items the model never got to write.
+ */
+export function salvageItemObjects(text: string): { objects: unknown[]; malformed: number } | null {
+  const key = /"items"\s*:\s*\[/g;
+  let open = -1;
+  for (let m = key.exec(text); m; m = key.exec(text)) open = m.index + m[0].length - 1;
+  if (open < 0) return null;
+  const close = closesAt(text, open);
+  if (close < 0) return null;
+  const out = { objects: [] as unknown[], malformed: 0 };
+  for (let i = open + 1; i < close; i++) {
+    if (text[i] !== "{") continue;
+    const end = closesAt(text, i);
+    if (end < 0 || end > close) return null;
+    try {
+      out.objects.push(JSON.parse(text.slice(i, end + 1)));
+    } catch {
+      out.malformed++;
+    }
+    i = end;
+  }
+  return out;
+}
+
 /** Index of the bracket opening the value that closes at `close`, or -1. */
 function matchingOpen(text: string, close: number): number {
   // Walk forward from each candidate opener and see whether it closes exactly at

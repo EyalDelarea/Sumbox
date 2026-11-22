@@ -28,7 +28,7 @@ import type { RoseySourceMessage } from "../db/repositories/rosey-tasks.js";
 import { resolveSenderName } from "../summarization/sender-name.js";
 import type { RoseyItemKind } from "./kind.js";
 import { MAX_TITLE_CHARS } from "./tags.js";
-import { lastJsonValue } from "./text.js";
+import { lastJsonValue, salvageItemObjects } from "./text.js";
 
 /** Characters of one message shown to the model; a long message is still read, only trimmed. */
 const MAX_MESSAGE_CHARS = 600;
@@ -47,7 +47,13 @@ export type SuggestedItem = {
   kind: RoseyItemKind;
 };
 
-export type RejectReason = "not_an_object" | "unknown_message_id" | "bad_kind" | "empty_text";
+export type RejectReason =
+  | "not_an_object"
+  | "unknown_message_id"
+  | "bad_kind"
+  | "empty_text"
+  /** Not valid JSON on its own (a garbled id); its siblings are still read. */
+  | "malformed_object";
 
 export type ParsedSuggestions = {
   items: SuggestedItem[];
@@ -108,12 +114,20 @@ export function parseSuggestions(
   batch: readonly RoseySourceMessage[],
 ): ParsedSuggestions | null {
   const json = lastJsonValue(reply, isSuggestionList);
-  const list = Array.isArray(json)
+  let list = Array.isArray(json)
     ? json
     : json && typeof json === "object" && Array.isArray((json as { items?: unknown }).items)
       ? (json as { items: unknown[] }).items
       : null;
-  if (!list) return null;
+  let malformed = 0;
+  if (!list) {
+    // No valid answer as a whole: read its items array object by object. A
+    // truncated reply, or one with nothing whole in it, is still a failure.
+    const salvaged = salvageItemObjects(reply);
+    if (!salvaged || salvaged.objects.length === 0) return null;
+    list = salvaged.objects;
+    malformed = salvaged.malformed;
+  }
 
   const ids = new Set(batch.map((m) => m.messageId));
   const nextIndex = new Map<number, number>();
@@ -121,6 +135,7 @@ export function parseSuggestions(
   const reject = (r: RejectReason) => {
     out.rejected[r] = (out.rejected[r] ?? 0) + 1;
   };
+  if (malformed > 0) out.rejected.malformed_object = malformed;
 
   for (const raw of list) {
     if (!raw || typeof raw !== "object") {
