@@ -437,18 +437,56 @@ describe("RabbitMqJobBus — integration (testcontainers)", () => {
     }
   }, 60_000);
 
+  /**
+   * Consumers on a queue as the broker reports them, or -1 if the queue does not
+   * exist. Probes through rabbitmqctl, not a second bus: a bus would assert
+   * (re-create) the queue itself and hide whether the consumer's own bus did.
+   */
+  async function brokerConsumersOn(queue: string): Promise<number> {
+    const res = await container.exec(["rabbitmqctl", "-q", "list_queues", "name", "consumers"]);
+    const row = res.output
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .find(([name]) => name === queue);
+    return row ? Number(row[1]) : -1;
+  }
+
+  it("re-subscribes after the broker cancels its consumer (queue deleted), with the connection still up", async () => {
+    // analyze.image's earlier test has closed its buses, so this one's counts are exact.
+    const bus = makeBus(new InMemoryJobRunRecorder());
+
+    try {
+      const received: string[] = [];
+      await bus.consume(
+        "analyze.image",
+        async (job) => {
+          received.push(job.payload.messageId);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await brokerConsumersOn("jobs.analyze.image")) === 1, 5_000);
+
+      // The broker cancels the consumer (basic.cancel) but keeps the channel open,
+      // so no close event fires: amqplib hands the consumer a null message instead.
+      const res = await container.exec(["rabbitmqctl", "delete_queue", "jobs.analyze.image"]);
+      expect(res.exitCode).toBe(0);
+
+      await waitUntil(async () => (await brokerConsumersOn("jobs.analyze.image")) === 1, 15_000);
+      const producer = makeBus(new InMemoryJobRunRecorder());
+      try {
+        await producer.enqueue("analyze.image", { messageId: "after-cancel" });
+      } finally {
+        await producer.close();
+      }
+      await waitUntil(() => received.includes("after-cancel"), 10_000);
+    } finally {
+      await bus.close();
+    }
+  }, 60_000);
+
   it("re-creates its queue when the broker comes back empty, then consumes", async () => {
     const bus = makeBus(new InMemoryJobRunRecorder());
-    // Probe through rabbitmqctl, not a second bus: a bus would assert (re-create)
-    // the queue itself and hide whether the consumer's own reconnect did.
-    const brokerConsumers = async (): Promise<number> => {
-      const res = await container.exec(["rabbitmqctl", "-q", "list_queues", "name", "consumers"]);
-      const row = res.output
-        .split("\n")
-        .map((line) => line.trim().split(/\s+/))
-        .find(([name]) => name === "jobs.summarize.total");
-      return row ? Number(row[1]) : -1; // -1: the queue does not exist
-    };
+    const brokerConsumers = () => brokerConsumersOn("jobs.summarize.total");
 
     try {
       const received: string[] = [];
@@ -462,9 +500,15 @@ describe("RabbitMqJobBus — integration (testcontainers)", () => {
       await waitUntil(async () => (await brokerConsumers()) === 1, 5_000);
 
       // A broker restarted on a fresh node has no queues, and drops every connection.
-      await container.exec(["rabbitmqctl", "delete_queue", "jobs.summarize.total"]);
+      const deleted = await container.exec(["rabbitmqctl", "delete_queue", "jobs.summarize.total"]);
+      expect(deleted.exitCode).toBe(0);
       expect(await brokerConsumers()).toBe(-1);
-      await container.exec(["rabbitmqctl", "close_all_connections", "test: fresh broker"]);
+      const closed = await container.exec([
+        "rabbitmqctl",
+        "close_all_connections",
+        "test: fresh broker",
+      ]);
+      expect(closed.exitCode).toBe(0);
 
       await waitUntil(async () => (await brokerConsumers()) === 1, 15_000);
       const producer = makeBus(new InMemoryJobRunRecorder());
