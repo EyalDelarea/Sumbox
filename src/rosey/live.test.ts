@@ -750,6 +750,19 @@ describe("makeRoseyLive — the list reply", () => {
     live.stop();
   });
 
+  it("live: WhatsApp delivering the same request twice gets one reply", async () => {
+    const p = probe();
+    const live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender: p.sender });
+    const g = await group(true);
+    const externalId = `WA-${randomUUID()}`;
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await ingest(g.id, externalId, "@רוזי רשימה", sentAt);
+    await live.onMessage(wa(g.jid, externalId, "@רוזי רשימה", sentAt));
+    await live.onMessage(wa(g.jid, externalId, "@רוזי רשימה", sentAt));
+    expect(p.sent).toHaveLength(1);
+    live.stop();
+  });
+
   it("live: a group not on her list gets nothing", async () => {
     const p = probe();
     const live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender: p.sender });

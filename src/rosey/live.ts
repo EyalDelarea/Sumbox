@@ -321,7 +321,9 @@ export function makeRoseyLive(deps: {
           log,
         }).then(
           (r) => {
-            if (claimed) h.state = "decided";
+            // A list request stays registered as decided, so a second delivery
+            // of it (WhatsApp re-emits a message) never gets a second reply.
+            if (claimed || r.kind === "list") h.state = "decided";
             else
               releaseOrKeep(
                 r.kind === "ignored" && (r.reason === "stale" || r.reason === "allowlist_error"),
