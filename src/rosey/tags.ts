@@ -105,13 +105,17 @@ function listKey(rest: string): string {
 
 /**
  * Names the list or its tasks as the thing asked ABOUT: "המשימות", "ברשימה",
- * "מהרשימה", "tasks", "the list". A Hebrew word with any other letter in front
- * does not count, so "לרשימה" / "למשימות" ("to the list") never match.
+ * "מהרשימה", "והמשימות", "tasks", "the list". A Hebrew word counts bare or
+ * after ו / ש and ה / ב / מה; with any other letter in front it does not, so
+ * "לרשימה" / "למשימות" ("to the list") never match.
  */
-const NAMES_LIST = /(?<!\p{L})(?:ה|ב|מה)?(?:רשימ|משימ)|\b(?:lists?|tasks?|to-?dos?)\b/iu;
-/** Asks what to ADD: such a question is a command, not a question about the list. */
+const NAMES_LIST = /(?<!\p{L})[וש]?(?:ה|ב|מה)?(?:רשימ|משימ)|\b(?:lists?|tasks?|to-?dos?)\b/iu;
+/**
+ * Asks what to ADD ("מה להוסיף", "what should I add"): such a question is a
+ * command, not a question about the list. "what did we add" is about the list.
+ */
 const ADDS_TO_LIST =
-  /(?<!\p{L})(?:להוסיף|תוסיפי|הוסיפי)(?!\p{L})|\badd\b|\bto (?:the |our |my )?(?:list|tasks)\b/iu;
+  /(?<!\p{L})(?:להוסיף|תוסיפי|הוסיפי)(?!\p{L})|\b(?:to add|(?:should|can|could|shall) (?:i|we) add)\b/iu;
 /** Opens like a question: "מה …", "איזה …", "which …", "anything …". */
 const QUESTION_START =
   /^(?:מה|מהן|מהם|איזה|איזו|אילו|כמה|מי|האם|what|what's|whats|which|anything)(?![\p{L}\p{N}'])/iu;

@@ -195,6 +195,9 @@ describe("list request", () => {
       "@רוזי מה נשאר ברשימה להיום",
       "@Rosey which tasks are still open?",
       "@Rosey anything left on the list?",
+      "@Rosey what did we add to the list?",
+      "@רוזי והמשימות של מחר?",
+      "@רוזי מה שברשימה עוד פתוח?",
     ]) {
       expect(rosey.parse(text), text).toBeNull();
     }
