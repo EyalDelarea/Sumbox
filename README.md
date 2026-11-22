@@ -193,7 +193,7 @@ The linked device reads passively, but it **does send** to groups you enable. He
 - **Blocked everywhere else:** `sendMessage` and `relayMessage` throw for any chat that is not enabled. The enabled set is re-read from the database on every send, so toggling a group takes effect on its next message without a restart, and a database error blocks the send.
 - **Lifting the guard:** `WHATSAPP_ALLOW_SEND=true` in `.env` removes the guard entirely. Leave it `false`.
 
-Only the collector process (`serve --collect` or `collect`) holds a WhatsApp session. The worker and plain `serve` cannot send.
+Only the live collector (`serve --collect` or `collect`) holds a session that can send. The worker and plain `serve` hold no session, and the one-off sessions opened by `full-sync` and `merge-duplicate-chats` have no enabled groups, so every send there is blocked.
 
 ---
 
