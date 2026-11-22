@@ -49,7 +49,9 @@ const generate = async (system: string, user: string) => {
   });
 };
 
-async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 3_000): Promise<T> {
+// A generous budget: under a parallel full run the shared Postgres can be slow;
+// it returns as soon as the condition holds.
+async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 10_000): Promise<T> {
   const end = Date.now() + ms;
   for (;;) {
     const v = await read();
