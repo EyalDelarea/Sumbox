@@ -1,11 +1,12 @@
 /**
  * Structural guards for Rosey's two hard boundaries, checked on the source:
  *
- *  1. She sends only through her gate. One file of hers, rosey/reply.ts (the
- *     list reply behind her send gate), may name `sendText`, and nothing else;
- *     no other file of hers names a WhatsApp send primitive at all. Each
- *     further send slice (weekly post, polls, reactions) needs its own
- *     sign-off, and changes this test on purpose, in review.
+ *  1. She sends only through her gates. Two files of hers may each name ONE
+ *     send primitive: rosey/reply.ts (the text list reply) `sendText`, and
+ *     rosey/poll.ts (the list as polls, D8) `sendPoll`; no other file of hers
+ *     names a WhatsApp send primitive at all. Each further send slice (weekly
+ *     post, reactions) needs its own sign-off, and changes this test on
+ *     purpose, in review.
  *  2. She is isolated from @Aida (D6): no module she can load — directly or
  *     through any chain of imports, static or dynamic — lives in src/ask.
  *
@@ -76,9 +77,11 @@ function resolve(from: string, spec: string, read: Reader): string | null {
 }
 
 const SEND_PRIMITIVES = /\b(sendText|sendMessage|relayMessage|sendPoll|quotedFrom)\b|\.react\(/;
-/** The one file that may send, and the one primitive it may name. */
-const SEND_GATE = path.join("rosey", "reply.ts");
-const GATE_PRIMITIVE = /\bsendText\b/g;
+/** The files that may send, and the one primitive each may name. */
+const SEND_GATES: ReadonlyMap<string, RegExp> = new Map([
+  [path.join("rosey", "reply.ts"), /\bsendText\b/g],
+  [path.join("rosey", "poll.ts"), /\bsendPoll\b/g],
+]);
 const ASK_DIR = `${path.join(SRC, "ask")}${path.sep}`;
 
 /** Every boundary violation reachable from `roots`, as readable lines. */
@@ -87,7 +90,8 @@ function violations(roots: readonly string[], read: Reader = diskReader): string
   const rel = (f: string) => path.relative(SRC, f);
   for (const file of roots) {
     const raw = read(file) ?? "";
-    const text = rel(file) === SEND_GATE ? raw.replace(GATE_PRIMITIVE, "") : raw;
+    const gate = SEND_GATES.get(rel(file));
+    const text = gate ? raw.replace(gate, "") : raw;
     if (SEND_PRIMITIVES.test(text)) out.push(`${rel(file)}: names a send primitive`);
     if (COMPUTED_DYNAMIC_IMPORT.test(raw)) out.push(`${rel(file)}: has a computed dynamic import`);
   }
@@ -126,9 +130,10 @@ describe("Rosey isolation", () => {
     expect(violations(roseyRoots())).toEqual([]);
   });
 
-  it("her gate exists and is the file that sends", () => {
-    const gate = fs.readFileSync(path.join(SRC, SEND_GATE), "utf8");
-    expect(gate).toMatch(GATE_PRIMITIVE);
+  it("her gates exist and are the files that send", () => {
+    for (const [file, primitive] of SEND_GATES) {
+      expect(fs.readFileSync(path.join(SRC, file), "utf8")).toMatch(primitive);
+    }
   });
 
   describe("the guard catches each kind of violation", () => {
@@ -152,6 +157,14 @@ describe("Rosey isolation", () => {
       const poll = graph({ ...clean, "rosey/reply.ts": "await sock.sendMessage(jid, { poll })" });
       expect(violations([at("rosey/reply.ts")], poll)).toEqual([
         "rosey/reply.ts: names a send primitive",
+      ]);
+      const pollInReply = graph({ ...clean, "rosey/reply.ts": "await s.sendPoll(jid, p, o)" });
+      expect(violations([at("rosey/reply.ts")], pollInReply)).toEqual([
+        "rosey/reply.ts: names a send primitive",
+      ]);
+      const textInPoll = graph({ ...clean, "rosey/poll.ts": "await s.sendText(jid, t)" });
+      expect(violations([at("rosey/poll.ts")], textInPoll)).toEqual([
+        "rosey/poll.ts: names a send primitive",
       ]);
       const elsewhere = graph({ ...clean, "rosey/live.ts": "io.sendText(jid, text)" });
       expect(violations([at("rosey/live.ts")], elsewhere)).toEqual([

@@ -84,7 +84,7 @@ export type ListSnapshot = {
 };
 
 /** A title as one line with no "@": neither bot's tag can survive it. */
-function cleanTitle(title: string): string {
+export function cleanTitle(title: string): string {
   return title.replace(/[@＠]/g, "").replace(/\s+/g, " ").trim();
 }
 
@@ -208,12 +208,16 @@ export type ListReplySkip =
   | "not_enabled"
   | "rate_limited"
   | "unsafe_text"
-  | "no_sender";
+  | "no_sender"
+  /** Polls only (poll.ts): nothing is open, so there is no checklist to post. */
+  | "nothing_open";
 
 export type ListReplyOutcome =
   | { kind: "skipped"; reason: ListReplySkip }
   | { kind: "dry_run"; chars: number }
   | { kind: "sent"; externalId: string }
+  /** Polls (poll.ts): the list went out as these poll posts. */
+  | { kind: "polls_sent"; externalIds: string[] }
   | { kind: "failed" }
   | { kind: "timed_out" };
 
