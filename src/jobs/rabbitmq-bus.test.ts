@@ -522,6 +522,57 @@ describe("RabbitMqJobBus — integration (testcontainers)", () => {
       await bus.close();
     }
   }, 60_000);
+
+  it("still has exactly one consumer after two reconnects, and delivers each job once", async () => {
+    // analyze.video's earlier test has closed its buses, so this one's counts are exact.
+    const bus = makeBus(new InMemoryJobRunRecorder());
+    const queue = "jobs.analyze.video";
+
+    // Replay subscribes one consumer at a time, so a duplicate shows up a moment
+    // after the first: wait for any consumer, give replay time to finish, then count.
+    const settledConsumers = async (): Promise<number> => {
+      await waitUntil(async () => (await brokerConsumersOn(queue)) >= 1, 15_000);
+      await new Promise((r) => setTimeout(r, 1_000));
+      return brokerConsumersOn(queue);
+    };
+
+    try {
+      const received: string[] = [];
+      await bus.consume(
+        "analyze.video",
+        async (job) => {
+          received.push(job.payload.messageId);
+        },
+        { prefetch: 1 },
+      );
+      expect(await settledConsumers()).toBe(1);
+
+      for (const round of [1, 2]) {
+        const res = await container.exec([
+          "rabbitmqctl",
+          "close_all_connections",
+          `test: drop ${round}`,
+        ]);
+        expect(res.exitCode).toBe(0);
+        // Let the broker drop the old consumer. The bus waits 2s before reconnecting,
+        // so whatever settledConsumers() counts next is the re-subscribed set.
+        await new Promise((r) => setTimeout(r, 500));
+        expect(await settledConsumers()).toBe(1);
+      }
+
+      const producer = makeBus(new InMemoryJobRunRecorder());
+      try {
+        await producer.enqueue("analyze.video", { messageId: "after-two-drops" });
+      } finally {
+        await producer.close();
+      }
+      await waitUntil(() => received.includes("after-two-drops"), 10_000);
+      await new Promise((r) => setTimeout(r, 500)); // room for a duplicate delivery
+      expect(received.filter((id) => id === "after-two-drops")).toEqual(["after-two-drops"]);
+    } finally {
+      await bus.close();
+    }
+  }, 90_000);
 });
 
 // ── Fix 4: connect-race unit test (fake amqplib, no Testcontainers) ──────────
