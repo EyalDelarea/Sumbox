@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CredsUnreadableError, type StoredCreds } from "./creds-persistence.js";
-import { CollectorSession, type SessionDeps } from "./session.js";
+import { CollectorSession, type SessionDeps, textSendOptions } from "./session.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -191,5 +191,18 @@ describe("CollectorSession — connect failures count only when consecutive", ()
     await h.session.start();
     expect(h.sockets).toHaveLength(0);
     expect(h.pendingTimers()).toBe(1);
+  });
+});
+
+describe("textSendOptions", () => {
+  it("passes a quote and a caller-chosen message id to Baileys, and nothing when neither is given", () => {
+    const quoted = { key: { id: "Q" } } as never;
+    expect(textSendOptions({})).toBeUndefined();
+    expect(textSendOptions({ quoted })).toEqual({ quoted });
+    expect(textSendOptions({ messageId: "ROSEY1" })).toEqual({ messageId: "ROSEY1" });
+    expect(textSendOptions({ quoted, messageId: "ROSEY1" })).toEqual({
+      quoted,
+      messageId: "ROSEY1",
+    });
   });
 });

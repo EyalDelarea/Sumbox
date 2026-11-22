@@ -24,6 +24,8 @@
  * (WHATSAPP_ALLOW_SEND=true → config.whatsapp.allowSend), never a default.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /**
  * Where the guard reads its allowed JIDs from. A plain Set is a fixed allowlist.
  * A function is re-resolved on **every** send, so a group enabled (or disabled)
@@ -44,6 +46,20 @@ export type AllowlistSource =
  */
 export const PASSIVE_MODE_BANNER =
   "🔒 Passive mode: no read receipts, presence, or typing. Messages and reactions go ONLY to groups enabled in the commands tab (/סיכום replies, @Aida answers, error replies, and ⏳ ⏸ ✅ ❌ reactions); toggling a group takes effect on its next message, no restart. Every other chat: nothing is sent (WHATSAPP_ALLOW_SEND=true lifts this for every chat).";
+
+/**
+ * The send scope: which bot the current async call chain is sending for. A
+ * scoped allowlist (applyOutboundGuard's `scoped`) admits a JID only to sends
+ * made inside its own scope, so one bot's groups never open to another's
+ * sends. Node's AsyncLocalStorage keeps it per call chain: a concurrent
+ * @Aida send never sees Rosey's scope.
+ */
+const sendScope = new AsyncLocalStorage<string>();
+
+/** Run `fn` with every guarded send inside it attributed to `scope` (e.g. "rosey"). */
+export function withSendScope<T>(scope: string, fn: () => Promise<T>): Promise<T> {
+  return sendScope.run(scope, fn);
+}
 
 /** Methods that actively send chat content — blocked by throwing. */
 export const HARD_BLOCKED = ["sendMessage", "relayMessage"] as const;
@@ -75,20 +91,30 @@ export const SILENCED = [
  * resolved lazily — only once a send is actually attempted — so ordinary traffic
  * never pays for it, and a resolver that throws BLOCKS the send: the guard must
  * prove a JID is enabled before letting anything out.
+ *
+ * `scoped` adds per-bot allowlists: `{ rosey: … }` admits Rosey's groups ONLY
+ * to a send made inside `withSendScope("rosey", …)`. An unscoped send (@Aida,
+ * /סיכום, a reaction) to a Rosey-only group is still refused — the bot-owned
+ * gate (D7) never widens what another bot may reach.
  */
 export function applyOutboundGuard<T>(
   sock: T,
   allowSend: boolean,
   allowlist: AllowlistSource = new Set<string>(),
+  scoped: Readonly<Record<string, AllowlistSource>> = {},
 ): T {
   if (allowSend) return sock;
 
   const target = sock as unknown as Record<string, unknown>;
 
+  const has = async (source: AllowlistSource, jid: string): Promise<boolean> =>
+    (typeof source === "function" ? await source() : source).has(jid);
   const isAllowed = async (jid: unknown): Promise<boolean> => {
     if (typeof jid !== "string") return false;
-    const enabled = typeof allowlist === "function" ? await allowlist() : allowlist;
-    return enabled.has(jid);
+    if (await has(allowlist, jid)) return true;
+    const scope = sendScope.getStore();
+    const own = scope !== undefined && Object.hasOwn(scoped, scope) ? scoped[scope] : undefined;
+    return own !== undefined && (await has(own, jid));
   };
 
   for (const method of HARD_BLOCKED) {
