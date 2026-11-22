@@ -23,7 +23,7 @@
  * and two replies to one group never race the rate-limit count.
  */
 
-import type { WAMessage } from "@whiskeysockets/baileys";
+import { generateMessageIDV2, type WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
 import { isAidaMessage } from "../db/repositories/aida-messages.js";
 import {
@@ -37,13 +37,20 @@ import {
   isRoseyPost,
   jidForGroupId,
   listTasks,
+  reconcileRoseyMessageId,
   recordRoseyMessage,
   tasksDoneSince,
 } from "../db/repositories/rosey-tasks.js";
 import { captureMessage, quotedStanzaId } from "./capture.js";
 import { applyCommand } from "./commands.js";
 import { loadRoseyConfig, type RoseyConfig } from "./config.js";
-import { DONE_WINDOW_MS, guardAllowlist, type RoseySender, replyWithList } from "./reply.js";
+import {
+  DONE_WINDOW_MS,
+  ROSEY_SEND_SCOPE,
+  type RoseySender,
+  replyWithList,
+  roseySender,
+} from "./reply.js";
 import { commandStore, type Generate, makeGenerate, runAggregation } from "./run.js";
 import { GroupSerialQueue } from "./serial-queue.js";
 import { makeTagMatcher } from "./tags.js";
@@ -92,6 +99,8 @@ export function makeRoseyLive(deps: {
   registrationSlackMs?: number;
   /** The collector's session, for her one reply. Absent: the gate sends nothing. */
   sender?: RoseySender;
+  /** Injectable for tests; defaults to reply.ts's SEND_TIMEOUT_MS. */
+  sendTimeoutMs?: number;
 }): RoseyLive {
   const { pool, cfg, log } = deps;
   const clock = deps.now ?? Date.now;
@@ -311,6 +320,10 @@ export function makeRoseyLive(deps: {
                   }),
                   record: (g, externalId) =>
                     recordRoseyMessage(pool, { groupId: g, externalId, kind: "reply" }),
+                  reconcile: (g, chosen, reported) =>
+                    reconcileRoseyMessageId(pool, g, chosen, reported),
+                  newMessageId: () => generateMessageIDV2(),
+                  sendTimeoutMs: deps.sendTimeoutMs,
                   sender: deps.sender,
                   now: Date.now,
                   log,
@@ -366,24 +379,24 @@ export function roseyLiveFromEnv(
       ? "rosey: live capture on; list replies LIVE to groups on her list"
       : "rosey: live capture on",
   );
-  return makeRoseyLive({ pool, cfg, log, sender });
+  // Her scope on every send: the outbound guard admits her groups to nothing else.
+  return makeRoseyLive({ pool, cfg, log, sender: sender && roseySender(sender) });
 }
 
 /**
- * The outbound guard's allowlist for a collector: `base` (the /סיכום and @Aida
- * groups), plus Rosey's groups when she is enabled and ROSEY_SEND_MODE=live.
- * Otherwise exactly `base`, so the default guard is unchanged.
+ * The outbound guard's scoped allowlists for a collector: Rosey's groups,
+ * admitted ONLY to sends inside her send scope (reply.ts roseySender), and only
+ * when she is enabled and ROSEY_SEND_MODE=live. The shared allowlist (/סיכום and
+ * @Aida) is never widened, so @Aida can never send to a group only Rosey is in.
+ * Re-read per send; a failed read throws, which blocks the send.
  */
-export function outboundAllowlistFromEnv(
+export function roseyScopedAllowlistsFromEnv(
   pool: pg.Pool,
-  base: () => Promise<ReadonlySet<string>>,
   env: NodeJS.ProcessEnv = process.env,
-): () => Promise<ReadonlySet<string>> {
+): Record<string, () => Promise<ReadonlySet<string>>> {
   const cfg = loadRoseyConfig(env);
-  if (!cfg.enabled) return base;
-  return guardAllowlist(
-    base,
-    async () => new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY)),
-    cfg.sendMode,
-  );
+  if (!cfg.enabled || cfg.sendMode !== "live") return {};
+  return {
+    [ROSEY_SEND_SCOPE]: async () => new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY)),
+  };
 }

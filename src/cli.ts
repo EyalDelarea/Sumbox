@@ -199,10 +199,11 @@ program
     // The outbound guard reads the SAME live DB resolver the matcher uses, per
     // send — never a startup snapshot — so a group toggled on or off in the UI
     // takes effect on the very next message, with no restart.
-    // Rosey's groups join it only when ROSEY_SEND_MODE=live (her list reply).
-    const { outboundAllowlistFromEnv, roseyLiveFromEnv } = await import("./rosey/live.js");
+    // Rosey's groups are a separate scoped list, admitted only to her own sends.
+    const { roseyLiveFromEnv, roseyScopedAllowlistsFromEnv } = await import("./rosey/live.js");
     const session = await startSession(authDir, config.whatsapp.allowSend, {
-      allowlist: outboundAllowlistFromEnv(pool, cmdDeps.resolveEnabledJids),
+      allowlist: cmdDeps.resolveEnabledJids,
+      scopedAllowlists: roseyScopedAllowlistsFromEnv(pool),
     });
 
     session.on("qr", () => {

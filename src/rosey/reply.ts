@@ -19,12 +19,25 @@
  * capture.ts); this file decides whether a reply may leave.
  *
  * Every real send is recorded in rosey_messages, which is also her own-echo
- * guard. A dry run is not recorded and does not count toward the limits:
- * nothing was sent, and the ledger holds only what was.
+ * guard — and recorded BEFORE it leaves, under a message id chosen here and
+ * handed to WhatsApp, so there is no moment when her own post could come back
+ * unrecognised (and be read as chatter for the suggestion pass). A record that
+ * fails sends nothing. A send that fails or times out keeps its record: it may
+ * have reached WhatsApp anyway, so its echo must stay hers, and it counts
+ * toward the limits. A dry run is not recorded and does not count: nothing was
+ * sent.
+ *
+ * The send is bounded (sendTimeoutMs): a hung socket returns `timed_out` and
+ * releases the chat, instead of holding every later message in it.
+ *
+ * Her sends reach the shared outbound guard inside her own send scope
+ * (roseySender), so her allowlist admits her groups to HER sends only — never
+ * to @Aida's or a /סיכום post.
  */
 
 import type { WAMessage } from "@whiskeysockets/baileys";
 import { matchAskTrigger } from "../collector/ask-trigger.js";
+import { withSendScope } from "../collector/outbound-guard.js";
 import type { RoseyTask } from "../db/repositories/rosey-tasks.js";
 
 // ── Mode and limits ───────────────────────────────────────────────────────────
@@ -36,23 +49,11 @@ export function parseSendMode(raw: string | undefined): RoseySendMode {
   return raw === "dry-run" || raw === "live" ? raw : "off";
 }
 
-/**
- * The shared outbound guard's allowlist with Rosey in it: summary ∪ rosey, and
- * only in live mode — off and dry-run never send, so they never widen the
- * guard. Both are re-read on every send, and a failed read throws, which the
- * guard turns into a blocked send.
- */
-export function guardAllowlist(
-  base: () => Promise<ReadonlySet<string>>,
-  rosey: () => Promise<ReadonlySet<string>>,
-  mode: RoseySendMode,
-): () => Promise<ReadonlySet<string>> {
-  if (mode !== "live") return base;
-  return async () => {
-    const [a, b] = await Promise.all([base(), rosey()]);
-    return new Set([...a, ...b]);
-  };
-}
+/** The outbound guard's scope for Rosey's sends (its `scoped` allowlist key). */
+export const ROSEY_SEND_SCOPE = "rosey";
+
+/** How long one list-reply send may take before the chat is released. */
+export const SEND_TIMEOUT_MS = 20_000;
 
 const HOUR = 3_600_000;
 
@@ -151,14 +152,25 @@ function fitLength(lines: string[]): string {
 
 // ── The gate ──────────────────────────────────────────────────────────────────
 
-/** The one send Rosey is handed: a text reply quoting the request. */
+/** The one send Rosey is handed: a text reply quoting the request, under a chosen id. */
 export type RoseySender = {
   sendText: (
     jid: string,
     text: string,
-    opts: { quoted?: WAMessage },
+    opts: { quoted?: WAMessage; messageId?: string },
   ) => Promise<WAMessage | undefined>;
 };
+
+/**
+ * The collector session as Rosey's sender: every send runs inside her send
+ * scope, which is the only way the outbound guard admits her own groups.
+ */
+export function roseySender(session: RoseySender): RoseySender {
+  return {
+    sendText: (jid, text, opts) =>
+      withSendScope(ROSEY_SEND_SCOPE, () => session.sendText(jid, text, opts)),
+  };
+}
 
 type Log = {
   info: (obj: unknown, msg?: string) => void;
@@ -173,8 +185,14 @@ export type ListReplyDeps = {
   /** Her list replies to this group at or after `since` (rosey_messages). */
   countRepliesSince: (groupId: number, since: Date) => Promise<number>;
   loadList: (groupId: number, now: Date) => Promise<ListSnapshot>;
-  /** Record a reply she sent (rosey_messages, kind 'reply'). */
+  /** Record a reply of hers (rosey_messages, kind 'reply'). Called BEFORE the send. */
   record: (groupId: number, externalId: string) => Promise<void>;
+  /** Re-key the record to the id WhatsApp reported, when it differs from the chosen one. */
+  reconcile: (groupId: number, chosenId: string, reportedId: string) => Promise<void>;
+  /** A fresh WhatsApp message id for the reply, known before it is sent. */
+  newMessageId: () => string;
+  /** Bound on one send; defaults to SEND_TIMEOUT_MS. */
+  sendTimeoutMs?: number;
   /** Absent when the collector handed her no session: nothing can be sent. */
   sender: RoseySender | undefined;
   now: () => number;
@@ -195,8 +213,9 @@ export type ListReplySkip =
 export type ListReplyOutcome =
   | { kind: "skipped"; reason: ListReplySkip }
   | { kind: "dry_run"; chars: number }
-  | { kind: "sent"; externalId: string | null }
-  | { kind: "failed" };
+  | { kind: "sent"; externalId: string }
+  | { kind: "failed" }
+  | { kind: "timed_out" };
 
 /**
  * Reply to one list request, if the gate allows it. Run it inside the group's
@@ -240,23 +259,50 @@ export async function replyWithList(
   }
   if (!deps.sender) return skip("no_sender");
 
-  let sent: WAMessage | undefined;
+  // Recorded first: her echo can arrive before the send resolves.
+  const messageId = deps.newMessageId();
   try {
-    sent = await deps.sender.sendText(req.jid, text, { quoted: req.quoted });
+    await deps.record(req.groupId, messageId);
   } catch (err) {
-    deps.log?.error({ err, groupId: req.groupId }, "rosey: list reply failed to send");
+    deps.log?.error({ err, groupId: req.groupId }, "rosey: list reply not recorded; not sent");
     return { kind: "failed" };
   }
-  const externalId = sent?.key?.id ?? null;
-  if (externalId === null) {
-    // Sent, but with no id there is nothing to key the record on. Her echo is
-    // still never a command (it carries no tag), but it escapes the rate count.
-    deps.log?.warn({ groupId: req.groupId }, "rosey: list reply sent without an id; not recorded");
-  } else {
+
+  const send = deps.sender.sendText(req.jid, text, { quoted: req.quoted, messageId });
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<"timed_out">((resolve) => {
+    timer = setTimeout(() => resolve("timed_out"), deps.sendTimeoutMs ?? SEND_TIMEOUT_MS);
+  });
+  let sent: WAMessage | undefined | "timed_out";
+  try {
+    sent = await Promise.race([send, timedOut]);
+  } catch (err) {
+    deps.log?.error({ err, groupId: req.groupId, messageId }, "rosey: list reply failed to send");
+    return { kind: "failed" };
+  } finally {
+    clearTimeout(timer);
+  }
+  if (sent === "timed_out") {
+    // The send may still complete; its record stays so the echo is hers. A late
+    // rejection is logged here, never left unhandled.
+    send.catch((err: unknown) =>
+      deps.log?.error({ err, groupId: req.groupId, messageId }, "rosey: timed-out send failed"),
+    );
+    deps.log?.error({ groupId: req.groupId, messageId }, "rosey: list reply send timed out");
+    return { kind: "timed_out" };
+  }
+
+  const externalId = sent?.key?.id ?? messageId;
+  if (externalId !== messageId) {
+    // WhatsApp keyed it differently from the id we chose (Baileys normally
+    // keeps it): re-key her record so the echo still matches.
     await deps
-      .record(req.groupId, externalId)
+      .reconcile(req.groupId, messageId, externalId)
       .catch((err: unknown) =>
-        deps.log?.error({ err, groupId: req.groupId }, "rosey: list reply sent but not recorded"),
+        deps.log?.error(
+          { err, groupId: req.groupId, externalId },
+          "rosey: list reply's reported id not reconciled",
+        ),
       );
   }
   deps.log?.info({ groupId: req.groupId, chars: text.length }, "rosey: list reply sent");

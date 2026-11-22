@@ -9,12 +9,13 @@ import { randomUUID } from "node:crypto";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { applyOutboundGuard } from "../collector/outbound-guard.js";
 import { recordAidaMessage } from "../db/repositories/aida-messages.js";
-import { listTasks } from "../db/repositories/rosey-tasks.js";
+import { isRoseyPost, listTasks } from "../db/repositories/rosey-tasks.js";
 import { createTestDatabase } from "../test/db.js";
 import { loadRoseyConfig } from "./config.js";
 import { DEDUP_SYSTEM } from "./dedup.js";
-import { makeRoseyLive, outboundAllowlistFromEnv, roseyLiveFromEnv } from "./live.js";
+import { makeRoseyLive, roseyLiveFromEnv, roseyScopedAllowlistsFromEnv } from "./live.js";
 import { LIST_REPLY_LIMITS, type RoseySender, type RoseySendMode } from "./reply.js";
 import { setRoseyEnabled } from "./run.js";
 
@@ -696,7 +697,8 @@ describe("makeRoseyLive — the list reply", () => {
     const sender: RoseySender = {
       sendText: async (jid, text, opts) => {
         sent.push({ jid, text, quotedId: opts.quoted?.key?.id });
-        return { key: { id: `ROSEY-${randomUUID()}` } } as WAMessage;
+        // Baileys sends under the id it is given (options.messageId).
+        return { key: { id: opts.messageId } } as WAMessage;
       },
     };
     return { sent, sender };
@@ -803,18 +805,80 @@ describe("makeRoseyLive — the list reply", () => {
     live.stop();
   });
 
-  it("the outbound guard gains her groups only when she is enabled and live", async () => {
+  it("the outbound guard gets her scoped list only when she is enabled and live", async () => {
     const g = await group(true);
-    const base = async () => new Set(["summary@g.us"]);
-    const off = outboundAllowlistFromEnv(pool, base, { ROSEY_ENABLED: "true" });
-    expect((await off()).has(g.jid)).toBe(false);
-    const disabled = outboundAllowlistFromEnv(pool, base, { ROSEY_SEND_MODE: "live" });
-    expect((await disabled()).has(g.jid)).toBe(false);
-    const live = outboundAllowlistFromEnv(pool, base, {
+    expect(roseyScopedAllowlistsFromEnv(pool, { ROSEY_ENABLED: "true" })).toEqual({});
+    expect(roseyScopedAllowlistsFromEnv(pool, { ROSEY_SEND_MODE: "live" })).toEqual({});
+    const live = roseyScopedAllowlistsFromEnv(pool, {
       ROSEY_ENABLED: "true",
       ROSEY_SEND_MODE: "live",
     });
-    expect((await live()).has(g.jid)).toBe(true);
-    expect((await live()).has("summary@g.us")).toBe(true);
+    expect(Object.keys(live)).toEqual(["rosey"]);
+    const rosey = live["rosey"] as () => Promise<ReadonlySet<string>>;
+    expect((await rosey()).has(g.jid)).toBe(true);
+  });
+
+  it("end to end through the outbound guard: her reply reaches her group, a bare send does not", async () => {
+    const env = { ROSEY_ENABLED: "true", ROSEY_SEND_MODE: "live" };
+    const real: string[] = [];
+    const sock = {
+      sendMessage: async (jid: string, _c: unknown, o?: { messageId?: string }) => {
+        real.push(jid);
+        return { key: { id: o?.messageId } };
+      },
+      relayMessage: async () => undefined,
+    };
+    // The shared (@Aida, /סיכום) list is empty: only her scoped list knows the group.
+    applyOutboundGuard(
+      sock as never,
+      false,
+      new Set<string>(),
+      roseyScopedAllowlistsFromEnv(pool, env),
+    );
+    const session: RoseySender = {
+      sendText: (jid, _text, opts) =>
+        sock.sendMessage(jid, {}, { messageId: opts.messageId }) as Promise<WAMessage | undefined>,
+    };
+    const g = await group(true);
+    await expect(session.sendText(g.jid, "x", {})).rejects.toThrow(/blocked/);
+    const live = roseyLiveFromEnv(pool, undefined, env, session)!;
+    await deliver(live, g, "@רוזי רשימה");
+    expect(real).toEqual([g.jid]);
+    live.stop();
+  });
+
+  it("her post is already recorded as hers while the send is in flight", async () => {
+    let g: Awaited<ReturnType<typeof group>> | undefined;
+    const seenAsHers: boolean[] = [];
+    const sender: RoseySender = {
+      sendText: async (_jid, _text, opts) => {
+        // The echo can arrive before sendMessage resolves: check it from inside.
+        seenAsHers.push(await isRoseyPost(pool, g!.id, opts.messageId!));
+        return { key: { id: opts.messageId } } as WAMessage;
+      },
+    };
+    const live = makeRoseyLive({ pool, cfg: withMode("live"), generate, sender });
+    g = await group(true);
+    await deliver(live, g, "@רוזי רשימה");
+    expect(seenAsHers).toEqual([true]);
+    live.stop();
+  });
+
+  it("a hung send times out and releases the chat: a later command still applies", async () => {
+    const sender: RoseySender = { sendText: () => new Promise<WAMessage | undefined>(() => {}) };
+    const live = makeRoseyLive({
+      pool,
+      cfg: withMode("live"),
+      generate,
+      sender,
+      sendTimeoutMs: 50,
+    });
+    const g = await group(true);
+    await deliver(live, g, "@רוזי רשימה");
+    await deliver(live, g, "@Rosey לתקן ברז");
+    expect((await listTasks(pool, g.id)).map((t) => t.title)).toEqual(["לתקן ברז"]);
+    // The timed-out reply keeps its record: if it lands late, its echo is hers.
+    expect(await ledger(g.id)).toHaveLength(1);
+    live.stop();
   });
 });
