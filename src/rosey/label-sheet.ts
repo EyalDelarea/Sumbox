@@ -29,14 +29,14 @@ export function renderLabelSheet(input: {
             `<label><input type="radio" name="t${t.id}" value="${v}" data-task="${t.id}">${{ real: "משימה", not: "לא משימה", dup: "כפילות" }[v]}</label>`,
         )
         .join("");
-      return `<tr><td class="num">${t.id}</td><td><strong>${esc(t.title)}</strong><div class="src">${esc(src?.content ?? "(ההודעה מחוץ לחלון)")}</div></td><td class="meta">${esc(who)}<br>${t.raisedAt.toISOString().slice(0, 10)}<br>${t.status}</td><td class="opts">${opts}</td></tr>`;
+      return `<tr><td class="num">${t.id}</td><td class="body"><strong dir="auto">${esc(t.title)}</strong><div class="src" dir="auto">${esc(src?.content ?? "(ההודעה מחוץ לחלון)")}</div></td><td class="meta"><bdi>${esc(who)}</bdi> · ${t.raisedAt.toISOString().slice(0, 10)} · <bdi>${t.status}</bdi></td><td class="opts">${opts}</td></tr>`;
     })
     .join("\n");
   const untasked = input.messages.filter((m) => !withTask.has(m.messageId));
   const missRows = untasked
     .map(
       (m) =>
-        `<tr><td class="num">${m.messageId}</td><td>${esc(m.content)}</td><td class="meta">${esc(resolveSenderName(m.sender))}<br>${m.sentAt.toISOString().slice(0, 10)}</td><td class="opts"><label><input type="checkbox" data-missed="${m.messageId}">פוספסה משימה</label></td></tr>`,
+        `<tr><td class="num">${m.messageId}</td><td class="body"><div class="src msg" dir="auto">${esc(m.content)}</div></td><td class="meta"><bdi>${esc(resolveSenderName(m.sender))}</bdi> · ${m.sentAt.toISOString().slice(0, 10)}</td><td class="opts"><label><input type="checkbox" data-missed="${m.messageId}">פוספסה משימה</label></td></tr>`,
     )
     .join("\n");
 
@@ -53,17 +53,26 @@ main{max-width:980px;margin:auto}h1{font-size:20px;margin:0 0 4px}h2{font-size:1
 .bar b{color:var(--accent)}button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
 table{width:100%;border-collapse:collapse;background:var(--card)}td{border-bottom:1px solid var(--line);padding:8px;vertical-align:top}
 .num{color:var(--muted);font-variant-numeric:tabular-nums;width:4em}.meta{color:var(--muted);font-size:13px;white-space:nowrap}
-.src{color:var(--muted);font-size:13px;margin-top:4px;white-space:pre-wrap}.opts label{display:block;white-space:nowrap}
-textarea{width:100%;height:90px;margin-top:8px;background:var(--card);color:var(--fg);border:1px solid var(--line)}
+.src{color:var(--muted);font-size:13px;margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere}.opts label{display:block;white-space:nowrap}
+.msg{color:var(--fg);font-size:15px;margin:0}
+textarea{box-sizing:border-box;width:100%;height:90px;margin-top:8px;background:var(--card);color:var(--fg);border:1px solid var(--line);font:12px/1.4 ui-monospace,monospace}
+@media (max-width:640px){
+table,tbody,tr,td{display:block}
+tr{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:8px;padding:10px 0;border-bottom:1px solid var(--line)}
+td{border:0;padding:2px 8px}
+.num{width:auto;grid-row:span 3}.body,.meta,.opts{grid-column:2}
+.meta{white-space:normal}
+.opts label{display:inline-block;margin-inline-end:14px;padding:6px 0}
+}
 </style></head><body><main>
-<h1>Rosey: labelling sheet, group ${input.groupId}</h1>
+<h1>תיוג המשימות של רוזי · קבוצה ${input.groupId}</h1>
 <p class="lead">סמנו כל משימה שנמצאה, וסמנו הודעות שהייתה בהן משימה שפוספסה. נשמר רק בדפדפן הזה.</p>
 <div class="bar"><span>תויגו <b id="done">0</b>/${input.tasks.length}</span><span>משימה <b id="real">0</b></span><span>לא משימה <b id="not">0</b></span><span>כפילות <b id="dup">0</b></span><span>פוספסו <b id="missed">0</b></span><button id="copy">העתקת תוצאות</button></div>
 <h2>משימות שנמצאו (${input.tasks.length})</h2>
 <table>${taskRows}</table>
 <h2>הודעות ללא משימה (${untasked.length})</h2>
 <table>${missRows}</table>
-<textarea id="out" readonly></textarea>
+<textarea id="out" dir="ltr" readonly></textarea>
 </main>
 <script>
 const KEY="rosey-labels-${input.groupId}";
