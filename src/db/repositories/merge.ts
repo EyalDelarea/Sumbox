@@ -17,6 +17,10 @@
  *   state — a checked-off todo — is never silently cascade-dropped (DATA-6). A
  *   colliding agenda row whose survivor counterpart already exists keeps the
  *   survivor's row (propagating a `done` check rather than resetting it).
+ * - Rosey's tasks get the same rescue: moved to the survivor group, repointed
+ *   off colliding dup messages (with their events' evidence), and a survivor twin
+ *   inherits a closed status from the dup's row rather than losing it. Her sent
+ *   ledger follows the chat so her own-post guard keeps holding.
  * - read_watermarks + summaries (FK ON DELETE CASCADE) are removed with the dup.
  * - The dup is deleted BEFORE the survivor is (re)named, so UNIQUE(name) can't
  *   collide on the name the dup currently holds.
@@ -125,6 +129,7 @@ export type MergeResult = {
   movedImports: number;
   repointedTodos: number;
   repointedMeetings: number;
+  repointedRoseyTasks: number;
 };
 
 export async function mergeGroups(
@@ -221,6 +226,70 @@ export async function mergeGroups(
     [survivorId, dupId],
   );
 
+  // 1c. Rosey: rosey_tasks cascade off their group AND their source message, like
+  //     todos. Move them to the survivor group first.
+  await client.query(`UPDATE rosey_tasks SET group_id = $1 WHERE group_id = $2`, [
+    survivorId,
+    dupId,
+  ]);
+  // A twin — both sides hold a task for the same item of the same message — keeps
+  // the survivor's row (UNIQUE (source_message_id, source_item_index)). A closed
+  // status on the dup's row (done/dropped: usually set by hand) carries across
+  // rather than reopening, and the dup row's event history moves with it.
+  const twins = `${dupToSurvivor},
+    twins AS (
+      SELECT surv.id AS surv_id, dup.id AS dup_id, dup.status, dup.status_source
+      FROM dup_to_surv m
+      JOIN rosey_tasks dup ON dup.source_message_id = m.dup_msg_id
+      JOIN rosey_tasks surv ON surv.source_message_id = m.surv_msg_id
+                           AND surv.source_item_index = dup.source_item_index
+    )`;
+  await client.query(
+    `${twins}
+     UPDATE rosey_tasks t SET status = w.status, status_source = w.status_source, updated_at = now()
+     FROM twins w
+     WHERE t.id = w.surv_id
+       AND w.status IN ('done', 'dropped')
+       AND t.status IN ('suggested', 'open')`,
+    [survivorId, dupId],
+  );
+  await client.query(
+    `${twins}
+     UPDATE rosey_task_events e SET task_id = w.surv_id
+     FROM twins w
+     WHERE e.task_id = w.dup_id`,
+    [survivorId, dupId],
+  );
+  const repointedRoseyTasks = await client.query(
+    `${dupToSurvivor}
+     UPDATE rosey_tasks t SET source_message_id = m.surv_msg_id, updated_at = now()
+     FROM dup_to_surv m
+     WHERE t.source_message_id = m.dup_msg_id
+       AND NOT EXISTS (
+         SELECT 1 FROM rosey_tasks x
+         WHERE x.source_message_id = m.surv_msg_id AND x.source_item_index = t.source_item_index
+       )`,
+    [survivorId, dupId],
+  );
+  // Evidence (ON DELETE SET NULL) is repointed rather than blanked.
+  await client.query(
+    `${dupToSurvivor}
+     UPDATE rosey_task_events e SET source_message_id = m.surv_msg_id
+     FROM dup_to_surv m
+     WHERE e.source_message_id = m.dup_msg_id`,
+    [survivorId, dupId],
+  );
+  // Her sent ledger follows the chat (PK (group_id, external_id): a row the
+  // survivor already holds names the same sent message, so the dup's is dropped).
+  await client.query(
+    `UPDATE rosey_messages r SET group_id = $1
+     WHERE r.group_id = $2
+       AND NOT EXISTS (
+         SELECT 1 FROM rosey_messages x WHERE x.group_id = $1 AND x.external_id = r.external_id
+       )`,
+    [survivorId, dupId],
+  );
+
   // 2. Delete the remaining (colliding) dup messages so the dup group can go.
   const deleted = await client.query(`DELETE FROM messages WHERE group_id = $1`, [dupId]);
 
@@ -243,5 +312,6 @@ export async function mergeGroups(
     movedImports: movedImports.rowCount ?? 0,
     repointedTodos: repointedTodos.rowCount ?? 0,
     repointedMeetings: repointedMeetings.rowCount ?? 0,
+    repointedRoseyTasks: repointedRoseyTasks.rowCount ?? 0,
   };
 }

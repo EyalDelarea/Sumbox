@@ -78,6 +78,103 @@ describe("mergeGroups", () => {
     expect(nameRows[0].name).toBe("Bar Hevr Merge");
   });
 
+  it("carries Rosey's tasks, their events, and her sent ledger onto the survivor", async () => {
+    const survivorId = await upsertGroupByWhatsappId(pool, {
+      whatsappId: "972500000043-rosey@s.whatsapp.net",
+      name: "972500000043-rosey@s.whatsapp.net",
+      source: "live",
+    });
+    const dupId = await upsertGroupByWhatsappId(pool, {
+      whatsappId: "70390252580990-rosey@lid",
+      name: "70390252580990-rosey@lid",
+      source: "live",
+    });
+    const p = await upsertParticipant(pool, "Rosey Merge Sender");
+    const id = async (groupId: number, key: string, ext: string) => {
+      await insertMsg(groupId, p, key, ext);
+      const { rows } = await pool.query<{ id: string }>(
+        `SELECT id FROM messages WHERE group_id = $1 AND dedupe_key = $2`,
+        [groupId, key],
+      );
+      return Number(rows[0]!.id);
+    };
+    const survA = await id(survivorId, "rm-a", "R-EXT-A");
+    const survB = await id(survivorId, "rm-b", "R-EXT-B");
+    const dupA = await id(dupId, "rm-a", "R-EXT-DUP-A"); // collides with survA
+    const dupB = await id(dupId, "rm-b", "R-EXT-DUP-B"); // collides with survB
+    const dupC = await id(dupId, "rm-c", "R-EXT-C"); // unique: moves
+
+    const task = async (groupId: number, msg: number, status: string, source: string) => {
+      const origin = status === "suggested" ? "suggested" : "tag";
+      const { rows } = await pool.query<{ id: string }>(
+        `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
+                                  source_message_id, source_item_index, raised_at)
+         VALUES ($1, 't', 't', $5, $3, $4, $2, 0, now()) RETURNING id`,
+        [groupId, msg, status, source, origin],
+      );
+      return Number(rows[0]!.id);
+    };
+    // A task closed by hand on a colliding dup message, with no survivor twin.
+    const closedByHand = await task(dupId, dupA, "done", "manual");
+    await pool.query(
+      `INSERT INTO rosey_task_events (task_id, status, source, applied, source_message_id)
+       VALUES ($1, 'done', 'tag', true, $2)`,
+      [closedByHand, dupB],
+    );
+    // A twin: both sides hold a task for message B; the dup's was closed by hand.
+    const survTwin = await task(survivorId, survB, "open", "tag");
+    await task(dupId, dupB, "dropped", "manual");
+    // A task on a message that simply moves.
+    const moving = await task(dupId, dupC, "open", "tag");
+    await pool.query(
+      `INSERT INTO rosey_messages (group_id, external_id, kind, task_id) VALUES ($1, 'R-SENT-1', 'reply', $2)`,
+      [dupId, moving],
+    );
+
+    await mergeGroups(pool, { survivorId, dupId, name: "Rosey Merge Survivor" });
+
+    const { rows: tasks } = await pool.query(
+      `SELECT id::int, group_id::int, source_message_id::int, status, status_source
+         FROM rosey_tasks WHERE id = ANY($1::bigint[]) ORDER BY id`,
+      [[closedByHand, survTwin, moving]],
+    );
+    expect(tasks).toEqual([
+      {
+        id: closedByHand,
+        group_id: survivorId,
+        source_message_id: survA,
+        status: "done",
+        status_source: "manual",
+      },
+      // The survivor's twin keeps its row but inherits the hand-closed status.
+      {
+        id: survTwin,
+        group_id: survivorId,
+        source_message_id: survB,
+        status: "dropped",
+        status_source: "manual",
+      },
+      {
+        id: moving,
+        group_id: survivorId,
+        source_message_id: dupC,
+        status: "open",
+        status_source: "tag",
+      },
+    ]);
+    // Evidence is repointed, not nulled.
+    const { rows: ev } = await pool.query(
+      `SELECT source_message_id::int AS m FROM rosey_task_events WHERE task_id = $1 AND source = 'tag'`,
+      [closedByHand],
+    );
+    expect(ev).toEqual([{ m: survB }]);
+    // Her sent ledger follows the chat, so the own-post guard still holds.
+    const { rows: sent } = await pool.query(
+      `SELECT group_id::int, task_id::int FROM rosey_messages WHERE external_id = 'R-SENT-1'`,
+    );
+    expect(sent).toEqual([{ group_id: survivorId, task_id: moving }]);
+  });
+
   it("rejects merging a group into itself", async () => {
     await expect(mergeGroups(pool, { survivorId: 1, dupId: 1, name: "x" })).rejects.toThrow();
   });
