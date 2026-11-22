@@ -92,9 +92,13 @@ export class RabbitMqJobBus implements JobBus {
 
         // Watch for loss only once fully up: a failure above is handled by the
         // catch below, and must not also schedule a reconnect from here.
+        // close() may have run while this connect was in flight. It found nothing to
+        // close, so this connection would leak and keep the process from exiting.
+        if (this.closed) throw new Error("bus closed while connecting");
+
         const live = model;
-        live.on("close", () => this.onConnectionLost(live, "connection closed"));
-        ch.on("close", () => this.onConnectionLost(live, "channel closed"));
+        live.on("close", () => this.onConnectionLost(live, "connection closed unexpectedly"));
+        ch.on("close", () => this.onConnectionLost(live, "channel closed unexpectedly"));
 
         this.model = live;
         this.channel = ch;
@@ -107,7 +111,9 @@ export class RabbitMqJobBus implements JobBus {
       } catch (err) {
         // Clear mutex on failure so a subsequent call can retry.
         this.connectingPromise = null;
-        await model?.close().catch(() => {});
+        // Not awaited: on a half-open socket close() can wait forever for close-ok,
+        // and that would stall the reconnect chain that is waiting on this throw.
+        void model?.close().catch(() => {});
         throw err;
       }
     })();
@@ -115,9 +121,10 @@ export class RabbitMqJobBus implements JobBus {
   }
 
   /**
-   * The connection or the channel died without close() being called. Either way
-   * the broker has dropped our consumers, so discard both and rebuild: connect()
-   * opens a fresh connection and re-subscribes every registered consumer.
+   * The connection or the channel died, or the broker cancelled a consumer, without
+   * close() being called. Either way consumers are gone on the broker side, so
+   * discard both and rebuild: connect() opens a fresh connection and re-subscribes
+   * every registered consumer.
    *
    * A channel-only close (a channel error, or a broker `consumer_timeout`) leaves
    * the connection up; closing it here sends both cases down one recovery path.
@@ -129,7 +136,7 @@ export class RabbitMqJobBus implements JobBus {
     this.model = null;
     this.channel = null;
     this.connectingPromise = null;
-    console.warn(`[RabbitMqJobBus] ${reason} unexpectedly; reconnecting...`);
+    console.warn(`[RabbitMqJobBus] ${reason}; reconnecting...`);
     void model.close().catch(() => {}); // a no-op error when the connection already dropped
     void this.scheduleReconnect();
   }
@@ -204,11 +211,13 @@ export class RabbitMqJobBus implements JobBus {
     handler: (job: Job<T>) => Promise<void>,
     opts: ConsumeOptions,
   ): Promise<void> {
+    // The cast drops the type <-> handler correlation. That is safe: startConsumer
+    // only ever calls this handler with jobs read from this type's own queue.
     const reg = { type, handler, opts } as ConsumerRegistration;
     const ch = await this.connect();
     await this.startConsumer(ch, reg);
-    // Registered only once it is live, so the connect() above can't replay it a
-    // second time. From here on, every reconnect re-subscribes it.
+    // Pushed only after it is live on `ch`, so a reconnect that replays the list
+    // can never subscribe it twice. From here on, every reconnect re-subscribes it.
     this.consumers.push(reg);
   }
 
@@ -221,7 +230,15 @@ export class RabbitMqJobBus implements JobBus {
     const mainQueue = `jobs.${type}`;
 
     await ch.consume(mainQueue, (msg) => {
-      if (!msg) return; // consumer cancelled
+      if (!msg) {
+        // The broker cancelled this consumer (its queue was deleted, say) and left the
+        // channel open, so no close event will fire. Rebuild as if the channel died:
+        // the reconnect re-creates the queue and re-subscribes everything.
+        if (this.model && this.channel === ch) {
+          this.onConnectionLost(this.model, `${type} consumer cancelled by the broker`);
+        }
+        return;
+      }
 
       void (async () => {
         // If we're shutting down, leave the message unacked — RabbitMQ redelivers it on
