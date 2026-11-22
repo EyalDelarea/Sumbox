@@ -100,10 +100,26 @@ export async function dropScratch(target: ScratchTarget): Promise<void> {
   await onAdmin(target, (c) => c.query(`DROP DATABASE IF EXISTS "${target.name}" WITH (FORCE)`));
 }
 
-/** A fresh, EMPTY scratch database (a leftover one is dropped first). Migrate it next. */
+/**
+ * A fresh, EMPTY scratch database. Migrate it next. A leftover one from a
+ * crashed run is dropped first, but never one in use: a second sandbox on the
+ * same server would otherwise force-drop the first one's database under it.
+ */
 export async function createScratch(target: ScratchTarget): Promise<void> {
-  await dropScratch(target);
-  await onAdmin(target, (c) => c.query(`CREATE DATABASE "${target.name}"`));
+  await onAdmin(target, async (c) => {
+    const { rows } = await c.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1`,
+      [target.name],
+    );
+    if (rows[0]!.n > 0) {
+      throw new Error(
+        `${target.name} is in use (${rows[0]!.n} connection(s)): another rosey-sandbox is ` +
+          "running. Stop it first, or run --cleanup if it is a stale one.",
+      );
+    }
+    await c.query(`DROP DATABASE IF EXISTS "${target.name}"`);
+    await c.query(`CREATE DATABASE "${target.name}"`);
+  });
 }
 
 /** Throws unless this pool is connected to a scratch database. */
@@ -133,11 +149,28 @@ async function columnsOf(db: pg.Pool, table: string): Promise<Set<string>> {
   return new Set(rows.map((r) => r.column_name));
 }
 
-/** Insert rows read as JSON from live, by column NAME, into the same scratch table. */
-async function insertRows(scratch: pg.Pool, table: string, rows: Row[]): Promise<number> {
+/**
+ * Insert rows read as JSON from live, by column NAME, into the same scratch
+ * table. A live column the scratch schema lacks (live migrated past this
+ * checkout) cannot be copied: it is reported through `warn`, not dropped silently.
+ */
+async function insertRows(
+  scratch: pg.Pool,
+  table: string,
+  rows: Row[],
+  warn: (line: string) => void,
+): Promise<number> {
   if (rows.length === 0) return 0;
   const target = await columnsOf(scratch, table);
-  const cols = Object.keys(rows[0]!).filter((c) => target.has(c) && !SKIPPED_COLUMNS.has(c));
+  const liveCols = Object.keys(rows[0]!).filter((c) => !SKIPPED_COLUMNS.has(c));
+  const missing = liveCols.filter((c) => !target.has(c));
+  if (missing.length > 0) {
+    warn(
+      `warning: ${table}.${missing.join(", ")} exist in live but not in this checkout's schema; ` +
+        "not copied (update the checkout to match live)",
+    );
+  }
+  const cols = liveCols.filter((c) => target.has(c));
   const list = cols.map((c) => `"${c}"`).join(", ");
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500).map((r) => Object.fromEntries(cols.map((c) => [c, r[c]])));
@@ -222,12 +255,12 @@ async function readGroup(live: pg.Pool, groupId: number): Promise<Record<string,
       ),
     };
     await c.query("COMMIT");
+    c.release();
     return out;
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
+    c.release(err as Error); // a client in an unknown state is discarded, not pooled
     throw err;
-  } finally {
-    c.release();
   }
 }
 
@@ -241,12 +274,13 @@ export async function cloneGroup(
   scratch: pg.Pool,
   groupId: number,
   liveName: string,
+  warn: (line: string) => void = () => {},
 ): Promise<CloneReport> {
   await assertIsScratch(scratch, liveName);
   const data = await readGroup(live, groupId);
   const report: CloneReport = {};
   for (const [table, rows] of Object.entries(data)) {
-    report[table] = await insertRows(scratch, table, rows);
+    report[table] = await insertRows(scratch, table, rows, warn);
   }
   await setRoseyEnabled(scratch, groupId, true);
   return report;

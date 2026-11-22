@@ -177,6 +177,26 @@ describe("cloneGroup", () => {
     expect(t.rows).toEqual([{ status: "open" }]);
   });
 
+  it("refuses to recreate a scratch database another run is connected to", async () => {
+    // `scratch` holds open connections, as a running sandbox would.
+    await scratch.query("SELECT 1");
+    await expect(createScratch(target)).rejects.toThrow(/in use/);
+    expect((await scratch.query("SELECT 1 AS ok")).rows).toEqual([{ ok: 1 }]);
+  });
+
+  it("reports a live column this checkout's schema lacks instead of dropping it silently", async () => {
+    const e = await seedGroup("e");
+    await live.query("ALTER TABLE rosey_tasks ADD COLUMN live_only_extra int");
+    try {
+      await wipeScratch(scratch, target.liveName);
+      const warnings: string[] = [];
+      await cloneGroup(ro, scratch, e.groupId, target.liveName, (l) => warnings.push(l));
+      expect(warnings).toEqual([expect.stringMatching(/rosey_tasks\.live_only_extra/)]);
+    } finally {
+      await live.query("ALTER TABLE rosey_tasks DROP COLUMN live_only_extra");
+    }
+  });
+
   it("never writes to a database that is not a scratch one", async () => {
     const c = await seedGroup("d");
     await expect(cloneGroup(ro, live, c.groupId, target.liveName)).rejects.toThrow(/refusing/);
