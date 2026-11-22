@@ -20,9 +20,17 @@ services:
     # To bump deliberately: pull the new digest, then REINDEX text indexes (or run
     # `sumbox doctor`, which now amchecks them). See ops/runbooks/collation-corruption.md.
     image: pgvector/pgvector:pg16@sha256:00ba258a66dac104fd5171074a0084462a64a1369d8513f3d0a634e2f24d15bc
+    # Credentials come from .env (see .env.example). The fallback is the legacy
+    # postgres/postgres so an install whose .env predates these keys keeps working.
+    # POSTGRES_PASSWORD only takes effect when the pgdata volume is first created:
+    # on an existing volume, rotate it with ALTER USER (see .env.example). The user
+    # stays `postgres` (the healthcheck below and the live volume both assume it).
+    #
+    # The keys are SUMBOX_-prefixed on purpose: docker-compose.langfuse.yml reads the
+    # same root .env and has its own POSTGRES_PASSWORD, so a bare name would collide.
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${SUMBOX_POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: whatsapp_sum
     # Loopback only: nothing outside this Mac needs the database.
     ports:
@@ -38,6 +46,14 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    # Credentials come from .env (see .env.example); the fallback is the legacy
+    # guest/guest so an install whose .env predates these keys keeps working.
+    # RabbitMQ creates this user whenever it boots a fresh node, and every container
+    # recreate is a fresh node (the node name is the container id), so changing
+    # these values takes effect on the next `docker compose up`.
+    environment:
+      RABBITMQ_DEFAULT_USER: ${SUMBOX_RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${SUMBOX_RABBITMQ_PASSWORD:-guest}
     # Loopback only: the AMQP port and the management UI stay on this Mac.
     ports:
       - "127.0.0.1:5672:5672"
