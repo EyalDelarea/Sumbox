@@ -16,12 +16,12 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import pg from "pg";
-import { runMigrationsUp } from "../../db/migrate.js";
+import type pg from "pg";
 import {
   cloneGroup,
   createScratch,
   dropScratch,
+  openScratch,
   readOnlyPool,
   scratchTarget,
   wipeScratch,
@@ -102,9 +102,8 @@ export async function runRoseySandbox(opts: RoseySandboxOptions): Promise<void> 
     out(`Creating ${target.name} and migrating it…`);
     await createScratch(target);
     created = true;
-    await runMigrationsUp(target.url);
+    scratch = await openScratch(target);
     live = readOnlyPool(opts.liveUrl);
-    scratch = new pg.Pool({ connectionString: target.url, max: 5 });
     const lv = live;
     const sc = scratch;
     const report = await cloneGroup(lv, sc, groupId, target.liveName, out);

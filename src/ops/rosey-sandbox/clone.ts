@@ -7,8 +7,12 @@
  *    Postgres itself refuses any write through it; the copy reads in one
  *    REPEATABLE READ, READ ONLY transaction (a consistent snapshot).
  *  - Every write goes to a database whose name ends in SCRATCH_SUFFIX and is
- *    not the live one. Both are checked before creating, dropping or writing —
- *    by name in the URL, and again by `current_database()` on the connection.
+ *    not the live one. Both are checked before creating, dropping, migrating
+ *    or writing: by name in the URL, and again by `current_database()` on the
+ *    connection.
+ *  - The live URL may carry no query parameter that could undo either: pg lets
+ *    a connection string's query override `options` (the read-only flag), the
+ *    host, port, user and database. Only TLS settings are allowed.
  *  - The scratch database holds chat content, so the sandbox drops it on exit
  *    (and `rosey-sandbox --cleanup` drops a leftover one).
  *
@@ -27,6 +31,7 @@
  */
 
 import pg from "pg";
+import { runMigrationsUp } from "../../db/migrate.js";
 import { cursorKey, setRoseyEnabled } from "../../rosey/run.js";
 
 /** Every scratch database's name ends in this. Nothing else is ever dropped or written. */
@@ -45,6 +50,30 @@ export type ScratchTarget = {
 
 const IDENT = /^[a-z_][a-z0-9_]*$/;
 
+/** Query parameters a live URL may carry: TLS only, which picks no database and no flag. */
+const SAFE_URL_PARAMS = new Set(["ssl", "sslmode", "sslrootcert", "sslcert", "sslkey"]);
+
+/**
+ * Throws unless `url` is a postgres:// URL whose query cannot override what
+ * the sandbox relies on (pg-connection-string copies every query parameter
+ * into the config, over `options`, host, port, user and database).
+ */
+function checkLiveUrl(url: string): URL {
+  const u = new URL(url);
+  if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") {
+    throw new Error(`refusing a ${u.protocol} database URL: the sandbox needs postgres://`);
+  }
+  for (const key of u.searchParams.keys()) {
+    if (!SAFE_URL_PARAMS.has(key)) {
+      throw new Error(
+        `refusing DATABASE_URL query parameter "${key}": it could override the read-only ` +
+          "flag or the database the sandbox reads and writes. Remove it from the URL.",
+      );
+    }
+  }
+  return u;
+}
+
 function withDatabase(url: string, database: string): string {
   const u = new URL(url);
   u.pathname = `/${database}`;
@@ -60,7 +89,7 @@ export function assertScratchName(name: string, liveName: string): void {
 
 /** The scratch database for a live database URL, on the same server. */
 export function scratchTarget(liveUrl: string): ScratchTarget {
-  const liveName = decodeURIComponent(new URL(liveUrl).pathname.replace(/^\//, ""));
+  const liveName = decodeURIComponent(checkLiveUrl(liveUrl).pathname.replace(/^\//, ""));
   if (!IDENT.test(liveName)) throw new Error(`unexpected live database name "${liveName}"`);
   const name = `${liveName}${SCRATCH_SUFFIX}`;
   assertScratchName(name, liveName);
@@ -77,6 +106,7 @@ export function scratchTarget(liveUrl: string): ScratchTarget {
  * it opens is READ ONLY, so an INSERT/UPDATE/DELETE through it fails.
  */
 export function readOnlyPool(liveUrl: string): pg.Pool {
+  checkLiveUrl(liveUrl);
   return new pg.Pool({
     connectionString: liveUrl,
     options: "-c default_transaction_read_only=on",
@@ -126,6 +156,26 @@ export async function createScratch(target: ScratchTarget): Promise<void> {
 export async function assertIsScratch(scratch: pg.Pool, liveName: string): Promise<void> {
   const { rows } = await scratch.query<{ db: string }>(`SELECT current_database() AS db`);
   assertScratchName(rows[0]!.db, liveName);
+}
+
+/**
+ * A pool on the freshly created scratch database, migrated to this checkout's
+ * schema. `current_database()` is checked on that URL FIRST: a migration run
+ * against the wrong database would write to it.
+ */
+export async function openScratch(
+  target: ScratchTarget,
+  migrate: (url: string) => Promise<unknown> = runMigrationsUp,
+): Promise<pg.Pool> {
+  const scratch = new pg.Pool({ connectionString: target.url, max: 5 });
+  try {
+    await assertIsScratch(scratch, target.liveName);
+    await migrate(target.url);
+    return scratch;
+  } catch (err) {
+    await scratch.end().catch(() => undefined);
+    throw err;
+  }
 }
 
 // ── The copy ──────────────────────────────────────────────────────────────────

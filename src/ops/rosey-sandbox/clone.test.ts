@@ -9,6 +9,7 @@ import {
   cloneGroup,
   createScratch,
   dropScratch,
+  openScratch,
   readOnlyPool,
   type ScratchTarget,
   scratchTarget,
@@ -31,6 +32,26 @@ describe("the scratch database's name", () => {
     expect(() => assertScratchName("postgres", "whatsapp_sum")).toThrow(/refusing/);
     expect(() => assertScratchName('a_rosey_sandbox"; DROP', "x")).toThrow(/refusing/);
     expect(() => assertScratchName("whatsapp_sum_rosey_sandbox", "whatsapp_sum")).not.toThrow();
+  });
+
+  it("refuses a URL whose query could override the read-only flag, the database or the server", () => {
+    const base = "postgres://u:p@localhost:5432/whatsapp_sum";
+    for (const q of [
+      "options=-c%20default_transaction_read_only%3Doff",
+      "database=whatsapp_sum",
+      "db=whatsapp_sum",
+      "host=elsewhere",
+      "port=5433",
+      "user=other",
+    ]) {
+      expect(() => scratchTarget(`${base}?${q}`), q).toThrow(/query parameter/);
+      expect(() => readOnlyPool(`${base}?${q}`), q).toThrow(/query parameter/);
+    }
+    expect(() => scratchTarget("socket:/var/run/postgresql?db=whatsapp_sum")).toThrow(/refusing/);
+    // TLS settings change nothing about which database is written: allowed.
+    expect(scratchTarget(`${base}?sslmode=require`).url).toBe(
+      "postgres://u:p@localhost:5432/whatsapp_sum_rosey_sandbox?sslmode=require",
+    );
   });
 });
 
@@ -122,6 +143,24 @@ describe("cloneGroup", () => {
     await expect(
       ro.query(`INSERT INTO groups (name, source) VALUES ('x', 'live')`),
     ).rejects.toThrow(/read-only transaction/);
+  });
+
+  it("a URL's ?options= cannot turn the live pool writable", async () => {
+    // pg lets a connection string's query override `options`: refused outright.
+    const url = `${liveUrl}${liveUrl.includes("?") ? "&" : "?"}options=-c%20default_transaction_read_only%3Doff`;
+    expect(() => readOnlyPool(url)).toThrow(/query parameter/);
+  });
+
+  it("checks the scratch connection's current_database() BEFORE migrating it", async () => {
+    // A target whose URL reaches the live database: nothing may migrate it.
+    const wrong: ScratchTarget = { ...target, url: liveUrl };
+    let migrated = false;
+    await expect(
+      openScratch(wrong, async () => {
+        migrated = true;
+      }),
+    ).rejects.toThrow(/refusing/);
+    expect(migrated).toBe(false);
   });
 
   it("copies one group's rows with their ids, and nothing of any other group", async () => {
