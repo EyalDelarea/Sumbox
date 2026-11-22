@@ -447,8 +447,8 @@ export async function isRoseyPost(db: Db, groupId: number, externalId: string): 
   return (rowCount ?? 0) > 0;
 }
 
-/** A post type Rosey sends (rosey_messages.kind). Only replies are sent today. */
-export type RoseyPostKind = "reply";
+/** A post type Rosey sends (rosey_messages.kind): a text list reply, or a list poll. */
+export type RoseyPostKind = "reply" | "poll";
 
 /**
  * Record one message Rosey sent, from the id her send returned. Idempotent on
@@ -488,7 +488,74 @@ export async function reconcileRoseyMessageId(
   );
 }
 
-/** How many posts of `kind` Rosey sent to a group at or after `since` (her rate limits). */
+/**
+ * The ledger key of one option of a poll: `<poll id>#<index>`. A WhatsApp
+ * message id never holds a "#", so an option row can never match a real
+ * message (the own-echo guard reads exact ids).
+ */
+export function pollOptionKey(pollId: string, index: number): string {
+  return `${pollId}#${index}`;
+}
+
+/**
+ * Record one list poll before it is sent (rosey/poll.ts): the poll's own row
+ * (kind 'poll', its message secret: a vote is encrypted with it) and one row
+ * per option holding that option's task. One transaction: a poll is never
+ * recorded without its options.
+ */
+export async function recordRoseyPoll(
+  db: Db,
+  input: { groupId: number; externalId: string; secret: Uint8Array; taskIds: readonly number[] },
+): Promise<void> {
+  await inTransaction(db, async (c) => {
+    await c.query(
+      `INSERT INTO rosey_messages (group_id, external_id, kind, message_secret)
+       VALUES ($1, $2, 'poll', $3)`,
+      [input.groupId, input.externalId, Buffer.from(input.secret)],
+    );
+    for (const [i, taskId] of input.taskIds.entries()) {
+      await c.query(
+        `INSERT INTO rosey_messages (group_id, external_id, kind, task_id)
+         VALUES ($1, $2, 'poll', $3)`,
+        [input.groupId, pollOptionKey(input.externalId, i), taskId],
+      );
+    }
+  });
+}
+
+/**
+ * The task behind each option of one of Rosey's polls in a group, by option
+ * index (null where the task was deleted), or null when the id is not a poll
+ * of hers in that group.
+ */
+export async function pollTaskIds(
+  db: Db,
+  groupId: number,
+  pollId: string,
+): Promise<(number | null)[] | null> {
+  const head = await db.query(
+    `SELECT 1 FROM rosey_messages
+      WHERE group_id = $1 AND external_id = $2 AND kind = 'poll' AND message_secret IS NOT NULL`,
+    [groupId, pollId],
+  );
+  if ((head.rowCount ?? 0) === 0) return null;
+  const { rows } = await db.query<{ external_id: string; task_id: string | null }>(
+    `SELECT external_id, task_id FROM rosey_messages
+      WHERE group_id = $1 AND kind = 'poll' AND starts_with(external_id, $2)`,
+    [groupId, `${pollId}#`],
+  );
+  const out: (number | null)[] = [];
+  for (const r of rows) {
+    const index = Number(r.external_id.slice(pollId.length + 1));
+    if (Number.isInteger(index) && index >= 0) out[index] = r.task_id ? Number(r.task_id) : null;
+  }
+  return Array.from(out, (t) => t ?? null);
+}
+
+/**
+ * How many posts of `kind` Rosey sent to a group at or after `since` (her rate
+ * limits). A poll counts once: its option rows are not posts.
+ */
 export async function countRoseyMessagesSince(
   db: Db,
   groupId: number,
@@ -497,7 +564,8 @@ export async function countRoseyMessagesSince(
 ): Promise<number> {
   const { rows } = await db.query<{ n: string }>(
     `SELECT count(*) AS n FROM rosey_messages
-      WHERE group_id = $1 AND kind = $2 AND sent_at >= $3`,
+      WHERE group_id = $1 AND kind = $2 AND sent_at >= $3
+        AND (kind <> 'poll' OR message_secret IS NOT NULL)`,
     [groupId, kind, since],
   );
   return Number(rows[0]?.n ?? 0);

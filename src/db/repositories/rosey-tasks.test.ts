@@ -8,8 +8,10 @@ import {
   isRoseyPost,
   listTasks,
   liveTasksRaisedBetween,
+  pollTaskIds,
   reconcileRoseyMessageId,
   recordRoseyMessage,
+  recordRoseyPoll,
   recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
@@ -460,6 +462,48 @@ describe("Rosey's sent-message ledger", () => {
     expect(await countRoseyMessagesSince(pool, g, "reply", new Date("2026-11-22T00:00:00Z"))).toBe(
       2,
     );
+  });
+});
+
+describe("her list polls in the ledger", () => {
+  it("maps each option back to its task, counts the poll once, and is hers only in its group", async () => {
+    const g = await group();
+    const other = await group();
+    const m = await message(g);
+    const a = (await task(g, m, { title: "א", titleKey: "א" }))!;
+    const b = (await task(g, m, { title: "ב", titleKey: "ב" }))!;
+    const secret = new Uint8Array(32).fill(7);
+    await recordRoseyPoll(pool, { groupId: g, externalId: "POLL1", secret, taskIds: [b, a] });
+
+    expect(await pollTaskIds(pool, g, "POLL1")).toEqual([b, a]);
+    expect(await pollTaskIds(pool, other, "POLL1")).toBeNull();
+    expect(await pollTaskIds(pool, g, "POLL")).toBeNull(); // a prefix is not the poll
+    expect(await isRoseyPost(pool, g, "POLL1")).toBe(true); // her own-echo guard
+    expect(await countRoseyMessagesSince(pool, g, "poll", new Date(0))).toBe(1);
+    const { rows } = await pool.query<{ message_secret: Buffer }>(
+      `SELECT message_secret FROM rosey_messages WHERE group_id = $1 AND external_id = 'POLL1'`,
+      [g],
+    );
+    expect(new Uint8Array(rows[0]!.message_secret)).toEqual(secret);
+  });
+
+  it("an option whose task was deleted maps to null; a poll vote never moves a manual status", async () => {
+    const g = await group();
+    const m = await message(g);
+    const a = (await task(g, m, { title: "א", titleKey: "א" }))!;
+    const b = (await task(g, m, { title: "ב", titleKey: "ב" }))!;
+    await recordRoseyPoll(pool, {
+      groupId: g,
+      externalId: "POLL2",
+      secret: new Uint8Array(32),
+      taskIds: [a, b],
+    });
+    await pool.query(`DELETE FROM rosey_tasks WHERE id = $1`, [a]);
+    expect(await pollTaskIds(pool, g, "POLL2")).toEqual([null, b]);
+
+    await recordStatusEvent(pool, { taskId: b, status: "open", source: "manual" });
+    const r = await recordStatusEvent(pool, { taskId: b, status: "done", source: "poll" });
+    expect(r).toMatchObject({ found: true, applied: false, current: "open" });
   });
 });
 
