@@ -125,6 +125,7 @@ describe("RoseySandbox", () => {
     );
     const reply = st.history.find((h) => h.rosey)!;
     expect(reply.text?.startsWith("🤖 רוזי")).toBe(true);
+    expect(reply.text).toContain("\n"); // shown as sent, not as storage collapses it
     expect(reply.quotedId).not.toBeNull();
     expect(st.polls).toEqual([]);
     s.stop();

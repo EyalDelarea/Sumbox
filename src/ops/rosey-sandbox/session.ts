@@ -128,6 +128,8 @@ export class RoseySandbox {
   private polls: SandboxPoll[] = [];
   /** Which message each message quoted (posted here), by external id. */
   private quotes = new Map<string, string>();
+  /** Text as posted, by external id: storage collapses whitespace (normalize), WhatsApp does not. */
+  private posted = new Map<string, string>();
   private events: SandboxEvent[] = [];
   private passRunning = false;
   listStyle: ListStyle = "poll";
@@ -147,6 +149,7 @@ export class RoseySandbox {
     this.members = await listMembers(this.deps.scratch, this.deps.groupId);
     this.polls = [];
     this.quotes.clear();
+    this.posted.clear();
     const log = (level: SandboxEvent["level"]) => (obj: unknown, msg?: string) =>
       this.event(level, `${msg ?? ""}${oneLine(obj)}`);
     this.engine = makeRoseyEngine({
@@ -190,12 +193,13 @@ export class RoseySandbox {
 
   private textSink(): RoseySender {
     return {
-      sendText: async (_jid, _text, opts) => {
+      sendText: async (_jid, text, opts) => {
         const id = opts.messageId ?? sandboxMessageId();
         if (opts.quoted?.key?.id) this.quotes.set(id, opts.quoted.key.id);
+        this.posted.set(id, text);
         // WhatsApp echoes her post back as the owner's own message, after the send.
         setImmediate(() => {
-          void this.deliver(this.owner(), _text, null, id).catch((err: unknown) =>
+          void this.deliver(this.owner(), text, null, id).catch((err: unknown) =>
             this.event("error", `echo of her reply failed: ${(err as Error).message}`),
           );
         });
@@ -247,6 +251,7 @@ export class RoseySandbox {
       sentAt: new Date(seconds * 1000),
     });
     if (quotedId) this.quotes.set(externalId, quotedId);
+    this.posted.set(externalId, text);
     const msg = {
       key: {
         id: externalId,
@@ -341,6 +346,7 @@ export class RoseySandbox {
       members: this.members,
       history: rows.map((r) => ({
         ...r,
+        text: (r.externalId && this.posted.get(r.externalId)) || r.text,
         quotedId: r.externalId ? (this.quotes.get(r.externalId) ?? null) : null,
       })),
       polls: this.polls,
