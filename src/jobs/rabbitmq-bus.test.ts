@@ -436,6 +436,48 @@ describe("RabbitMqJobBus — integration (testcontainers)", () => {
       await bus.close();
     }
   }, 60_000);
+
+  it("re-creates its queue when the broker comes back empty, then consumes", async () => {
+    const bus = makeBus(new InMemoryJobRunRecorder());
+    // Probe through rabbitmqctl, not a second bus: a bus would assert (re-create)
+    // the queue itself and hide whether the consumer's own reconnect did.
+    const brokerConsumers = async (): Promise<number> => {
+      const res = await container.exec(["rabbitmqctl", "-q", "list_queues", "name", "consumers"]);
+      const row = res.output
+        .split("\n")
+        .map((line) => line.trim().split(/\s+/))
+        .find(([name]) => name === "jobs.summarize.total");
+      return row ? Number(row[1]) : -1; // -1: the queue does not exist
+    };
+
+    try {
+      const received: string[] = [];
+      await bus.consume(
+        "summarize.total",
+        async (job) => {
+          received.push(job.payload.since);
+        },
+        { prefetch: 1 },
+      );
+      await waitUntil(async () => (await brokerConsumers()) === 1, 5_000);
+
+      // A broker restarted on a fresh node has no queues, and drops every connection.
+      await container.exec(["rabbitmqctl", "delete_queue", "jobs.summarize.total"]);
+      expect(await brokerConsumers()).toBe(-1);
+      await container.exec(["rabbitmqctl", "close_all_connections", "test: fresh broker"]);
+
+      await waitUntil(async () => (await brokerConsumers()) === 1, 15_000);
+      const producer = makeBus(new InMemoryJobRunRecorder());
+      try {
+        await producer.enqueue("summarize.total", { since: "after-empty-broker" });
+      } finally {
+        await producer.close();
+      }
+      await waitUntil(() => received.includes("after-empty-broker"), 10_000);
+    } finally {
+      await bus.close();
+    }
+  }, 60_000);
 });
 
 // ── Fix 4: connect-race unit test (fake amqplib, no Testcontainers) ──────────
