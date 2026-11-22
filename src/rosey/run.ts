@@ -37,6 +37,13 @@ export function makeGenerate(cfg: RoseyConfig): Generate {
   return async (system, user) => (await llm.summarize({ system, user })).overview;
 }
 
+/**
+ * How many live tasks a dedup or command lookup reads. Far above a real group's
+ * live list (the busiest measured: ~115 suggestions over 90 days), so the cap
+ * is a guard against a runaway query, not a filter.
+ */
+export const DEDUP_CANDIDATE_CAP = 500;
+
 /** The scheduler_state key holding a group's aggregation cursor (ingest time). */
 export function cursorKey(groupId: number): string {
   return `rosey-aggregate:${groupId}`;
@@ -77,7 +84,8 @@ export async function runAggregation(
     generate: opts.generate,
     isTagged: tags.isTagged,
     resolveRaisedBy: (ids) => resolveRaisedBy(pool, groupId, ids),
-    liveTasksRaisedBetween: (since, until) => liveTasksRaisedBetween(pool, groupId, since, until),
+    liveTasksRaisedBetween: (since, until) =>
+      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP),
     insertSuggestion: (input) => insertTask(pool, { ...input, groupId, origin: "suggested" }),
     onBatchError: opts.onBatchError,
   });

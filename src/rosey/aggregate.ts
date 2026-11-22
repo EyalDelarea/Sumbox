@@ -31,6 +31,7 @@ export type AggregateDeps = {
   generate: (system: string, user: string) => Promise<string>;
   isTagged: (text: string) => boolean;
   resolveRaisedBy: (messageIds: readonly number[]) => Promise<Map<number, number | null>>;
+  /** Every live task raised in [since, until] — a truncated list lets twins through. */
   liveTasksRaisedBetween: (since: Date, until: Date) => Promise<LiveTaskRef[]>;
   insertSuggestion: (input: {
     title: string;
@@ -119,9 +120,11 @@ export async function aggregateMessages(
           report.rejected.empty_text = (report.rejected.empty_text ?? 0) + 1;
           continue;
         }
+        // Both sides of the message: an explicit tag for the same item may be
+        // stored before this suggestion while being sent after it.
         const live = await deps.liveTasksRaisedBetween(
           new Date(msg.sentAt.getTime() - windowMs),
-          msg.sentAt,
+          new Date(msg.sentAt.getTime() + windowMs),
         );
         const decision: DedupDecision = await decideDuplicate(
           { title: item.title, titleKey: key },
