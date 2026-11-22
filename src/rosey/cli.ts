@@ -1,10 +1,11 @@
 /**
  * cli.ts — `sumbox rosey …`: Rosey's local, read-mostly surface.
  *
- *   rosey list      --group <id> [--all]           the task list (the view)
+ *   rosey list      --group <id> [--all]           the list (the view): tasks, then grocery
  *   rosey aggregate --group <id> [--days N] [--from-scratch]
  *                                                  read the chat, store suggestions
- *   rosey set       --task <id> --status <s>       manual status (D4's top layer)
+ *   rosey set       --task <id> [--status <s>] [--kind <k>]
+ *                                                  manual status / kind (D4's top layer)
  *   rosey label     --group <id> --out <file> [--days N]
  *                                                  write a local labelling sheet
  *
@@ -18,7 +19,8 @@ import type pg from "pg";
 import type { RoseyTaskView } from "../db/repositories/rosey-tasks.js";
 import { resolveSenderName } from "../summarization/sender-name.js";
 import { loadRoseyConfig } from "./config.js";
-import { isTaskStatus } from "./status.js";
+import { ITEM_KINDS, isItemKind, type RoseyItemKind } from "./kind.js";
+import { isTaskStatus, type TaskStatus } from "./status.js";
 
 function positiveInt(raw: string, flag: string): number {
   const n = Number(raw);
@@ -47,6 +49,53 @@ export function renderTaskLine(t: RoseyTaskView): string {
   return `  #${t.id}  [${t.status}]  ${t.title}   — ${who}, ${when} (msg:${t.sourceMessageId})`;
 }
 
+const SECTIONS: ReadonlyArray<[RoseyItemKind, string]> = [
+  ["task", "Tasks"],
+  ["grocery", "Grocery"],
+];
+const STATUS_ORDER = ["open", "suggested", "done", "dropped"] as const;
+
+/** The list view: one section per kind (tasks first), each grouped by status. */
+export function renderTaskList(tasks: readonly RoseyTaskView[]): string {
+  const out: string[] = [];
+  for (const [kind, label] of SECTIONS) {
+    const ofKind = tasks.filter((t) => t.kind === kind);
+    if (ofKind.length === 0) continue;
+    out.push("", `── ${label} (${ofKind.length}) ──`);
+    for (const status of STATUS_ORDER) {
+      const group = ofKind.filter((t) => t.status === status);
+      if (group.length === 0) continue;
+      out.push(`${status} (${group.length})`);
+      for (const t of group) out.push(renderTaskLine(t));
+    }
+  }
+  return `${out.join("\n")}\n`;
+}
+
+type ManualStatus = Exclude<TaskStatus, "suggested">;
+
+/** `rosey set`'s options: a status, a kind, or both — never neither. */
+export function parseSetOptions(o: { status?: string; kind?: string }): {
+  status?: ManualStatus;
+  kind?: RoseyItemKind;
+} {
+  if (o.status === undefined && o.kind === undefined) {
+    throw new Error("give --status or --kind (or both)");
+  }
+  const out: { status?: ManualStatus; kind?: RoseyItemKind } = {};
+  if (o.status !== undefined) {
+    if (!isTaskStatus(o.status) || o.status === "suggested") {
+      throw new Error("--status must be one of: open, done, dropped");
+    }
+    out.status = o.status;
+  }
+  if (o.kind !== undefined) {
+    if (!isItemKind(o.kind)) throw new Error(`--kind must be one of: ${ITEM_KINDS.join(", ")}`);
+    out.kind = o.kind;
+  }
+  return out;
+}
+
 export function registerRoseyCommands(program: Command): void {
   const rosey = program
     .command("rosey")
@@ -54,7 +103,9 @@ export function registerRoseyCommands(program: Command): void {
 
   rosey
     .command("list")
-    .description("Show a group's task list (open and suggested; --all adds closed)")
+    .description(
+      "Show a group's list — tasks, then grocery items (open and suggested; --all adds closed)",
+    )
     .requiredOption("--group <id>", "Group id")
     .option("--all", "Include done and dropped tasks")
     .action(async (o: { group: string; all?: boolean }) => {
@@ -67,14 +118,10 @@ export function registerRoseyCommands(program: Command): void {
             process.stdout.write("No tasks for this group.\n");
             return;
           }
-          for (const status of ["open", "suggested", "done", "dropped"] as const) {
-            const group = tasks.filter((t) => t.status === status);
-            if (group.length === 0) continue;
-            process.stdout.write(`\n${status} (${group.length})\n`);
-            for (const t of group) process.stdout.write(`${renderTaskLine(t)}\n`);
-          }
+          process.stdout.write(renderTaskList(tasks));
           process.stdout.write(
-            "\nConfirm a suggestion: rosey set --task <id> --status open  (or done / dropped)\n",
+            "\nConfirm a suggestion: rosey set --task <id> --status open  (or done / dropped)\n" +
+              "Move an item between the lists: rosey set --task <id> --kind grocery  (or task)\n",
           );
         });
       } catch (err) {
@@ -150,25 +197,38 @@ export function registerRoseyCommands(program: Command): void {
 
   rosey
     .command("set")
-    .description("Set a task's status by hand (manual — the top layer of D4)")
+    .description(
+      "Set an item's status and/or kind by hand (manual — the top layer of D4; a rerun never undoes it)",
+    )
     .requiredOption("--task <id>", "Task id (from rosey list)")
-    .requiredOption("--status <status>", "open | done | dropped")
-    .action(async (o: { task: string; status: string }) => {
+    .option("--status <status>", "open | done | dropped")
+    .option("--kind <kind>", "task | grocery")
+    .action(async (o: { task: string; status?: string; kind?: string }) => {
       try {
         const taskId = positiveInt(o.task, "--task");
-        if (!isTaskStatus(o.status) || o.status === "suggested") {
-          throw new Error("--status must be one of: open, done, dropped");
-        }
-        const status = o.status;
+        const { status, kind } = parseSetOptions(o);
         await withPool(async (pool) => {
-          const { recordStatusEvent } = await import("../db/repositories/rosey-tasks.js");
-          const r = await recordStatusEvent(pool, { taskId, status, source: "manual" });
-          if (!r.found) throw new Error(`no task #${taskId}`);
-          process.stdout.write(
-            r.applied
-              ? `#${taskId}: ${r.previous} → ${r.current}\n`
-              : `#${taskId} is already ${r.current}\n`,
+          const { recordStatusEvent, setTaskKind } = await import(
+            "../db/repositories/rosey-tasks.js"
           );
+          if (kind) {
+            const k = await setTaskKind(pool, taskId, kind);
+            if (!k.found) throw new Error(`no task #${taskId}`);
+            process.stdout.write(
+              k.previous === k.current
+                ? `#${taskId} is already ${k.current}\n`
+                : `#${taskId}: ${k.previous} → ${k.current}\n`,
+            );
+          }
+          if (status) {
+            const r = await recordStatusEvent(pool, { taskId, status, source: "manual" });
+            if (!r.found) throw new Error(`no task #${taskId}`);
+            process.stdout.write(
+              r.applied
+                ? `#${taskId}: ${r.previous} → ${r.current}\n`
+                : `#${taskId} is already ${r.current}\n`,
+            );
+          }
         });
       } catch (err) {
         fail("set", err);
