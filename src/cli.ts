@@ -1634,4 +1634,34 @@ program
 const { registerRoseyCommands } = await import("./rosey/cli.js");
 registerRoseyCommands(program);
 
+// Rosey's playground: her real engine over a scratch copy of one group, behind
+// a page on 127.0.0.1. No WhatsApp — see src/ops/rosey-sandbox/main.ts.
+program
+  .command("rosey-sandbox")
+  .description(
+    "Rosey's playground on a scratch copy of one group, no WhatsApp (http://127.0.0.1:8788)",
+  )
+  .option("--group <id>", "The group id to clone into the sandbox")
+  .option("--port <port>", "Port on 127.0.0.1", "8788")
+  .option("--cleanup", "Only drop the scratch database (after a crash), then exit")
+  .action(async (options: { group?: string; port: string; cleanup?: boolean }) => {
+    const { runRoseySandbox } = await import("./ops/rosey-sandbox/main.js");
+    if (!options.cleanup && options.group === undefined) {
+      process.stderr.write("Error: --group <id> is required (or --cleanup)\n");
+      process.exit(1);
+    }
+    try {
+      await runRoseySandbox({
+        liveUrl: loadConfig().databaseUrl,
+        groupId: options.group === undefined ? undefined : Number(options.group),
+        port: Number(options.port),
+        cleanup: options.cleanup === true,
+      });
+      process.exit(0);
+    } catch (err) {
+      process.stderr.write(`Error: ${(err as Error).message}\n`);
+      process.exit(1);
+    }
+  });
+
 program.parse();
