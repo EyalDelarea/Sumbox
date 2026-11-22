@@ -141,6 +141,12 @@ export const UNSELECTED_PURGE_GROUP_TABLES = [
   // braces, and it keeps the intent legible rather than incidental.)
   "aida_observations",
   "aida_directives",
+  // Rosey's task list and her sent-post ledger. Task titles are chat-derived text,
+  // and both are group-keyed: rosey_tasks also cascades from its source message,
+  // but rosey_messages has no message FK and the surviving group's CASCADE never
+  // fires, so each needs its explicit DELETE in purgeUnselectedChats.
+  "rosey_tasks",
+  "rosey_messages",
   "summaries",
   "read_watermarks",
   // The group's shared /סיכום cursor. The group row SURVIVES the unselected
@@ -251,6 +257,10 @@ export async function purgeUnselectedChats(
   // @Aida's marker rows (which carry the asker's question verbatim) outlived
   // the purged conversation. The behavioral test now pins list to execution.
   await client.query(`DELETE FROM aida_messages WHERE group_id = ANY($1::bigint[])`, ids);
+  // Rosey: tasks (→ rosey_task_events by CASCADE; most already went with their
+  // source messages above) and her sent-post ledger, which cites no message.
+  await client.query(`DELETE FROM rosey_tasks WHERE group_id = ANY($1::bigint[])`, ids);
+  await client.query(`DELETE FROM rosey_messages WHERE group_id = ANY($1::bigint[])`, ids);
   await client.query(`DELETE FROM summaries WHERE group_id = ANY($1::bigint[])`, ids);
   // `imports` is RESTRICT → groups (which we keep), so it never cascades — delete it
   // explicitly. messages.import_id is SET NULL and messages are already gone, so order is
