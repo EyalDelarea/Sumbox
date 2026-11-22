@@ -75,11 +75,16 @@ export function buildSuggestPrompt(batch: readonly RoseySourceMessage[]): string
   ].join("\n");
 }
 
+/** A bare array of candidates, or `{"items": [...]}`. */
+const isSuggestionList = (v: unknown): boolean =>
+  Array.isArray(v) ||
+  (!!v && typeof v === "object" && Array.isArray((v as { items?: unknown }).items));
+
 export function parseSuggestions(
   reply: string,
   batch: readonly RoseySourceMessage[],
 ): ParsedSuggestions | null {
-  const json = lastJsonValue(reply);
+  const json = lastJsonValue(reply, isSuggestionList);
   const list = Array.isArray(json)
     ? json
     : json && typeof json === "object" && Array.isArray((json as { items?: unknown }).items)

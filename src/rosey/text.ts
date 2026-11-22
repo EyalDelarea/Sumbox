@@ -25,21 +25,27 @@ export function titleKey(title: string): string {
  * both and fails to parse. Scanning from the end and taking the last complete
  * value picks the revision, which is the answer the model settled on.
  * String contents are respected, so a "}" inside a title does not unbalance it.
+ *
+ * `accept` names the shape the caller wants. A complete value of another shape
+ * (a trailing `{"confidence": "high"}` after the answer) is skipped WHOLE —
+ * nothing inside it is considered — and the scan goes on to the left.
  */
-export function lastJsonValue(text: string): unknown {
+export function lastJsonValue(text: string, accept: (v: unknown) => boolean = () => true): unknown {
   let end = text.length;
   while (end > 0) {
     const close = Math.max(text.lastIndexOf("}", end - 1), text.lastIndexOf("]", end - 1));
     if (close < 0) return null;
     const start = matchingOpen(text, close);
+    let parsed: { v: unknown } | null = null;
     if (start >= 0) {
       try {
-        return JSON.parse(text.slice(start, close + 1));
+        parsed = { v: JSON.parse(text.slice(start, close + 1)) };
       } catch {
         // Balanced but not JSON (prose with brackets) — keep scanning left.
       }
     }
-    end = close;
+    if (parsed && accept(parsed.v)) return parsed.v;
+    end = parsed ? start : close;
   }
   return null;
 }

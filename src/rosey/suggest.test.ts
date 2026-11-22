@@ -58,6 +58,22 @@ describe("parseSuggestions", () => {
     expect(out?.rejected).toEqual({ not_an_object: 1, bad_kind: 1, empty_text: 1 });
   });
 
+  it("skips a trailing object without items and takes the last one that has them", () => {
+    const reply = `{"items": [{"m": 10, "kind": "task", "text": "לקנות חלב"}]}
+Notes: {"confidence": "high"}`;
+    expect(parseSuggestions(reply, batch)?.items).toEqual([
+      { sourceMessageId: 10, itemIndex: 0, title: "לקנות חלב" },
+    ]);
+  });
+
+  it("skips a trailing object whole, never taking an array nested inside it", () => {
+    const reply = `{"items": [{"m": 10, "kind": "task", "text": "לקנות חלב"}]} {"tags": ["x"]}`;
+    expect(parseSuggestions(reply, batch)).toMatchObject({
+      items: [{ sourceMessageId: 10, title: "לקנות חלב" }],
+      rejected: {},
+    });
+  });
+
   it("accepts a bare array and a string id", () => {
     const out = parseSuggestions('[{"m":"10","kind":"task","text":"לקנות חלב"}]', batch);
     expect(out?.items).toHaveLength(1);
