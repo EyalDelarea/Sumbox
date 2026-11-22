@@ -1,5 +1,6 @@
 import type { WAMessage } from "@whiskeysockets/baileys";
 import { describe, expect, it } from "vitest";
+import { matchAskTrigger } from "../collector/ask-trigger.js";
 import { type CaptureDeps, captureMessage, LIVENESS_WINDOW_MS } from "./capture.js";
 import type { RoseyCommand } from "./tags.js";
 import { makeTagMatcher } from "./tags.js";
@@ -9,14 +10,14 @@ const NOW = 1_795_000_000_000;
 
 function wa(
   text: string,
-  over: { jid?: string; id?: string; ageMs?: number; quotedId?: string } = {},
+  over: { jid?: string; id?: string; ageMs?: number; quotedId?: string; fromMe?: boolean } = {},
 ): WAMessage {
   return {
     key: {
       id: over.id ?? "WA-1",
       remoteJid: over.jid ?? GROUP_JID,
       participant: "972500000001@s.whatsapp.net",
-      fromMe: false,
+      fromMe: over.fromMe ?? false,
     },
     messageTimestamp: Math.floor((NOW - (over.ageMs ?? 1000)) / 1000),
     message: over.quotedId
@@ -29,6 +30,7 @@ function deps(over: Partial<CaptureDeps> = {}) {
   const calls = {
     applied: [] as Array<{ cmd: RoseyCommand; ctx: unknown }>,
     scheduled: [] as number[],
+    graces: 0,
   };
   const d: CaptureDeps = {
     matcher: makeTagMatcher(["@Rosey", "@רוזי"]),
@@ -37,6 +39,10 @@ function deps(over: Partial<CaptureDeps> = {}) {
     messageIdFor: async (_g, externalId) =>
       externalId === "WA-1" ? 501 : externalId === "WA-Q" ? 400 : null,
     isOwnPost: async () => false,
+    isAidaPost: async () => false,
+    ownEchoGrace: async () => {
+      calls.graces++;
+    },
     applyCommand: async (cmd, ctx) => {
       calls.applied.push({ cmd, ctx });
       return { kind: "added", created: 1, confirmed: 0, alreadyOpen: 0 };
@@ -158,5 +164,59 @@ describe("captureMessage — routing", () => {
     const { d, calls } = deps();
     expect(await captureMessage(wa("@Rosey"), d)).toEqual({ kind: "ignored", reason: "empty_tag" });
     expect(calls.scheduled).toEqual([]);
+  });
+});
+
+describe("captureMessage — @Aida is never answered twice", () => {
+  it("ignores a message that also wakes @Aida, whichever tag comes first", async () => {
+    for (const text of ["@Aida what did @Rosey add?", "@Rosey לקנות חלב @אידה"]) {
+      const { d, calls } = deps();
+      expect(matchAskTrigger(text)).not.toBeNull(); // @Aida answers it…
+      expect(await captureMessage(wa(text), d)).toEqual({
+        kind: "ignored",
+        reason: "aida_trigger",
+      });
+      expect(calls.applied).toEqual([]); // …so Rosey does not
+      expect(calls.scheduled).toEqual([]);
+    }
+  });
+
+  it("the other direction: a Rosey-only command is hers, and does not wake @Aida", async () => {
+    const { d, calls } = deps();
+    expect(matchAskTrigger("@Rosey לקנות חלב")).toBeNull();
+    expect(await captureMessage(wa("@Rosey לקנות חלב"), d)).toMatchObject({ kind: "command" });
+    expect(calls.applied).toHaveLength(1);
+  });
+
+  it("an @Aida post echoed back before her marker is written is still never a command", async () => {
+    // @Aida's marker lands only after her send resolves, so at capture time the
+    // echo can look like the owner's own message (both are from_me).
+    let marked = false;
+    const { d, calls } = deps({
+      isAidaPost: async () => marked,
+      ownEchoGrace: async () => {
+        marked = true; // her send resolves during the grace
+      },
+    });
+    expect(await captureMessage(wa("@Rosey הוסיפה: לקנות חלב", { fromMe: true }), d)).toEqual({
+      kind: "ignored",
+      reason: "aida_post",
+    });
+    expect(calls.applied).toEqual([]);
+  });
+
+  it("the owner's own command (from_me, no marker) applies after the grace", async () => {
+    const { d, calls } = deps();
+    const r = await captureMessage(wa("@Rosey לקנות חלב", { fromMe: true }), d);
+    expect(r).toMatchObject({ kind: "command" });
+    expect(calls.graces).toBe(1);
+    expect(calls.applied).toHaveLength(1);
+  });
+
+  it("a member's command (not from_me) never waits: only the owner's account can be @Aida", async () => {
+    const { d, calls } = deps();
+    await captureMessage(wa("@Rosey לקנות חלב"), d);
+    expect(calls.graces).toBe(0);
+    expect(calls.applied).toHaveLength(1);
   });
 });

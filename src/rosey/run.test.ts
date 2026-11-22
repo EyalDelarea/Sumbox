@@ -146,6 +146,14 @@ describe("runAggregation", () => {
     expect(m2.seen.join("\n")).toContain("להתקשר לאינסטלטור");
   });
 
+  it("never replays a message addressed to @Aida as a command", async () => {
+    const g = await group();
+    await message(g, "@Aida מה @Rosey הוסיפה?", 10 * 60_000);
+    const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    expect(run.tagged).toMatchObject({ commands: 0 });
+    expect(await listTasks(pool, g, { includeClosed: true })).toEqual([]);
+  });
+
   it("does not advance the cursor when a batch fails, so the messages are read again", async () => {
     const g = await group();
     await message(g, "לקנות חלב");

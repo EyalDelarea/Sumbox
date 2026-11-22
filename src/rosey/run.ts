@@ -6,6 +6,8 @@
  */
 
 import type pg from "pg";
+// @Aida's trigger matcher: a pure module, no path into src/ask (see capture.ts).
+import { matchAskTrigger } from "../collector/ask-trigger.js";
 import {
   insertTask,
   liveTasksRaisedBetween,
@@ -149,7 +151,10 @@ export async function runAggregation(
     failures: 0,
   };
   const late = messages.filter(
-    (m) => !m.isVoice && m.ingestedAt.getTime() - m.sentAt.getTime() > LIVE_HORIZON_MS,
+    (m) =>
+      !m.isVoice &&
+      m.ingestedAt.getTime() - m.sentAt.getTime() > LIVE_HORIZON_MS &&
+      !matchAskTrigger(m.content), // hers alone (see capture.ts)
   );
   const applied = await messagesWithTagEvents(
     pool,

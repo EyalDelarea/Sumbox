@@ -21,6 +21,7 @@
 
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type pg from "pg";
+import { isAidaMessage } from "../db/repositories/aida-messages.js";
 import {
   getEnabledGroupJids,
   ROSEY_COMMAND_KEY,
@@ -36,6 +37,13 @@ import { makeTagMatcher } from "./tags.js";
 
 /** How far back a live suggestion pass may read (the cursor bounds it further). */
 export const LIVE_SUGGEST_DAYS = 14;
+
+/**
+ * How long a from_me command waits before @Aida's marker is read. Her marker is
+ * written right after her send resolves; the echo of that send can reach the
+ * collector first. Only the owner's own commands pay this.
+ */
+export const OWN_ECHO_GRACE_MS = 5_000;
 
 type Log = {
   info: (obj: unknown, msg?: string) => void;
@@ -57,6 +65,8 @@ export function makeRoseyLive(deps: {
   generate?: Generate;
   /** Injectable clock for tests. */
   now?: () => number;
+  /** Injectable for tests; defaults to OWN_ECHO_GRACE_MS. */
+  ownEchoGraceMs?: number;
 }): RoseyLive {
   const { pool, cfg, log } = deps;
   const clock = deps.now ?? Date.now;
@@ -71,6 +81,7 @@ export function makeRoseyLive(deps: {
   /** When each group's pending pass was first deferred (the debounce cap). */
   const firstDeferred = new Map<number, number>();
   let stopped = false;
+  const graceMs = deps.ownEchoGraceMs ?? OWN_ECHO_GRACE_MS;
 
   const suggestNow = (groupId: number) =>
     queue
@@ -149,6 +160,8 @@ export function makeRoseyLive(deps: {
           messageIdFor: async (groupId, externalId) =>
             (await getMessageIdByExternalId(pool, groupId, externalId))?.id ?? null,
           isOwnPost: (groupId, externalId) => isRoseyPost(pool, groupId, externalId),
+          isAidaPost: (groupId, externalId) => isAidaMessage(pool, { groupId, externalId }),
+          ownEchoGrace: () => new Promise((r) => setTimeout(r, graceMs)),
           applyCommand: (cmd, ctx) =>
             queue.run(ctx.groupId, () => applyCommand(cmd, ctx, commandStore(pool, ctx.groupId))),
           scheduleSuggestions,

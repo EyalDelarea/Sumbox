@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { recordAidaMessage } from "../db/repositories/aida-messages.js";
 import {
   ROSEY_COMMAND_KEY,
   upsertCommandPermission,
@@ -55,9 +56,16 @@ async function ingest(
   return Number(rows[0]!.id);
 }
 
-function wa(jid: string, id: string, text: string, sentAt: Date, quotedId?: string): WAMessage {
+function wa(
+  jid: string,
+  id: string,
+  text: string,
+  sentAt: Date,
+  quotedId?: string,
+  fromMe = false,
+): WAMessage {
   return {
-    key: { id, remoteJid: jid, participant: "972500000001@s.whatsapp.net", fromMe: false },
+    key: { id, remoteJid: jid, participant: "972500000001@s.whatsapp.net", fromMe },
     messageTimestamp: sentAt.getTime() / 1000,
     message: quotedId
       ? { extendedTextMessage: { text, contextInfo: { stanzaId: quotedId } } }
@@ -132,6 +140,44 @@ describe("makeRoseyLive", () => {
     const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
     await ingest(g.id, externalId, "@Rosey לקנות חלב", sentAt);
     await live.onMessage(wa(g.jid, externalId, "@Rosey לקנות חלב", sentAt));
+    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+    live.stop();
+  });
+
+  it("never applies @Aida's echo as a command, even when it arrives before her marker", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate, ownEchoGraceMs: 80 });
+    const g = await group(true);
+    const externalId = `WA-${randomUUID()}`;
+    const text = "@Rosey הוסיפה: לקנות חלב"; // her reply naming Rosey
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await ingest(g.id, externalId, text, sentAt);
+    // Her send resolves (and her marker is written) only after the echo landed.
+    const marker = new Promise((r) => setTimeout(r, 20)).then(() =>
+      recordAidaMessage(pool, { groupId: g.id, externalId }),
+    );
+    await live.onMessage(wa(g.jid, externalId, text, sentAt, undefined, true));
+    await marker;
+    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+    live.stop();
+  });
+
+  it("the owner's own command (from_me, never marked) still applies, after the grace", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate, ownEchoGraceMs: 10 });
+    const g = await group(true);
+    const externalId = `WA-${randomUUID()}`;
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await ingest(g.id, externalId, "@Rosey לקנות חלב", sentAt);
+    await live.onMessage(wa(g.jid, externalId, "@Rosey לקנות חלב", sentAt, undefined, true));
+    const tasks = await listTasks(pool, g.id, { includeClosed: true });
+    expect(tasks.map((t) => [t.title, t.origin])).toEqual([["לקנות חלב", "tag"]]);
+    live.stop();
+  });
+
+  it("a message that wakes @Aida is hers alone: Rosey applies nothing", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate });
+    const g = await group(true);
+    await deliver(live, g, "@Rosey לקנות חלב @Aida");
+    await new Promise((r) => setTimeout(r, 60)); // past the debounce: no pass either
     expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
     live.stop();
   });
