@@ -269,6 +269,15 @@ describe("applyPollVote", () => {
     expect(marks).toEqual(["10:done"]);
   });
 
+  it("reads one voter's current selection back", async () => {
+    const { store } = voteStore([10, 11]);
+    const votes = new PollVotes();
+    expect([...votes.selection("P", "dana")]).toEqual([]);
+    await applyPollVote(store, votes, vote("dana", [1, 0]));
+    expect([...votes.selection("P", "dana")].sort()).toEqual([0, 1]);
+    expect([...votes.selection("P", "yossi")]).toEqual([]);
+  });
+
   it("a poll that is not hers changes nothing", async () => {
     const { store, marks } = voteStore(null);
     expect(await applyPollVote(store, new PollVotes(), vote("dana", [0]))).toEqual({

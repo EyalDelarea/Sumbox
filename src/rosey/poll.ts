@@ -249,7 +249,11 @@ export async function replyWithPolls(
 /**
  * Who has ticked what, per poll. WhatsApp delivers a vote as the voter's WHOLE
  * current selection, so the previous selection is needed to see what changed.
- * In memory: the real slice can rebuild it from the poll's vote messages.
+ *
+ * In memory only, and nothing else records votes: a restart forgets every
+ * selection, after which an untick looks like no change and reopens nothing.
+ * The real WhatsApp slice needs a persisted vote store first, which is a
+ * schema change of its own.
  */
 export class PollVotes {
   private readonly polls = new Map<string, Map<string, ReadonlySet<number>>>();
@@ -261,6 +265,11 @@ export class PollVotes {
     const before = voters.get(voter) ?? new Set<number>();
     voters.set(voter, selected);
     return before;
+  }
+
+  /** One voter's current selection on a poll (empty when they never voted). */
+  selection(pollId: string, voter: string): ReadonlySet<number> {
+    return this.polls.get(pollId)?.get(voter) ?? new Set<number>();
   }
 
   /** Every voter on one option of a poll. */

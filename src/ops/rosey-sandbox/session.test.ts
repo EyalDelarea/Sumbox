@@ -107,9 +107,13 @@ describe("RoseySandbox", () => {
     expect([poll.name, poll.options]).toEqual(["📋 המשימות שלנו", ["לתקן ברז"]]);
 
     await s.vote({ pollId: poll.id, member: owner, option: 0 });
-    expect((await s.state()).tasks[0]).toMatchObject({ status: "done", statusSource: "poll" });
+    let after = await s.state();
+    expect(after.tasks[0]).toMatchObject({ status: "done", statusSource: "poll" });
+    expect(after.polls[0]!.votes).toEqual({ [owner]: [0] }); // read from her vote record
     await s.vote({ pollId: poll.id, member: owner, option: 0 });
-    expect((await s.state()).tasks[0]).toMatchObject({ status: "open", statusSource: "poll" });
+    after = await s.state();
+    expect(after.tasks[0]).toMatchObject({ status: "open", statusSource: "poll" });
+    expect(after.polls[0]!.votes).toEqual({});
     s.stop();
   });
 

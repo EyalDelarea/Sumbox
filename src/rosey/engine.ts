@@ -138,6 +138,11 @@ export type RoseyEngineDeps = {
    * request is answered with checklist polls; otherwise with the text list.
    */
   pollSender?: RoseyPollSender;
+  /**
+   * Who has ticked what on her polls. Injectable so a host can show the ticks
+   * from the one record the vote path keeps; a fresh one otherwise.
+   */
+  pollVotes?: PollVotes;
   /** How a list request is answered, read per request; defaults to "text". */
   listStyle?: () => "text" | "poll";
   /** A fresh WhatsApp message id for one of her posts, known before it is sent. */
@@ -298,7 +303,7 @@ export function makeRoseyEngine(deps: RoseyEngineDeps): RoseyLive {
     timers.set(groupId, t);
   };
 
-  const votes = new PollVotes();
+  const votes = deps.pollVotes ?? new PollVotes();
 
   return {
     onPollVote: async (vote) => {

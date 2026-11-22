@@ -28,7 +28,7 @@ import {
 import type { CaptureResult } from "../../rosey/capture.js";
 import { loadRoseyConfig, type RoseyConfig } from "../../rosey/config.js";
 import { makeRoseyEngine, type RoseyLive } from "../../rosey/engine.js";
-import type { RoseyPollSender } from "../../rosey/poll.js";
+import { PollVotes, type RoseyPollSender } from "../../rosey/poll.js";
 import type { RoseySender } from "../../rosey/reply.js";
 import type { Generate } from "../../rosey/run.js";
 import {
@@ -60,9 +60,10 @@ export type SandboxPoll = {
   name: string;
   options: string[];
   quotedId: string | null;
-  /** Each member's current ticks, by member index. */
-  votes: Record<number, number[]>;
 };
+
+/** A poll as the page shows it: each member's current ticks, by member index. */
+export type SandboxPollView = SandboxPoll & { votes: Record<number, number[]> };
 
 /** Why capture left a message alone, in a few words. */
 const REASONS: Record<string, string> = {
@@ -126,6 +127,8 @@ export class RoseySandbox {
   private members: Member[] = [];
   private group: { name: string; jid: string } | null = null;
   private polls: SandboxPoll[] = [];
+  /** Her vote path's record of who ticked what; handed to the engine, read for display. */
+  private votes = new PollVotes();
   /** Which message each message quoted (posted here), by external id. */
   private quotes = new Map<string, string>();
   /** Text as posted, by external id: storage collapses whitespace (normalize), WhatsApp does not. */
@@ -152,6 +155,7 @@ export class RoseySandbox {
     if (!this.group) throw new Error(`group ${this.deps.groupId} has no WhatsApp id`);
     this.members = await listMembers(this.deps.scratch, this.deps.groupId);
     this.polls = [];
+    this.votes = new PollVotes();
     this.quotes.clear();
     this.posted.clear();
     const log = (level: SandboxEvent["level"]) => (obj: unknown, msg?: string) =>
@@ -164,6 +168,7 @@ export class RoseySandbox {
       log: { info: log("info"), warn: log("warn"), error: log("error") },
       sender: this.textSink(generation),
       pollSender: this.pollSink(),
+      pollVotes: this.votes,
       listStyle: () => this.listStyle,
       newMessageId: sandboxMessageId,
       onCapture: (id, r) => this.event("info", describeCapture(id, r)),
@@ -241,7 +246,6 @@ export class RoseySandbox {
           name: poll.name,
           options: poll.options,
           quotedId: opts.quoted?.key?.id ?? null,
-          votes: {},
         });
         return { key: { id: opts.messageId } } as WAMessage;
       },
@@ -309,30 +313,43 @@ export class RoseySandbox {
     return this.deliver(m, text, input.quotedId ?? null);
   }
 
+  /** The voter id a member votes under: their JID, or a stand-in when it is unknown. */
+  private voterOf(index: number): string {
+    return this.members[index]?.jid ?? `member:${index}`;
+  }
+
+  /** Each member's current ticks on one poll, read from the vote path's record. */
+  private pollTicks(pollId: string): Record<number, number[]> {
+    const out: Record<number, number[]> = {};
+    for (const [i] of this.members.entries()) {
+      const sel = this.votes.selection(pollId, this.voterOf(i));
+      if (sel.size > 0) out[i] = [...sel].sort((a, b) => a - b);
+    }
+    return out;
+  }
+
   /** Toggle one option of one of her polls for a member, then apply the vote. */
   async vote(input: { pollId: string; member: number; option: number }): Promise<void> {
     const poll = this.polls.find((p) => p.id === input.pollId);
     if (!poll) throw new Error("unknown poll");
     if (input.option < 0 || input.option >= poll.options.length) throw new Error("unknown option");
-    const m = this.member(input.member);
-    const mine = new Set(poll.votes[input.member] ?? []);
+    this.member(input.member);
+    const voter = this.voterOf(input.member);
+    // The ticks are her vote path's own record (PollVotes), never a copy: a
+    // vote it did not take leaves them as they were.
+    const mine = new Set(this.votes.selection(poll.id, voter));
     if (mine.has(input.option)) mine.delete(input.option);
     else mine.add(input.option);
-    const before = poll.votes[input.member];
     const selected = [...mine].sort((a, b) => a - b);
-    poll.votes[input.member] = selected;
-    // The tick shows only if her vote path took it.
     try {
       const out = await this.live().onPollVote({
         jid: this.group!.jid,
         pollId: poll.id,
-        voter: m.jid ?? `member:${input.member}`,
+        voter,
         selected,
       });
       if (out.kind !== "applied") throw new Error(`vote not applied: ${out.kind}`);
     } catch (err) {
-      if (before) poll.votes[input.member] = before;
-      else delete poll.votes[input.member];
       this.event("error", `vote on poll ${poll.id.slice(-6)} failed: ${(err as Error).message}`);
       throw err;
     }
@@ -366,7 +383,7 @@ export class RoseySandbox {
     group: { name: string };
     members: Member[];
     history: (HistoryRow & { quotedId: string | null })[];
-    polls: SandboxPoll[];
+    polls: SandboxPollView[];
     tasks: RoseyTaskView[];
     events: SandboxEvent[];
     listStyle: ListStyle;
@@ -384,7 +401,7 @@ export class RoseySandbox {
         text: (r.externalId && this.posted.get(r.externalId)) || r.text,
         quotedId: r.externalId ? (this.quotes.get(r.externalId) ?? null) : null,
       })),
-      polls: this.polls,
+      polls: this.polls.map((p) => ({ ...p, votes: this.pollTicks(p.id) })),
       tasks: await listTasks(this.deps.scratch, this.deps.groupId, { includeClosed: true }),
       events: this.events,
       listStyle: this.listStyle,
