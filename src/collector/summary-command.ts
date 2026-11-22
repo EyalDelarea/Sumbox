@@ -29,7 +29,7 @@
  *  1. Kill switch + allowlist semantics — the outbound guard is the last gate:
  *     WHATSAPP_ALLOW_SEND=true → guard is a no-op; =false → every send throws
  *     unless the JID is in the guard's allowlist (the allowlist *permits* a send
- *     in read-only mode). ....... outbound-guard.test.ts ("leaves all methods
+ *     while global sending is off). outbound-guard.test.ts ("leaves all methods
  *     untouched", "lets an allowlisted JID call through while others still throw")
  *  2. Deny by default — a command from a group not enabled in the DB never
  *     sends. ........................ summary-command.test.ts ("ignores the

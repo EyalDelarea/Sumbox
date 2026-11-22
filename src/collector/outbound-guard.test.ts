@@ -1,5 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { applyOutboundGuard, HARD_BLOCKED, SILENCED } from "./outbound-guard.js";
+import {
+  applyOutboundGuard,
+  HARD_BLOCKED,
+  PASSIVE_MODE_BANNER,
+  SILENCED,
+} from "./outbound-guard.js";
 
 /** A minimal fake Baileys socket exposing the methods the guard touches. */
 function fakeSock() {
@@ -129,5 +135,20 @@ describe("applyOutboundGuard", () => {
   it("tolerates a socket missing some methods (no crash)", () => {
     const partial: Record<string, unknown> = { sendMessage: async () => "x" };
     expect(() => applyOutboundGuard(partial as never, false)).not.toThrow();
+  });
+});
+
+describe("PASSIVE_MODE_BANNER", () => {
+  // The banner is the operator's only startup statement of what the device sends.
+  // It once claimed "will NOT send messages" while /סיכום and @Aida replies went out.
+  it("names every kind of send the allowlist lets through", () => {
+    for (const sent of ["/סיכום", "@Aida", "error replies", "⏳", "⏸", "✅", "❌", "enabled"]) {
+      expect(PASSIVE_MODE_BANNER).toContain(sent);
+    }
+  });
+
+  it("is shown verbatim in the README", () => {
+    const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+    expect(readme).toContain(PASSIVE_MODE_BANNER);
   });
 });
