@@ -112,6 +112,7 @@ async function seedGroup(name: string) {
     externalId: `P-${randomUUID()}`,
     secret: new Uint8Array(32).fill(9),
     taskIds: [taskId],
+    options: ["לתקן ברז"],
   });
   return { groupId, taskId, textId: textId! };
 }

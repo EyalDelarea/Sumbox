@@ -489,24 +489,40 @@ export async function reconcileRoseyMessageId(
 }
 
 /**
- * The ledger key of one option of a poll: `<poll id>#<index>`. A WhatsApp
- * message id never holds a "#", so an option row can never match a real
- * message (the own-echo guard reads exact ids).
+ * The ledger key of one option of a poll: `<poll id>#<index>#<option text>`.
+ * A WhatsApp message id never holds a "#", so an option row can never match a
+ * real message (the own-echo guard reads exact ids), and the index never holds
+ * one either: the key splits on its first two "#", whatever the text holds.
+ *
+ * The text rides in the key because rosey_messages has no column for it and
+ * this slice makes no schema change. It is recorded because a real vote names
+ * its options only by the SHA-256 of their text (Baileys
+ * getAggregateVotesInPollMessage), so mapping a vote back needs the text as
+ * sent, not as the task's title reads later.
  */
-export function pollOptionKey(pollId: string, index: number): string {
-  return `${pollId}#${index}`;
+export function pollOptionKey(pollId: string, index: number, text: string): string {
+  return `${pollId}#${index}#${text}`;
 }
 
 /**
  * Record one list poll before it is sent (rosey/poll.ts): the poll's own row
  * (kind 'poll', its message secret: a vote is encrypted with it) and one row
- * per option holding that option's task. One transaction: a poll is never
- * recorded without its options.
+ * per option holding that option's task and text. One transaction: a poll is
+ * never recorded without its options.
  */
 export async function recordRoseyPoll(
   db: Db,
-  input: { groupId: number; externalId: string; secret: Uint8Array; taskIds: readonly number[] },
+  input: {
+    groupId: number;
+    externalId: string;
+    secret: Uint8Array;
+    taskIds: readonly number[];
+    options: readonly string[];
+  },
 ): Promise<void> {
+  if (input.options.length !== input.taskIds.length) {
+    throw new Error("recordRoseyPoll: one option text per task");
+  }
   await inTransaction(db, async (c) => {
     await c.query(
       `INSERT INTO rosey_messages (group_id, external_id, kind, message_secret)
@@ -517,10 +533,38 @@ export async function recordRoseyPoll(
       await c.query(
         `INSERT INTO rosey_messages (group_id, external_id, kind, task_id)
          VALUES ($1, $2, 'poll', $3)`,
-        [input.groupId, pollOptionKey(input.externalId, i), taskId],
+        [input.groupId, pollOptionKey(input.externalId, i, input.options[i]!), taskId],
       );
     }
   });
+}
+
+type PollOption = { taskId: number | null; text: string };
+
+/** One of her polls' options by index, or null when the id is not her poll in that group. */
+async function pollOptions(db: Db, groupId: number, pollId: string): Promise<PollOption[] | null> {
+  const head = await db.query(
+    `SELECT 1 FROM rosey_messages
+      WHERE group_id = $1 AND external_id = $2 AND kind = 'poll' AND message_secret IS NOT NULL`,
+    [groupId, pollId],
+  );
+  if ((head.rowCount ?? 0) === 0) return null;
+  const { rows } = await db.query<{ external_id: string; task_id: string | null }>(
+    `SELECT external_id, task_id FROM rosey_messages
+      WHERE group_id = $1 AND kind = 'poll' AND starts_with(external_id, $2)`,
+    [groupId, `${pollId}#`],
+  );
+  const out: PollOption[] = [];
+  for (const r of rows) {
+    const rest = r.external_id.slice(pollId.length + 1);
+    const hash = rest.indexOf("#");
+    if (hash < 0) continue;
+    const index = Number(rest.slice(0, hash));
+    if (Number.isInteger(index) && index >= 0) {
+      out[index] = { taskId: r.task_id ? Number(r.task_id) : null, text: rest.slice(hash + 1) };
+    }
+  }
+  return Array.from(out, (o) => o ?? { taskId: null, text: "" });
 }
 
 /**
@@ -533,23 +577,19 @@ export async function pollTaskIds(
   groupId: number,
   pollId: string,
 ): Promise<(number | null)[] | null> {
-  const head = await db.query(
-    `SELECT 1 FROM rosey_messages
-      WHERE group_id = $1 AND external_id = $2 AND kind = 'poll' AND message_secret IS NOT NULL`,
-    [groupId, pollId],
-  );
-  if ((head.rowCount ?? 0) === 0) return null;
-  const { rows } = await db.query<{ external_id: string; task_id: string | null }>(
-    `SELECT external_id, task_id FROM rosey_messages
-      WHERE group_id = $1 AND kind = 'poll' AND starts_with(external_id, $2)`,
-    [groupId, `${pollId}#`],
-  );
-  const out: (number | null)[] = [];
-  for (const r of rows) {
-    const index = Number(r.external_id.slice(pollId.length + 1));
-    if (Number.isInteger(index) && index >= 0) out[index] = r.task_id ? Number(r.task_id) : null;
-  }
-  return Array.from(out, (t) => t ?? null);
+  return (await pollOptions(db, groupId, pollId))?.map((o) => o.taskId) ?? null;
+}
+
+/**
+ * Each option's text as it was sent, by index, or null when the id is not a
+ * poll of hers in that group: what vote decryption will hash against.
+ */
+export async function pollOptionTexts(
+  db: Db,
+  groupId: number,
+  pollId: string,
+): Promise<string[] | null> {
+  return (await pollOptions(db, groupId, pollId))?.map((o) => o.text) ?? null;
 }
 
 /**

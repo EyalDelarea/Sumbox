@@ -84,7 +84,12 @@ describe("buildListPolls", () => {
 
 function harness(over: Partial<PollReplyDeps> = {}, live = [task(1, "לתקן ברז")]) {
   const events: string[] = [];
-  const recorded: Array<{ externalId: string; taskIds: number[]; secret: Uint8Array }> = [];
+  const recorded: Array<{
+    externalId: string;
+    taskIds: number[];
+    options: string[];
+    secret: Uint8Array;
+  }> = [];
   let ids = 0;
   let posts = 0;
   const deps: PollReplyDeps = {
@@ -125,6 +130,8 @@ describe("replyWithPolls", () => {
     });
     expect(h.events).toEqual(["record:POLL-1", "send:POLL-1:0", "record:POLL-2", "send:POLL-2:0"]);
     expect(h.recorded.map((r) => r.taskIds)).toEqual([[1, 2], [3]]);
+    // The option texts as sent: a vote names its options by their hash.
+    expect(h.recorded.map((r) => r.options)).toEqual([["א", "ב"], ["חלב"]]);
   });
 
   it("off sends nothing; a group off her list gets nothing; a failed allowlist read blocks", async () => {

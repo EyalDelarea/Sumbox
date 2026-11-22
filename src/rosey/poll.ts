@@ -11,7 +11,7 @@
  *     rate limits (counted in poll posts), and no "@" anywhere. Each poll is
  *     recorded BEFORE it leaves: one rosey_messages row for the poll (kind
  *     'poll', with its message secret) and one per option, keyed
- *     `<poll id>#<option index>` with the option's task_id. That ledger is how a
+ *     `<poll id>#<option index>#<option text>` with the option's task_id. That ledger is how a
  *     vote is mapped back to a task, with no schema change.
  *  3. applyPollVote — a vote (poll id, voter, the options that voter now has
  *     ticked) in, status events out, through the poll layer of D4 (status.ts):
@@ -142,7 +142,7 @@ export type PollReplyDeps = {
   /** Record a poll and its options. Called BEFORE the send; throwing sends nothing. */
   record: (
     groupId: number,
-    poll: { externalId: string; secret: Uint8Array; taskIds: number[] },
+    poll: { externalId: string; secret: Uint8Array; taskIds: number[]; options: string[] },
   ) => Promise<void>;
   newMessageId: () => string;
   /** Injectable for tests; defaults to 32 random bytes. */
@@ -202,7 +202,12 @@ export async function replyWithPolls(
     const externalId = deps.newMessageId();
     const secret = deps.newSecret?.() ?? randomBytes(POLL_SECRET_BYTES);
     try {
-      await deps.record(req.groupId, { externalId, secret, taskIds: poll.taskIds });
+      await deps.record(req.groupId, {
+        externalId,
+        secret,
+        taskIds: poll.taskIds,
+        options: poll.options,
+      });
     } catch (err) {
       deps.log?.error({ err, groupId: req.groupId }, "rosey: list poll not recorded; not sent");
       return { kind: "failed" };

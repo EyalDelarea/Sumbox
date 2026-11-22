@@ -8,6 +8,7 @@ import {
   isRoseyPost,
   listTasks,
   liveTasksRaisedBetween,
+  pollOptionTexts,
   pollTaskIds,
   reconcileRoseyMessageId,
   recordRoseyMessage,
@@ -473,7 +474,13 @@ describe("her list polls in the ledger", () => {
     const a = (await task(g, m, { title: "א", titleKey: "א" }))!;
     const b = (await task(g, m, { title: "ב", titleKey: "ב" }))!;
     const secret = new Uint8Array(32).fill(7);
-    await recordRoseyPoll(pool, { groupId: g, externalId: "POLL1", secret, taskIds: [b, a] });
+    await recordRoseyPoll(pool, {
+      groupId: g,
+      externalId: "POLL1",
+      secret,
+      taskIds: [b, a],
+      options: ["ב #1", "א"], // a "#" in the text must not confuse the key
+    });
 
     expect(await pollTaskIds(pool, g, "POLL1")).toEqual([b, a]);
     expect(await pollTaskIds(pool, other, "POLL1")).toBeNull();
@@ -485,6 +492,9 @@ describe("her list polls in the ledger", () => {
       [g],
     );
     expect(new Uint8Array(rows[0]!.message_secret)).toEqual(secret);
+    // Each option's text is recorded as sent (vote decryption hashes it).
+    expect(await pollOptionTexts(pool, g, "POLL1")).toEqual(["ב #1", "א"]);
+    expect(await pollOptionTexts(pool, other, "POLL1")).toBeNull();
   });
 
   it("an option whose task was deleted maps to null; a poll vote never moves a manual status", async () => {
@@ -497,6 +507,7 @@ describe("her list polls in the ledger", () => {
       externalId: "POLL2",
       secret: new Uint8Array(32),
       taskIds: [a, b],
+      options: ["א", "ב"],
     });
     await pool.query(`DELETE FROM rosey_tasks WHERE id = $1`, [a]);
     expect(await pollTaskIds(pool, g, "POLL2")).toEqual([null, b]);
