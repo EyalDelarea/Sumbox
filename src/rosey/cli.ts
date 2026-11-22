@@ -96,7 +96,7 @@ export function registerRoseyCommands(program: Command): void {
           const { makeGenerate, runAggregation } = await import("./run.js");
           const cfg = loadRoseyConfig();
           const t0 = Date.now();
-          const { report, cursorAdvanced } = await runAggregation(pool, groupId, {
+          const { report, tagged, cursorAdvanced } = await runAggregation(pool, groupId, {
             cfg,
             generate: makeGenerate(cfg),
             days,
@@ -107,7 +107,7 @@ export function registerRoseyCommands(program: Command): void {
               ),
           });
           process.stdout.write(
-            `${JSON.stringify({ groupId, days, model: cfg.model, seconds: Math.round((Date.now() - t0) / 1000), cursorAdvanced, ...report }, null, 2)}\n`,
+            `${JSON.stringify({ groupId, days, model: cfg.model, seconds: Math.round((Date.now() - t0) / 1000), cursorAdvanced, ...report, tagged }, null, 2)}\n`,
           );
           if (!cursorAdvanced) process.exitCode = 2;
         });
@@ -115,6 +115,36 @@ export function registerRoseyCommands(program: Command): void {
         fail("aggregate", err);
       }
     });
+
+  for (const [name, enabled] of [
+    ["enable", true],
+    ["disable", false],
+  ] as const) {
+    rosey
+      .command(name)
+      .description(
+        enabled
+          ? "Let Rosey capture tasks live in a group (her own 'rosey' allowlist; needs ROSEY_ENABLED=true)"
+          : "Stop Rosey capturing tasks live in a group (stored tasks are kept)",
+      )
+      .requiredOption("--group <id>", "Group id")
+      .action(async (o: { group: string }) => {
+        try {
+          const groupId = positiveInt(o.group, "--group");
+          await withPool(async (pool) => {
+            const { ROSEY_COMMAND_KEY, upsertCommandPermission } = await import(
+              "../db/repositories/group-command-permissions.js"
+            );
+            await upsertCommandPermission(pool, { groupId, command: ROSEY_COMMAND_KEY, enabled });
+            process.stdout.write(
+              `rosey ${enabled ? "enabled" : "disabled"} for group ${groupId}\n`,
+            );
+          });
+        } catch (err) {
+          fail(name, err);
+        }
+      });
+  }
 
   rosey
     .command("set")
