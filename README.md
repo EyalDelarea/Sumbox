@@ -365,7 +365,8 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 
 | Key | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/whatsapp_sum` | Postgres connection string |
+| `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/whatsapp_sum` | Postgres connection string. Its password must match `SUMBOX_POSTGRES_PASSWORD`. |
+| `SUMBOX_POSTGRES_PASSWORD` | `postgres` | Password Docker Compose gives the `postgres` user. It applies only when the database volume is first created; to change it on an existing install, also run `ALTER USER` (see `.env.example`). |
 | `DATA_DIR` | `./data` | Directory for auth state, media downloads, and exports |
 | `TRANSCRIPTION_PYTHON` | `python3` | Python interpreter with `faster-whisper` installed. `.env.example` sets this to `./.venv/bin/python` for the venv flow above. |
 | `TRANSCRIPTION_MODEL` | `ivrit-ai/whisper-large-v3-turbo-ct2` | HuggingFace model for Hebrew speech-to-text (downloaded on first use) |
@@ -384,7 +385,9 @@ Copy `.env.example` to `.env`. All keys have defaults; the table below lists eve
 | `VISION_MAX_VIDEO_MB` | `25` | Maximum video file size (MB) accepted for analysis |
 | `VISION_NUM_CTX` | `8192` | Context window for the vision model (kept small to control KV-cache memory) |
 | `WEB_PORT` | `8787` | Port for the local web UI |
-| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` | RabbitMQ AMQP connection URL |
+| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` | RabbitMQ AMQP connection URL. Its user and password must match the two keys below. |
+| `SUMBOX_RABBITMQ_USER` | `guest` | RabbitMQ user Docker Compose creates |
+| `SUMBOX_RABBITMQ_PASSWORD` | `guest` | Password for `SUMBOX_RABBITMQ_USER` |
 | `LOG_LEVEL` | `info` | pino log level (`trace` / `debug` / `info` / `warn` / `error` / `fatal`) |
 | `WORKER_CONCURRENCY` | `1` | Concurrent jobs per worker process |
 | `WORKER_REQUEUE_GRACE_MS` | `300000` | On startup the worker re-sends media jobs whose queue messages were lost; rows younger than this (ms) are left alone |

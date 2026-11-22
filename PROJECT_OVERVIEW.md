@@ -160,7 +160,7 @@ The web app (`src/web/public/`) has three surfaces:
 ## 8. Observability & ops
 
 - **App status API** (http://localhost:8787/api/status).
-- **RabbitMQ management** (http://localhost:15672, guest/guest).
+- **RabbitMQ management** (http://localhost:15672, login `SUMBOX_RABBITMQ_USER` / `SUMBOX_RABBITMQ_PASSWORD` from `.env`; `guest/guest` if unset).
 - **Self-healing**: `ops-sweep` redrives/reaps dead jobs; status snapshots give
   an observable history.
 - Logs are plain pino JSON to stdout — pipe through `pino-pretty` (wired into
