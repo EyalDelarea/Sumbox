@@ -165,8 +165,12 @@ export async function runAggregation(
     refused: 0,
     failures: 0,
   };
+  // `>=`: the cursor is a millisecond Date and created_at has microseconds, so a
+  // message stored in the cursor's own millisecond is read by the query above;
+  // dropping it here would lose it. Re-trying it is safe: an applied command is
+  // cited by a tag event, and a live-decided one is named by skipCommand.
   const candidates = messages.filter(
-    (m) => !m.isVoice && (cursor === null || m.ingestedAt > cursor) && !matchAskTrigger(m.content),
+    (m) => !m.isVoice && (cursor === null || m.ingestedAt >= cursor) && !matchAskTrigger(m.content),
   );
   const applied = await messagesWithTagEvents(
     pool,

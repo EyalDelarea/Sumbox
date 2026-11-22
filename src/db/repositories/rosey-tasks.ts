@@ -251,6 +251,8 @@ export type RoseySourceMessage = {
   sentAt: Date;
   /** When the collector stored it (messages.created_at). */
   ingestedAt: Date;
+  /** WhatsApp's message id, which the live path knows before the row id. */
+  externalId: string | null;
   sender: string | null;
   content: string;
   isVoice: boolean;
@@ -278,11 +280,12 @@ export async function selectSourceMessages(
     id: string;
     sent_at: Date;
     created_at: Date;
+    external_id: string | null;
     sender: string | null;
     content: string;
     is_voice: boolean;
   }>(
-    `SELECT m.id, m.sent_at, m.created_at, p.display_name AS sender,
+    `SELECT m.id, m.sent_at, m.created_at, m.external_id, p.display_name AS sender,
             COALESCE(NULLIF(btrim(m.text_content), ''), btrim(t.transcript)) AS content,
             (t.id IS NOT NULL AND NULLIF(btrim(m.text_content), '') IS NULL) AS is_voice
        FROM messages m
@@ -304,6 +307,7 @@ export async function selectSourceMessages(
     messageId: Number(r.id),
     sentAt: r.sent_at,
     ingestedAt: r.created_at,
+    externalId: r.external_id,
     sender: r.sender,
     content: r.content,
     isVoice: r.is_voice,

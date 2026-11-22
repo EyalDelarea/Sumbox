@@ -82,26 +82,50 @@ export function makeRoseyLive(deps: {
   const firstDeferred = new Map<number, number>();
   let stopped = false;
   /**
-   * Commands the live path claimed: message id -> settled. The catch-up never
-   * replays one (it was decided here, or still is); a claim is dropped if its
-   * apply throws, so that command IS replayed. Settled claims are forgotten once
-   * a pass moves the cursor past them. In memory only: a restart forgets them,
-   * so a command decided without effect (no match) just before a restart is
-   * tried once more by the next pass.
+   * Every message the live path is handling or has decided, by WhatsApp id,
+   * registered on ARRIVAL — before any lookup — so a pass that reads a message
+   * still in flight never replays it behind the live path's back.
+   *
+   * - pending: still in capture. The catch-up skips it, and a pass that began
+   *   while it was pending holds its cursor until it ends.
+   * - decided: the live path took it as a command and finished (applied, or
+   *   decided without effect). The catch-up never replays it; it is forgotten
+   *   once a pass of its group moves the cursor past it.
+   * - anything else (a throw before the command applied, a stale replay, chatter)
+   *   leaves the registry, so the catch-up sees it like any other message.
+   *
+   * In memory only: a restart forgets it, so a command decided without effect
+   * (no match) just before a restart is tried once more by the next pass.
    */
-  const claims = new Map<number, boolean>();
+  type Handling = {
+    groupId: number | null;
+    state: "pending" | "decided" | "released";
+    /** Released to the catch-up: a command it must still replay. */
+    replay: boolean;
+  };
+  const handling = new Map<string, Handling>();
+  const release = (id: string, h: Handling, replay: boolean) => {
+    h.state = "released";
+    h.replay = replay;
+    if (handling.get(id) === h) handling.delete(id);
+  };
   const graceMs = deps.ownEchoGraceMs ?? OWN_ECHO_GRACE_MS;
 
   const suggestNow = (groupId: number) =>
     queue
       .run(groupId, async () => {
-        const settled = [...claims].filter(([, done]) => done).map(([id]) => id);
+        // Snapshot at pass start; null groupId = not yet resolved, maybe this one.
+        const ours = [...handling].filter(([, h]) => h.groupId === groupId || h.groupId === null);
+        const decided = ours.filter(([, h]) => h.state === "decided");
+        const pending = ours.filter(([, h]) => h.state === "pending").map(([, h]) => h);
         const result = await runAggregation(pool, groupId, {
           cfg,
           generate,
           days: LIVE_SUGGEST_DAYS,
-          skipCommand: (m) => claims.has(m.messageId),
-          holdCursor: () => [...claims.values()].some((done) => !done),
+          skipCommand: (m) => m.externalId !== null && handling.has(m.externalId),
+          // A message pending when the pass read may still turn out to need the
+          // catch-up (its apply threw); keep it past the cursor until it is known.
+          holdCursor: () => pending.some((h) => h.state === "pending" || h.replay),
           onBatchError: (err, b) =>
             log?.warn(
               { err, groupId, batch: b.index, size: b.size },
@@ -110,7 +134,9 @@ export function makeRoseyLive(deps: {
           onCommandError: (err, messageId) =>
             log?.warn({ err, groupId, messageId }, "rosey: replayed command failed; will retry"),
         });
-        if (result.cursorAdvanced) for (const id of settled) claims.delete(id);
+        if (result.cursorAdvanced) {
+          for (const [id, h] of decided) if (handling.get(id) === h) handling.delete(id);
+        }
         return result;
       })
       .then(({ report, tagged, cursorAdvanced }) =>
@@ -164,38 +190,50 @@ export function makeRoseyLive(deps: {
       // finally runs, a live command would read as a replay and wait for the
       // next pass instead of applying now.
       const arrivedAt = clock();
-      let claimed: number | null = null;
+      const id = msg.key?.id ?? "";
+      const h: Handling = { groupId: null, state: "pending", replay: false };
+      if (id) handling.set(id, h);
+      let claimed = false;
+      let applied = false;
       await arrivals.run(chat, () =>
         captureMessage(msg, {
           now: () => arrivedAt,
           matcher,
           resolveEnabledJids: async () =>
             new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY)),
-          groupIdForJid: (jid) => groupIdForJid(pool, jid),
+          groupIdForJid: async (jid) => {
+            h.groupId = await groupIdForJid(pool, jid);
+            return h.groupId;
+          },
           messageIdFor: async (groupId, externalId) =>
             (await getMessageIdByExternalId(pool, groupId, externalId))?.id ?? null,
           isOwnPost: (groupId, externalId) => isRoseyPost(pool, groupId, externalId),
           isAidaPost: (groupId, externalId) => isAidaMessage(pool, { groupId, externalId }),
           ownEchoGrace: () => new Promise((r) => setTimeout(r, graceMs)),
-          claimCommand: (messageId) => {
-            claimed = messageId;
-            claims.set(messageId, false);
+          claimCommand: () => {
+            claimed = true;
           },
           applyCommand: async (cmd, ctx) => {
-            try {
-              return await queue.run(ctx.groupId, () =>
-                applyCommand(cmd, ctx, commandStore(pool, ctx.groupId)),
-              );
-            } catch (err) {
-              claims.delete(ctx.messageId); // not applied: the catch-up replays it
-              throw err;
-            }
+            const out = await queue.run(ctx.groupId, () =>
+              applyCommand(cmd, ctx, commandStore(pool, ctx.groupId)),
+            );
+            applied = true;
+            return out;
           },
           scheduleSuggestions,
           log,
-        }).finally(() => {
-          if (claimed !== null && claims.has(claimed)) claims.set(claimed, true);
-        }),
+        }).then(
+          (r) => {
+            if (claimed) h.state = "decided";
+            else release(id, h, r.kind === "ignored" && r.reason === "stale");
+          },
+          (err: unknown) => {
+            // Thrown before any command applied: the catch-up must see it.
+            if (claimed && applied) h.state = "decided";
+            else release(id, h, true);
+            throw err;
+          },
+        ),
       );
     },
     stop: () => {
@@ -203,6 +241,7 @@ export function makeRoseyLive(deps: {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
       firstDeferred.clear();
+      handling.clear();
     },
   };
 }

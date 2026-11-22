@@ -234,6 +234,99 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
+  it("one group's pass never forgets what the live path decided in another", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate });
+    const a = await group(true);
+    const b = await group(true);
+    await deliver(live, a, "@Rosey בוצע לתקן מזגן"); // A: nothing to close yet
+    await deliver(live, a, "@Rosey לתקן מזגן");
+    await deliver(live, b, "צריך לקנות מסנן"); // B's pass runs and advances B's cursor
+    await vi.waitFor(async () => {
+      expect(await listTasks(pool, b.id, { includeClosed: true })).toHaveLength(1);
+    });
+    await deliver(live, a, "צריך לקנות נורה"); // now A's pass
+    await vi.waitFor(async () => {
+      expect(await listTasks(pool, a.id, { includeClosed: true })).toHaveLength(2);
+    });
+    const tasks = await listTasks(pool, a.id, { includeClosed: true });
+    expect(tasks.find((t) => t.title === "לתקן מזגן")?.status).toBe("open");
+    live.stop();
+  });
+
+  it("a command that throws before its apply (its quote lookup failed) is replayed", async () => {
+    const boom = `WA-${randomUUID()}`;
+    const flakyPool = new Proxy(pool, {
+      get(target, prop) {
+        if (prop === "query") {
+          return (...args: Parameters<pg.Pool["query"]>) => {
+            const params = args[1] as unknown[] | undefined;
+            if (Array.isArray(params) && params.includes(boom)) {
+              return Promise.reject(new Error("db blip"));
+            }
+            return (target.query as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const live = makeRoseyLive({ pool: flakyPool, cfg, generate });
+    const g = await group(true);
+    await expect(deliver(live, g, "@Rosey לתקן מזגן", boom)).rejects.toThrow("db blip");
+    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+    await deliver(live, g, "צריך לקנות מסנן"); // schedules the pass
+    await vi.waitFor(async () => {
+      const tags = (await listTasks(pool, g.id, { includeClosed: true })).filter(
+        (t) => t.origin === "tag",
+      );
+      expect(tags.map((t) => t.title)).toEqual(["לתקן מזגן"]);
+    });
+    live.stop();
+  });
+
+  it("a pass never replays a command the live path is still handling", async () => {
+    const slowId = `WA-${randomUUID()}`;
+    const slowPool = new Proxy(pool, {
+      get(target, prop) {
+        if (prop === "query") {
+          return async (...args: Parameters<pg.Pool["query"]>) => {
+            const params = args[1] as unknown[] | undefined;
+            if (Array.isArray(params) && params.includes(slowId)) {
+              await new Promise((r) => setTimeout(r, 300));
+            }
+            return (target.query as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const passes: { commands: number }[] = [];
+    const log = {
+      info: (obj: unknown, msg?: string) => {
+        if (msg?.startsWith("rosey: suggestion pass")) {
+          passes.push((obj as { tagged: { commands: number } }).tagged);
+        }
+      },
+      warn: () => {},
+      error: () => {},
+    };
+    const live = makeRoseyLive({ pool: slowPool, cfg, generate, log });
+    const g = await group(true);
+    await deliver(live, g, "צריך לקנות מסנן"); // its pass fires in 20 ms
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await ingest(g.id, slowId, "@Rosey לתקן מזגן", sentAt);
+    // In flight for 300 ms (slow lookups) while the pass reads it.
+    await live.onMessage(wa(g.jid, slowId, "@Rosey לתקן מזגן", sentAt));
+    await vi.waitFor(() => expect(passes.length).toBeGreaterThan(0));
+    expect(passes[0]!.commands).toBe(0); // the live path applied it, once
+    const tags = (await listTasks(pool, g.id, { includeClosed: true })).filter(
+      (t) => t.origin === "tag",
+    );
+    expect(tags.map((t) => t.title)).toEqual(["לתקן מזגן"]);
+    live.stop();
+  });
+
   it("applies commands in arrival order even when the first one's lookups are slower", async () => {
     const add = `WA-${randomUUID()}`;
     const done = `WA-${randomUUID()}`;
