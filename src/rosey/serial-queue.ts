@@ -9,11 +9,11 @@
  * what keeps dedup coherent (each item sees the one before it); nothing is lost.
  */
 
-export class GroupSerialQueue {
-  readonly #tails = new Map<number, Promise<unknown>>();
+export class GroupSerialQueue<K = number> {
+  readonly #tails = new Map<K, Promise<unknown>>();
 
   /** Run `fn` after every earlier job for `groupId` has settled. */
-  run<T>(groupId: number, fn: () => Promise<T>): Promise<T> {
+  run<T>(groupId: K, fn: () => Promise<T>): Promise<T> {
     const prev = this.#tails.get(groupId) ?? Promise.resolve();
     // Chain on settle, not success: one failed job must not wedge the group.
     const next = prev.then(fn, fn);

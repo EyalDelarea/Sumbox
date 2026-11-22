@@ -60,7 +60,13 @@ export function makeRoseyLive(deps: {
   const generate = deps.generate ?? makeGenerate(cfg);
   const matcher = makeTagMatcher(cfg.tags);
   const queue = new GroupSerialQueue();
+  // Arrival order per chat. Each message's gate reads (allowlist, group, ids) are
+  // awaited before it reaches `queue`, and those can finish out of order; without
+  // this, "add X" then "done X" could apply as done-then-add.
+  const arrivals = new GroupSerialQueue<string>();
   const timers = new Map<number, NodeJS.Timeout>();
+  /** When each group's pending pass was first deferred (the debounce cap). */
+  const firstDeferred = new Map<number, number>();
   let stopped = false;
 
   const suggestNow = (groupId: number) =>
@@ -75,6 +81,8 @@ export function makeRoseyLive(deps: {
               { err, groupId, batch: b.index, size: b.size },
               "rosey: suggestion batch failed",
             ),
+          onCommandError: (err, messageId) =>
+            log?.warn({ err, groupId, messageId }, "rosey: late command failed; will retry"),
         }),
       )
       .then(({ report, tagged, cursorAdvanced }) =>
@@ -84,11 +92,16 @@ export function makeRoseyLive(deps: {
             cursorAdvanced,
             read: report.messagesRead,
             created: report.created,
-            tagged: tagged.commands,
             merged: report.merged,
+            dedupUnparsed: report.dedupUnparsed,
+            rejected: report.rejected,
+            raisedByUnresolved: report.raisedByUnresolved,
             failures: report.batchFailures,
+            tagged,
           },
-          "rosey: suggestion pass",
+          cursorAdvanced
+            ? "rosey: suggestion pass"
+            : "rosey: suggestion pass incomplete; will retry",
         ),
       )
       .catch((err: unknown) => log?.error({ err, groupId }, "rosey: suggestion pass failed"));
@@ -96,10 +109,20 @@ export function makeRoseyLive(deps: {
   const scheduleSuggestions = (groupId: number) => {
     if (stopped) return;
     clearTimeout(timers.get(groupId));
+    // Debounced, but capped: a group that is never quiet for the full debounce
+    // still gets a pass within 4x of it.
+    const now = Date.now();
+    const first = firstDeferred.get(groupId) ?? now;
+    firstDeferred.set(groupId, first);
+    const wait = Math.max(
+      0,
+      Math.min(cfg.suggestDebounceMs, first + 4 * cfg.suggestDebounceMs - now),
+    );
     const t = setTimeout(() => {
       timers.delete(groupId);
+      firstDeferred.delete(groupId);
       void suggestNow(groupId);
-    }, cfg.suggestDebounceMs);
+    }, wait);
     t.unref?.();
     timers.set(groupId, t);
   };
@@ -107,23 +130,28 @@ export function makeRoseyLive(deps: {
   return {
     onMessage: async (msg) => {
       if (stopped) return;
-      await captureMessage(msg, {
-        matcher,
-        resolveEnabledJids: async () => new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY)),
-        groupIdForJid: (jid) => groupIdForJid(pool, jid),
-        messageIdFor: async (groupId, externalId) =>
-          (await getMessageIdByExternalId(pool, groupId, externalId))?.id ?? null,
-        isOwnPost: (groupId, externalId) => isRoseyPost(pool, groupId, externalId),
-        applyCommand: (cmd, ctx) =>
-          queue.run(ctx.groupId, () => applyCommand(cmd, ctx, commandStore(pool, ctx.groupId))),
-        scheduleSuggestions,
-        log,
-      });
+      const chat = msg.key?.remoteJid ?? "";
+      await arrivals.run(chat, () =>
+        captureMessage(msg, {
+          matcher,
+          resolveEnabledJids: async () =>
+            new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY)),
+          groupIdForJid: (jid) => groupIdForJid(pool, jid),
+          messageIdFor: async (groupId, externalId) =>
+            (await getMessageIdByExternalId(pool, groupId, externalId))?.id ?? null,
+          isOwnPost: (groupId, externalId) => isRoseyPost(pool, groupId, externalId),
+          applyCommand: (cmd, ctx) =>
+            queue.run(ctx.groupId, () => applyCommand(cmd, ctx, commandStore(pool, ctx.groupId))),
+          scheduleSuggestions,
+          log,
+        }),
+      );
     },
     stop: () => {
       stopped = true;
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
+      firstDeferred.clear();
     },
   };
 }

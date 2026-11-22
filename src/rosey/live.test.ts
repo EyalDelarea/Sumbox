@@ -136,6 +136,41 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
+  it("applies commands in arrival order even when the first one's lookups are slower", async () => {
+    const add = `WA-${randomUUID()}`;
+    const done = `WA-${randomUUID()}`;
+    // The first message's id lookup is slow, so without arrival ordering the
+    // "done" would reach the store before the "add" it closes.
+    const slowPool = new Proxy(pool, {
+      get(target, prop) {
+        if (prop === "query") {
+          return async (...args: Parameters<pg.Pool["query"]>) => {
+            const params = args[1] as unknown[] | undefined;
+            if (Array.isArray(params) && params.includes(add)) {
+              await new Promise((r) => setTimeout(r, 150));
+            }
+            return (target.query as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const live = makeRoseyLive({ pool: slowPool, cfg, generate });
+    const g = await group(true);
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await ingest(g.id, add, "@Rosey להזמין גז", sentAt);
+    await ingest(g.id, done, "@Rosey done להזמין גז", sentAt);
+    // Not awaited one by one: the collector fires each message as it lands.
+    await Promise.all([
+      live.onMessage(wa(g.jid, add, "@Rosey להזמין גז", sentAt)),
+      live.onMessage(wa(g.jid, done, "@Rosey done להזמין גז", sentAt)),
+    ]);
+    const tasks = await listTasks(pool, g.id, { includeClosed: true });
+    expect(tasks.map((t) => t.status)).toEqual(["done"]);
+    live.stop();
+  });
+
   it("ignores a group that is not enabled for Rosey", async () => {
     const live = makeRoseyLive({ pool, cfg, generate });
     const g = await group(false);
