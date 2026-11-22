@@ -14,7 +14,7 @@
 
 > 📨 **Wake up to 200 unread messages?** Sumbox reads them for you — overnight, locally — so you open your phone to *the gist*, not the scroll.
 
-A **local, single-user** WhatsApp summarizer, built for fun. Messages are collected passively via a linked device (using [Baileys](https://github.com/WhiskeySockets/Baileys)), stored in your own Postgres, transcribed locally (faster-whisper), captioned locally (Ollama vision), and summarized locally (Ollama) — then displayed in a mobile-first, RTL Hebrew web UI. **No message content goes to any cloud service.** The only thing sent out is over WhatsApp itself: replies posted into the groups you enable for `/סיכום` and `@Aida`. No cloud API keys, no hosted service, no login, no data sharing.
+A **local, single-user** WhatsApp summarizer, built for fun. Messages are collected passively via a linked device (using [Baileys](https://github.com/WhiskeySockets/Baileys)), stored in your own Postgres, transcribed locally (faster-whisper), captioned locally (Ollama vision), and summarized locally (Ollama) — then displayed in a mobile-first, RTL Hebrew web UI. **No message content goes to any AI or cloud API.** The only outbound traffic is WhatsApp itself: replies posted into the groups you enable for `/סיכום` and `@Aida`. No cloud API keys, no hosted service, no login, no data sharing.
 
 <p align="center">
   <img src="assets/screens/desktop.png" alt="Sumbox web UI — a chat's structured Hebrew catch-up summary (תקציר · נושאים עיקריים · החלטות ומשימות · שאלות פתוחות) beside the sage-green nav rail" width="820" />
