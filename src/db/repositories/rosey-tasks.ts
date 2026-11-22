@@ -391,6 +391,15 @@ export async function groupIdForJid(db: Db, jid: string): Promise<number | null>
   return rows[0] ? Number(rows[0].id) : null;
 }
 
+/** The chat JID a group is stored under (the inverse of groupIdForJid). */
+export async function jidForGroupId(db: Db, groupId: number): Promise<string | null> {
+  const { rows } = await db.query<{ whatsapp_id: string | null }>(
+    `SELECT whatsapp_id FROM groups WHERE id = $1`,
+    [groupId],
+  );
+  return rows[0]?.whatsapp_id ?? null;
+}
+
 /** Did Rosey send this message? (The own-echo guard; see rosey_messages.) */
 export async function isRoseyPost(db: Db, groupId: number, externalId: string): Promise<boolean> {
   const { rowCount } = await db.query(

@@ -27,7 +27,7 @@ import {
   ROSEY_COMMAND_KEY,
 } from "../db/repositories/group-command-permissions.js";
 import { getMessageIdByExternalId } from "../db/repositories/messages.js";
-import { groupIdForJid, isRoseyPost } from "../db/repositories/rosey-tasks.js";
+import { groupIdForJid, isRoseyPost, jidForGroupId } from "../db/repositories/rosey-tasks.js";
 import { captureMessage, quotedStanzaId } from "./capture.js";
 import { applyCommand } from "./commands.js";
 import { loadRoseyConfig, type RoseyConfig } from "./config.js";
@@ -112,6 +112,8 @@ export function makeRoseyLive(deps: {
    * (no match) just before a restart is tried once more by the next pass.
    */
   type Handling = {
+    /** The chat it came from: matches a pass while its group is not resolved. */
+    chat: string;
     groupId: number | null;
     state: "pending" | "decided" | "released";
     /** Date.now() at registration. */
@@ -131,10 +133,13 @@ export function makeRoseyLive(deps: {
   const suggestNow = (groupId: number) =>
     queue
       .run(groupId, async () => {
-        // null: group not resolved yet, so maybe this one.
+        const jid = await jidForGroupId(pool, groupId);
         const cutoff = Date.now() + slackMs;
+        // A message whose group is not resolved yet is ours only if it came from
+        // this group's chat, so one chat's failure never holds another's cursor.
         const ours = (h: Handling) =>
-          (h.groupId === groupId || h.groupId === null) && h.registeredAt <= cutoff;
+          (h.groupId === groupId || (h.groupId === null && h.chat === jid)) &&
+          h.registeredAt <= cutoff;
         const decided = [...handling].filter(([, h]) => ours(h) && h.state === "decided");
         let releasedDuring = false;
         const watch = (h: Handling) => {
@@ -219,7 +224,7 @@ export function makeRoseyLive(deps: {
       const arrivedAt = clock();
       const id = msg.key?.id ?? "";
       if (id && handling.has(id)) return; // a second delivery: already handled
-      const h: Handling = { groupId: null, state: "pending", registeredAt: Date.now() };
+      const h: Handling = { chat, groupId: null, state: "pending", registeredAt: Date.now() };
       if (id) handling.set(id, h);
       /** A quoted message is never released for a replay (see the registry). */
       const releaseOrKeep = (replay: boolean) => {

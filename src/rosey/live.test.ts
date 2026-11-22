@@ -485,6 +485,59 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
+  it("a failure in another chat, before its group is known, never holds this group's cursor", async () => {
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let passStarted = false;
+    const slowModel = async (system: string, user: string) => {
+      if (system !== DEDUP_SYSTEM) {
+        passStarted = true;
+        await released;
+      }
+      return generate(system, user);
+    };
+    let failAllowlist = false;
+    const flakyPool = new Proxy(pool, {
+      get(target, prop) {
+        if (prop === "query") {
+          return (...args: unknown[]) => {
+            if (failAllowlist && String(args[0]).includes("group_command_permissions")) {
+              failAllowlist = false;
+              return Promise.reject(new Error("db blip"));
+            }
+            return (target.query as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const passes: Array<{ groupId: number; cursorAdvanced: boolean }> = [];
+    const log = {
+      info: (obj: unknown, msg?: string) => {
+        if (msg?.startsWith("rosey: suggestion pass")) {
+          passes.push(obj as { groupId: number; cursorAdvanced: boolean });
+        }
+      },
+      warn: () => {},
+      error: () => {},
+    };
+    const live = makeRoseyLive({ pool: flakyPool, cfg, generate: slowModel, log });
+    const g = await group(true);
+    const other = await group(true);
+    await deliver(live, g, "צריך לסדר את הארון");
+    await vi.waitFor(() => expect(passStarted).toBe(true));
+    // Another chat's command fails its allowlist read (closed) during g's pass:
+    // its group is never resolved, but its chat is not g's.
+    failAllowlist = true;
+    await deliver(live, other, "@Rosey לקנות נורות");
+    release();
+    await vi.waitFor(() =>
+      expect(passes.find((p) => p.groupId === g.id)).toMatchObject({ cursorAdvanced: true }),
+    );
+    live.stop();
+  });
+
   it("applies commands in arrival order even when the first one's lookups are slower", async () => {
     const add = `WA-${randomUUID()}`;
     const done = `WA-${randomUUID()}`;
