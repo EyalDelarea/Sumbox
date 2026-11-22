@@ -182,6 +182,58 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
+  it("a command whose live apply threw is replayed by the next pass", async () => {
+    let failTaskInsert = true;
+    const flakyPool = new Proxy(pool, {
+      get(target, prop) {
+        if (prop === "connect") {
+          return async () => {
+            const client = await target.connect();
+            const query = client.query.bind(client) as (...a: unknown[]) => unknown;
+            (client as { query: unknown }).query = (...args: unknown[]) => {
+              if (failTaskInsert && String(args[0]).includes("INSERT INTO rosey_tasks")) {
+                failTaskInsert = false;
+                return Promise.reject(new Error("db blip"));
+              }
+              return query(...args);
+            };
+            return client;
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const live = makeRoseyLive({ pool: flakyPool, cfg, generate });
+    const g = await group(true);
+    await expect(deliver(live, g, "@Rosey לתקן מזגן")).rejects.toThrow("db blip");
+    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+
+    await deliver(live, g, "צריך לקנות מסנן"); // any chatter schedules the pass
+    await vi.waitFor(async () => {
+      const tags = (await listTasks(pool, g.id, { includeClosed: true })).filter(
+        (t) => t.origin === "tag",
+      );
+      expect(tags.map((t) => t.title)).toEqual(["לתקן מזגן"]);
+    });
+    live.stop();
+  });
+
+  it("never replays a command the live path decided without effect", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate });
+    const g = await group(true);
+    await deliver(live, g, "@Rosey בוצע לתקן מזגן"); // nothing to close yet
+    await deliver(live, g, "@Rosey לתקן מזגן"); // the task appears only now
+    await deliver(live, g, "צריך לקנות מסנן"); // schedules the pass
+    await vi.waitFor(async () => {
+      expect(await listTasks(pool, g.id, { includeClosed: true })).toHaveLength(2);
+    });
+    // Replaying the earlier "done" would close a task created after it was sent.
+    const tasks = await listTasks(pool, g.id, { includeClosed: true });
+    expect(tasks.find((t) => t.title === "לתקן מזגן")?.status).toBe("open");
+    live.stop();
+  });
+
   it("applies commands in arrival order even when the first one's lookups are slower", async () => {
     const add = `WA-${randomUUID()}`;
     const done = `WA-${randomUUID()}`;

@@ -81,24 +81,38 @@ export function makeRoseyLive(deps: {
   /** When each group's pending pass was first deferred (the debounce cap). */
   const firstDeferred = new Map<number, number>();
   let stopped = false;
+  /**
+   * Commands the live path claimed: message id -> settled. The catch-up never
+   * replays one (it was decided here, or still is); a claim is dropped if its
+   * apply throws, so that command IS replayed. Settled claims are forgotten once
+   * a pass moves the cursor past them. In memory only: a restart forgets them,
+   * so a command decided without effect (no match) just before a restart is
+   * tried once more by the next pass.
+   */
+  const claims = new Map<number, boolean>();
   const graceMs = deps.ownEchoGraceMs ?? OWN_ECHO_GRACE_MS;
 
   const suggestNow = (groupId: number) =>
     queue
-      .run(groupId, () =>
-        runAggregation(pool, groupId, {
+      .run(groupId, async () => {
+        const settled = [...claims].filter(([, done]) => done).map(([id]) => id);
+        const result = await runAggregation(pool, groupId, {
           cfg,
           generate,
           days: LIVE_SUGGEST_DAYS,
+          skipCommand: (m) => claims.has(m.messageId),
+          holdCursor: () => [...claims.values()].some((done) => !done),
           onBatchError: (err, b) =>
             log?.warn(
               { err, groupId, batch: b.index, size: b.size },
               "rosey: suggestion batch failed",
             ),
           onCommandError: (err, messageId) =>
-            log?.warn({ err, groupId, messageId }, "rosey: late command failed; will retry"),
-        }),
-      )
+            log?.warn({ err, groupId, messageId }, "rosey: replayed command failed; will retry"),
+        });
+        if (result.cursorAdvanced) for (const id of settled) claims.delete(id);
+        return result;
+      })
       .then(({ report, tagged, cursorAdvanced }) =>
         log?.info(
           {
@@ -147,9 +161,10 @@ export function makeRoseyLive(deps: {
       const chat = msg.key?.remoteJid ?? "";
       // Liveness is judged at ARRIVAL. A message can wait in `arrivals` behind a
       // command that waits behind a minutes-long suggestion pass; judged when it
-      // finally runs, a live command would read as a replay — and the catch-up
-      // skips on-time messages, so it would be lost.
+      // finally runs, a live command would read as a replay and wait for the
+      // next pass instead of applying now.
       const arrivedAt = clock();
+      let claimed: number | null = null;
       await arrivals.run(chat, () =>
         captureMessage(msg, {
           now: () => arrivedAt,
@@ -162,10 +177,24 @@ export function makeRoseyLive(deps: {
           isOwnPost: (groupId, externalId) => isRoseyPost(pool, groupId, externalId),
           isAidaPost: (groupId, externalId) => isAidaMessage(pool, { groupId, externalId }),
           ownEchoGrace: () => new Promise((r) => setTimeout(r, graceMs)),
-          applyCommand: (cmd, ctx) =>
-            queue.run(ctx.groupId, () => applyCommand(cmd, ctx, commandStore(pool, ctx.groupId))),
+          claimCommand: (messageId) => {
+            claimed = messageId;
+            claims.set(messageId, false);
+          },
+          applyCommand: async (cmd, ctx) => {
+            try {
+              return await queue.run(ctx.groupId, () =>
+                applyCommand(cmd, ctx, commandStore(pool, ctx.groupId)),
+              );
+            } catch (err) {
+              claims.delete(ctx.messageId); // not applied: the catch-up replays it
+              throw err;
+            }
+          },
           scheduleSuggestions,
           log,
+        }).finally(() => {
+          if (claimed !== null && claims.has(claimed)) claims.set(claimed, true);
         }),
       );
     },

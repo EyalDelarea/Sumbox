@@ -31,6 +31,7 @@ function deps(over: Partial<CaptureDeps> = {}) {
     applied: [] as Array<{ cmd: RoseyCommand; ctx: unknown }>,
     scheduled: [] as number[],
     graces: 0,
+    claimed: [] as number[],
   };
   const d: CaptureDeps = {
     matcher: makeTagMatcher(["@Rosey", "@רוזי"]),
@@ -42,6 +43,9 @@ function deps(over: Partial<CaptureDeps> = {}) {
     isAidaPost: async () => false,
     ownEchoGrace: async () => {
       calls.graces++;
+    },
+    claimCommand: (id) => {
+      calls.claimed.push(id);
     },
     applyCommand: async (cmd, ctx) => {
       calls.applied.push({ cmd, ctx });
@@ -139,6 +143,8 @@ describe("captureMessage — routing", () => {
       reason: "quote_not_ingested",
     });
     expect(calls.applied).toEqual([]);
+    // Decided live (nothing to apply), so the catch-up must not replay it unscoped.
+    expect(calls.claimed).toEqual([501]);
   });
 
   it("does nothing for a tagged message that was never ingested", async () => {

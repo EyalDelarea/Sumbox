@@ -12,6 +12,7 @@ import {
   insertTask,
   liveTasksRaisedBetween,
   messagesWithTagEvents,
+  type RoseySourceMessage,
   recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
@@ -77,11 +78,8 @@ export function commandStore(pool: pg.Pool, groupId: number): CommandStore {
   };
 }
 
-/** Mirrors capture.ts: a message older than this on arrival was never applied live. */
-const LIVE_HORIZON_MS = 120_000;
-
 export type TagCatchUp = {
-  /** Late commands applied in this run. */
+  /** Commands replayed in this run. */
   commands: number;
   created: number;
   confirmed: number;
@@ -98,13 +96,21 @@ export type TagCatchUp = {
 export type RunAggregationResult = {
   report: AggregateReport;
   /**
-   * Late explicit commands. The live path applies a command only when it arrives
-   * within 120 s of being sent; one delivered later (a reconnect replay after the
-   * collector was down) is applied here instead, exactly once:
-   *  - a message stored within the horizon of its send time was the live path's
-   *    to apply, and is never replayed — replaying it without its quote, or after
-   *    its task closed, could close or recreate the wrong task;
-   *  - a late message already cited by a tag event was applied by an earlier pass.
+   * The catch-up: explicit commands nothing has applied. The live path applies a
+   * command when it arrives within 120 s of being sent; this pass applies any
+   * other one — a reconnect replay, or one whose live apply threw — keyed on
+   * whether it was APPLIED, never on timing:
+   *  - a command some tag event cites was applied (an event is written even
+   *    when D4 refuses the change), and is never replayed;
+   *  - a command the live path decided without applying anything (no match, an
+   *    ambiguous match, an unresolvable quote) or is still handling is named by
+   *    `skipCommand` and left alone — replaying it here, without its quote (the
+   *    quoted id is not stored), could close a task the sender never pointed at;
+   *  - only messages past the cursor are candidates, even from scratch: each
+   *    command gets one attempt per successful pass (a failed pass holds the
+   *    cursor back, so it is retried), and an old no-op "done" is never tried
+   *    again against tasks that exist only now;
+   *  - a message that wakes @Aida is hers, never a command (see capture.ts).
    */
   tagged: TagCatchUp;
   /** False when any batch failed: those messages are read again next run. */
@@ -123,6 +129,14 @@ export async function runAggregation(
     fromScratch?: boolean;
     onBatchError?: (err: unknown, batch: { index: number; size: number }) => void;
     onCommandError?: (err: unknown, messageId: number) => void;
+    /** A command the live path decided or is handling; the catch-up leaves it alone. */
+    skipCommand?: (m: RoseySourceMessage) => boolean;
+    /**
+     * Asked when the pass ends: true holds the cursor back. The live path holds
+     * it while a command it claimed is still unapplied — if that apply then
+     * throws, the command must still be past the cursor to be replayed.
+     */
+    holdCursor?: () => boolean;
     now?: () => Date;
   },
 ): Promise<RunAggregationResult> {
@@ -133,7 +147,8 @@ export async function runAggregation(
   // stamps, and a host clock running ahead of it would skip every message
   // ingested in the gap.
   const startedAt = await databaseNow(pool);
-  const changedSince = opts.fromScratch ? null : await getLastRun(pool, cursorKey(groupId));
+  const cursor = await getLastRun(pool, cursorKey(groupId));
+  const changedSince = opts.fromScratch ? null : cursor;
   const messages = await selectSourceMessages(pool, groupId, {
     sentSince: new Date(now().getTime() - opts.days * 86_400_000),
     changedSince,
@@ -150,22 +165,21 @@ export async function runAggregation(
     refused: 0,
     failures: 0,
   };
-  const late = messages.filter(
-    (m) =>
-      !m.isVoice &&
-      m.ingestedAt.getTime() - m.sentAt.getTime() > LIVE_HORIZON_MS &&
-      !matchAskTrigger(m.content), // hers alone (see capture.ts)
+  const candidates = messages.filter(
+    (m) => !m.isVoice && (cursor === null || m.ingestedAt > cursor) && !matchAskTrigger(m.content),
   );
   const applied = await messagesWithTagEvents(
     pool,
-    late.map((m) => m.messageId),
+    candidates.map((m) => m.messageId),
   );
   const store = commandStore(pool, groupId);
   // Commands first: an explicit tag wins (D3), so suggestions dedup against it.
-  for (const m of late) {
+  for (const m of candidates) {
     if (applied.has(m.messageId)) continue;
     const cmd = tags.parse(m.content.trim());
     if (!cmd) continue;
+    // Asked at the moment of replay: the live path may have decided it since the read.
+    if (opts.skipCommand?.(m)) continue;
     tagged.commands++;
     try {
       // No quote here (the quoted id is not stored), so a late quote-only "done"
@@ -198,7 +212,8 @@ export async function runAggregation(
     onBatchError: opts.onBatchError,
   });
 
-  const cursorAdvanced = report.batchFailures === 0 && tagged.failures === 0;
+  const cursorAdvanced =
+    report.batchFailures === 0 && tagged.failures === 0 && !opts.holdCursor?.();
   if (cursorAdvanced) await recordRun(pool, cursorKey(groupId), startedAt);
   return { report, tagged, cursorAdvanced };
 }

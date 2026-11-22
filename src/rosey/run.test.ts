@@ -64,13 +64,18 @@ describe("runAggregation", () => {
   it("stores suggestions, advances the cursor, and reads only new messages next time", async () => {
     const g = await group();
     await message(g, "להחליף נורה");
-    await message(g, "@Rosey לקנות לחם");
+    const tag = await message(g, "@Rosey לקנות לחם");
     await tick();
 
     const m1 = model();
-    const first = await runAggregation(pool, g, { cfg, generate: m1.generate, days: 30 });
-    // The tagged message is never shown to the model. It arrived live, so it was
-    // the live path's to apply; the pass does not replay it.
+    const first = await runAggregation(pool, g, {
+      cfg,
+      generate: m1.generate,
+      days: 30,
+      skipCommand: (m) => m.messageId === tag, // the live path decided it
+    });
+    // The tagged message is never shown to the model, and the live path decided
+    // it, so the pass does not replay it.
     expect(first).toMatchObject({
       cursorAdvanced: true,
       report: { created: 1, taggedSkipped: 1 },
@@ -95,6 +100,7 @@ describe("runAggregation", () => {
     await message(g, "@Rosey לתקן מזגן\nלקנות מסנן", TEN_MIN);
     await message(g, "@Rosey בוצע מזגן", TEN_MIN);
     await message(g, "@Rosey בוצע", TEN_MIN); // a quote-only done, its quote lost
+    await tick();
     const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
     expect(run.tagged).toEqual({
       commands: 3,
@@ -113,9 +119,10 @@ describe("runAggregation", () => {
       days: 30,
       fromScratch: true,
     });
-    // Cited by tag events already: not applied again. (The no-op "done" wrote no
-    // event, so it is re-read — and changes nothing again.)
-    expect(again.tagged).toMatchObject({ commands: 1, created: 0, done: 0, noMatch: 1 });
+    // Commands are replayed only past the cursor, even from scratch: the no-op
+    // "done" wrote no event, yet a re-read must not try it again — by now a task
+    // it names could exist, and closing that would be acting on a stale command.
+    expect(again.tagged).toMatchObject({ commands: 0 });
     const tasks = (await listTasks(pool, g, { includeClosed: true }))
       .map((t) => [t.title, t.status])
       .sort();
@@ -144,6 +151,38 @@ describe("runAggregation", () => {
     });
     expect(second.report.messagesRead).toBe(1);
     expect(m2.seen.join("\n")).toContain("להתקשר לאינסטלטור");
+  });
+
+  it("replays an on-time command no live path decided (its live apply threw)", async () => {
+    const g = await group();
+    await message(g, "@Rosey לתקן מזגן"); // on time: the live path owned it, and failed
+    const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    expect(run.tagged).toMatchObject({ commands: 1, created: 1 });
+    expect((await listTasks(pool, g)).map((t) => t.title)).toEqual(["לתקן מזגן"]);
+  });
+
+  it("never replays a command the live path decided, or one it is still handling", async () => {
+    const g = await group();
+    const decided = await message(g, "@Rosey בוצע חלב"); // live: no match then
+    await runAggregation(pool, g, {
+      cfg,
+      generate: model().generate,
+      days: 30,
+      skipCommand: (m) => m.messageId === decided,
+    }).then((r) => expect(r.tagged).toMatchObject({ commands: 0 }));
+  });
+
+  it("holds the cursor while the live path still owes an apply", async () => {
+    const g = await group();
+    await message(g, "להחליף נורה");
+    const run = await runAggregation(pool, g, {
+      cfg,
+      generate: model().generate,
+      days: 30,
+      holdCursor: () => true,
+    });
+    expect(run.cursorAdvanced).toBe(false);
+    expect(await getLastRun(pool, cursorKey(g))).toBeNull();
   });
 
   it("never replays a message addressed to @Aida as a command", async () => {

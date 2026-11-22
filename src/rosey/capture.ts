@@ -44,6 +44,11 @@ export type CaptureDeps = {
   isAidaPost: (groupId: number, externalId: string) => Promise<boolean>;
   /** Wait long enough for @Aida's marker to follow her echo (from_me commands only). */
   ownEchoGrace: () => Promise<void>;
+  /**
+   * The live path takes this command: from here on it decides it, so the
+   * catch-up must not replay it (see run.ts) — unless its apply throws.
+   */
+  claimCommand: (messageId: number) => void;
   applyCommand: (
     cmd: RoseyCommand,
     ctx: { groupId: number; messageId: number; sentAt: Date; quotedMessageId: number | null },
@@ -132,6 +137,7 @@ export async function captureMessage(msg: WAMessage, deps: CaptureDeps): Promise
     deps.log?.warn({ groupId }, "rosey: tagged message was not ingested; command not applied");
     return { kind: "ignored", reason: "not_ingested" };
   }
+  deps.claimCommand(messageId);
   const quoted = quotedStanzaId(msg);
   const quotedMessageId = quoted ? await deps.messageIdFor(groupId, quoted) : null;
   if (quoted && quotedMessageId === null) {
