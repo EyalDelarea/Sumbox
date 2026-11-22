@@ -128,7 +128,7 @@ cat <<'EOF'
 
   ✅ Stack up:
      Web UI    → http://localhost:8787   (summarize + status panel)
-     RabbitMQ  → http://localhost:15672  (SUMBOX_RABBITMQ_USER / _PASSWORD from .env)
+     RabbitMQ  → http://localhost:15672  (SUMBOX_RABBITMQ_USER / _PASSWORD in .env; guest/guest if unset)
 
   Scan the QR once if prompted (read-only collector). Ctrl-C stops everything.
 
