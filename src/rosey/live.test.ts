@@ -1,0 +1,189 @@
+/**
+ * Rosey's live path against a real database: the exact wiring the collector
+ * uses (makeRoseyLive), driven with WhatsApp-shaped messages. The model is a
+ * scripted fake; nothing here can send — makeRoseyLive is never given a session.
+ */
+
+import { randomUUID } from "node:crypto";
+import type { WAMessage } from "@whiskeysockets/baileys";
+import pg from "pg";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  ROSEY_COMMAND_KEY,
+  upsertCommandPermission,
+} from "../db/repositories/group-command-permissions.js";
+import { listTasks } from "../db/repositories/rosey-tasks.js";
+import { createTestDatabase } from "../test/db.js";
+import { loadRoseyConfig } from "./config.js";
+import { DEDUP_SYSTEM } from "./dedup.js";
+import { makeRoseyLive, roseyLiveFromEnv } from "./live.js";
+
+let pool: pg.Pool;
+beforeAll(async () => {
+  pool = new pg.Pool({ connectionString: await createTestDatabase() });
+}, 120_000);
+afterAll(async () => {
+  await pool?.end();
+}, 30_000);
+
+const cfg = { ...loadRoseyConfig({ ROSEY_ENABLED: "true" }), suggestDebounceMs: 20 };
+
+async function group(enabled: boolean): Promise<{ id: number; jid: string }> {
+  const jid = `${randomUUID().replace(/-/g, "").slice(0, 18)}@g.us`;
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO groups (name, source, whatsapp_id) VALUES ($1, 'live', $2) RETURNING id`,
+    [`rosey-live-${randomUUID()}`, jid],
+  );
+  const id = Number(rows[0]!.id);
+  if (enabled)
+    await upsertCommandPermission(pool, { groupId: id, command: ROSEY_COMMAND_KEY, enabled });
+  return { id, jid };
+}
+
+/** Ingest stand-in: the row the collector would have written before Rosey runs. */
+async function ingest(
+  groupId: number,
+  externalId: string,
+  text: string,
+  sentAt: Date,
+): Promise<number> {
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO messages (group_id, source, message_type, text_content, sent_at, dedupe_key, external_id)
+     VALUES ($1, 'live', 'text', $2, $5, $3, $4) RETURNING id`,
+    [groupId, text, `dk-${randomUUID()}`, externalId, sentAt],
+  );
+  return Number(rows[0]!.id);
+}
+
+function wa(jid: string, id: string, text: string, sentAt: Date, quotedId?: string): WAMessage {
+  return {
+    key: { id, remoteJid: jid, participant: "972500000001@s.whatsapp.net", fromMe: false },
+    messageTimestamp: sentAt.getTime() / 1000,
+    message: quotedId
+      ? { extendedTextMessage: { text, contextInfo: { stanzaId: quotedId } } }
+      : { conversation: text },
+  } as WAMessage;
+}
+
+/** Every batch line becomes one task titled after its text. */
+const generate = vi.fn(async (system: string, user: string) => {
+  if (system === DEDUP_SYSTEM) return '{"same_as": null}';
+  const lines = [...user.matchAll(/^\[(\d+)\] \S+ \S+.*?: (.*)$/gmu)];
+  return JSON.stringify({
+    items: lines.map((m) => ({ m: Number(m[1]), kind: "task", text: m[2] })),
+  });
+});
+
+async function deliver(
+  live: ReturnType<typeof makeRoseyLive>,
+  g: { id: number; jid: string },
+  text: string,
+  quotedId?: string,
+) {
+  const externalId = `WA-${randomUUID()}`;
+  // Whole seconds, as WhatsApp timestamps are — ingest stores the same instant.
+  const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+  const messageId = await ingest(g.id, externalId, text, sentAt);
+  await live.onMessage(wa(g.jid, externalId, text, sentAt, quotedId));
+  return { externalId, messageId };
+}
+
+describe("makeRoseyLive", () => {
+  it("is off unless ROSEY_ENABLED=true", () => {
+    expect(roseyLiveFromEnv(pool, undefined, {})).toBeUndefined();
+    expect(roseyLiveFromEnv(pool, undefined, { ROSEY_ENABLED: "false" })).toBeUndefined();
+    const on = roseyLiveFromEnv(pool, undefined, { ROSEY_ENABLED: "true" });
+    expect(on).toBeDefined();
+    on?.stop();
+  });
+
+  it("captures an explicit tag as open tasks citing the stored message, then closes one by text and one by quote", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate });
+    const g = await group(true);
+
+    const list = await deliver(live, g, "@Rosey לקנות חלב\nלתקן ברז");
+    let tasks = await listTasks(pool, g.id, { includeClosed: true });
+    tasks.sort((a, b) => a.sourceItemIndex - b.sourceItemIndex);
+    expect(tasks.map((t) => [t.title, t.status, t.origin, t.sourceMessageId])).toEqual([
+      ["לקנות חלב", "open", "tag", list.messageId],
+      ["לתקן ברז", "open", "tag", list.messageId],
+    ]);
+
+    await deliver(live, g, "@רוזי בוצע לקנות חלב");
+    tasks = await listTasks(pool, g.id, { includeClosed: true });
+    expect(tasks.find((t) => t.title === "לקנות חלב")?.status).toBe("done");
+
+    // Quote the list message: only one of its tasks is still live, so it resolves.
+    await deliver(live, g, "@רוזי done", list.externalId);
+    tasks = await listTasks(pool, g.id, { includeClosed: true });
+    expect(tasks.every((t) => t.status === "done")).toBe(true);
+    expect(tasks.every((t) => t.statusSource === "tag")).toBe(true);
+    live.stop();
+  });
+
+  it("never acts on a message recorded in her own sent ledger", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate });
+    const g = await group(true);
+    const externalId = `WA-${randomUUID()}`;
+    await pool.query(
+      `INSERT INTO rosey_messages (group_id, external_id, kind) VALUES ($1, $2, 'reply')`,
+      [g.id, externalId],
+    );
+    const sentAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await ingest(g.id, externalId, "@Rosey לקנות חלב", sentAt);
+    await live.onMessage(wa(g.jid, externalId, "@Rosey לקנות חלב", sentAt));
+    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+    live.stop();
+  });
+
+  it("ignores a group that is not enabled for Rosey", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate });
+    const g = await group(false);
+    await deliver(live, g, "@Rosey לקנות חלב");
+    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+    live.stop();
+  });
+
+  it("turns ordinary chat into suggestions only after the group goes quiet", async () => {
+    generate.mockClear();
+    const live = makeRoseyLive({ pool, cfg, generate });
+    const g = await group(true);
+    await deliver(live, g, "צריך להזמין טכנאי");
+    await deliver(live, g, "וגם לשלם ארנונה");
+    // Debounced: one pass for the burst, which reads both messages.
+    await vi.waitFor(async () => {
+      expect(await listTasks(pool, g.id, { includeClosed: true })).toHaveLength(2);
+    });
+    const suggestCalls = generate.mock.calls.filter(([system]) => system !== DEDUP_SYSTEM);
+    expect(suggestCalls).toHaveLength(1);
+    const tasks = await listTasks(pool, g.id, { includeClosed: true });
+    expect(tasks.every((t) => t.status === "suggested" && t.origin === "suggested")).toBe(true);
+    live.stop();
+  });
+
+  it("an explicit tag confirms a matching suggestion instead of duplicating it", async () => {
+    const live = makeRoseyLive({ pool, cfg, generate });
+    const g = await group(true);
+    await deliver(live, g, "לקנות סוללות");
+    await vi.waitFor(async () => {
+      expect(await listTasks(pool, g.id, { includeClosed: true })).toHaveLength(1);
+    });
+    await deliver(live, g, "@Rosey לקנות סוללות");
+    const tasks = await listTasks(pool, g.id, { includeClosed: true });
+    expect(tasks.map((t) => [t.status, t.origin, t.statusSource])).toEqual([
+      ["open", "suggested", "tag"],
+    ]);
+    live.stop();
+  });
+
+  it("stop() cancels a pending suggestion pass", async () => {
+    generate.mockClear();
+    const live = makeRoseyLive({ pool, cfg: { ...cfg, suggestDebounceMs: 50 }, generate });
+    const g = await group(true);
+    await deliver(live, g, "לנקות את המחסן");
+    live.stop();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(generate).not.toHaveBeenCalled();
+    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+  });
+});
