@@ -284,7 +284,7 @@ export async function replyWithList(
   }
   if (sent === "timed_out") {
     // The send may still complete; its record stays so the echo is hers. A late
-    // rejection is logged here, never left unhandled.
+    // failure is logged here (the race already keeps it from going unhandled).
     send.catch((err: unknown) =>
       deps.log?.error({ err, groupId: req.groupId, messageId }, "rosey: timed-out send failed"),
     );

@@ -251,26 +251,20 @@ describe("replyWithList — the send gate", () => {
     expect(h.errors.map((e) => e.msg)).toContain("rosey: list reply send timed out");
   });
 
-  it("a send that rejects after its timeout is not an unhandled rejection", async () => {
-    const unhandled: unknown[] = [];
-    const on = (r: unknown) => unhandled.push(r);
-    process.on("unhandledRejection", on);
-    try {
-      const h = harness({
-        sendTimeoutMs: 10,
-        sender: {
-          sendText: () =>
-            new Promise<WAMessage | undefined>((_, reject) =>
-              setTimeout(() => reject(new Error("late")), 40),
-            ),
-        },
-      });
-      expect(await replyWithList(h.deps, h.req)).toEqual({ kind: "timed_out" });
-      await new Promise((r) => setTimeout(r, 80));
-      expect(unhandled).toEqual([]);
-    } finally {
-      process.off("unhandledRejection", on);
-    }
+  it("a send that fails after its timeout is still logged, not lost", async () => {
+    const h = harness({
+      sendTimeoutMs: 10,
+      sender: {
+        sendText: () =>
+          new Promise<WAMessage | undefined>((_, reject) =>
+            setTimeout(() => reject(new Error("late")), 40),
+          ),
+      },
+    });
+    expect(await replyWithList(h.deps, h.req)).toEqual({ kind: "timed_out" });
+    expect(h.errors.map((e) => e.msg)).not.toContain("rosey: timed-out send failed");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(h.errors.map((e) => e.msg)).toContain("rosey: timed-out send failed");
   });
 });
 
