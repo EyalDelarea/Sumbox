@@ -6,6 +6,9 @@
  *    (rather than creating a twin), as a 'tag' event;
  *  - adding an item that is already an open task is a no-op;
  *  - otherwise the item becomes an open task of origin 'tag'.
+ * Matching an add is per kind: a command's items are tasks unless it carries a
+ * grocery prefix, and are compared only with live items of that kind. A
+ * command never changes the kind of an item it matches.
  *
  * "done" resolves to exactly one live task or does nothing: an ambiguous match
  * is reported back to the caller, never guessed. Quoting the message a task came
@@ -13,6 +16,7 @@
  */
 
 import type { RoseyTask, StatusEventResult } from "../db/repositories/rosey-tasks.js";
+import type { RoseyItemKind } from "./kind.js";
 import type { RoseyCommand } from "./tags.js";
 import { titleKey } from "./text.js";
 
@@ -29,11 +33,12 @@ export type CommandContext = {
 };
 
 export type CommandStore = {
-  /** Live (suggested/open) tasks of the group raised within [since, until]. */
-  liveTasksRaisedBetween: (since: Date, until: Date) => Promise<RoseyTask[]>;
+  /** Live (suggested/open) items of the group raised within [since, until]; one kind, or both. */
+  liveTasksRaisedBetween: (since: Date, until: Date, kind?: RoseyItemKind) => Promise<RoseyTask[]>;
   insertTagged: (input: {
     title: string;
     titleKey: string;
+    kind: RoseyItemKind;
     sourceMessageId: number;
     sourceItemIndex: number;
     raisedAt: Date;
@@ -71,7 +76,7 @@ export async function applyCommand(
     for (const [index, title] of cmd.items.entries()) {
       const key = titleKey(title);
       if (!key) continue;
-      const live = await store.liveTasksRaisedBetween(since, ctx.sentAt);
+      const live = await store.liveTasksRaisedBetween(since, ctx.sentAt, cmd.itemKind);
       const same = live.find((t) => t.titleKey === key);
       if (same?.status === "suggested") {
         await store.markStatus({ taskId: same.id, status: "open", sourceMessageId: ctx.messageId });
@@ -82,6 +87,7 @@ export async function applyCommand(
         const id = await store.insertTagged({
           title,
           titleKey: key,
+          kind: cmd.itemKind,
           sourceMessageId: ctx.messageId,
           sourceItemIndex: index,
           raisedAt: ctx.sentAt,
@@ -93,7 +99,8 @@ export async function applyCommand(
     return out;
   }
 
-  // done: every live task, any age — completing an old task is the common case.
+  // done: every live item of either kind, any age — completing an old task is
+  // the common case, and a grocery item is bought (done) like any other.
   let candidates = await store.liveTasksRaisedBetween(new Date(0), ctx.sentAt);
   if (ctx.quotedMessageId !== null) {
     candidates = candidates.filter((t) => t.sourceMessageId === ctx.quotedMessageId);

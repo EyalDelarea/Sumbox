@@ -126,6 +126,18 @@ describe("runAggregation", () => {
     expect(after.map((t) => [t.id, t.kind])).toEqual([[item!.id, "task"]]);
   });
 
+  it("a late grocery command is caught up as grocery, and dedups against grocery only", async () => {
+    const g = await group();
+    const TEN_MIN = 10 * 60_000;
+    await message(g, "@Rosey לתקן ברז", TEN_MIN);
+    await message(g, "@רוזי קניות:\n- חלב\n- לתקן ברז", TEN_MIN);
+    await tick();
+    const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    expect(run.tagged).toMatchObject({ commands: 2, created: 3, confirmed: 0 });
+    const kinds = (await listTasks(pool, g)).map((t) => `${t.kind}:${t.title}`).sort();
+    expect(kinds).toEqual(["grocery:חלב", "grocery:לתקן ברז", "task:לתקן ברז"].sort());
+  });
+
   it("catches up on late commands the live path never saw, exactly once", async () => {
     const g = await group();
     const TEN_MIN = 10 * 60_000;

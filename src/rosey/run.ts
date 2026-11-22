@@ -94,15 +94,14 @@ export async function setRoseyEnabled(
 export function commandStore(pool: pg.Pool, groupId: number): CommandStore {
   return {
     // A generous cap: a "done" looks across every live task of the group.
-    liveTasksRaisedBetween: (since, until) =>
-      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP),
+    liveTasksRaisedBetween: (since, until, kind) =>
+      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP, { kind }),
     insertTagged: async (input) => {
       const raisedBy = await resolveRaisedBy(pool, groupId, [input.sourceMessageId]);
       return insertTask(pool, {
         ...input,
         groupId,
         origin: "tag",
-        kind: "task",
         raisedByParticipantId: raisedBy.get(input.sourceMessageId) ?? null,
       });
     },

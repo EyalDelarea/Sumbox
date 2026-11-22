@@ -10,13 +10,22 @@
  *   "@Rosey <item>"                     → add one task
  *   "@Rosey\n- item\n- item"           → add one task per line (list-item
  *                                          granularity: one message, N tasks)
+ *   "@Rosey קניות: <item>" / "@Rosey shopping: <item>"
+ *                                       → add a GROCERY item (a list below works too)
+ *   "@Rosey קניות\n- item\n- item"      → the grocery word alone on its line: a grocery list
  *   "@Rosey done <text>" / "@רוזי בוצע <text>" → mark the matching task done
  *   "@Rosey done" quoting a message     → mark that message's task done
+ *
+ * Without a grocery prefix, an added item is a task. The prefix must be the
+ * grocery word followed by a colon, or alone on the first line: "@Rosey קניות
+ * לשבת" ("shopping for Shabbat") is one task, not a grocery item "לשבת".
  *
  * A single line is ONE task even if it contains commas: "חלב, ביצים ולחם"
  * cannot be split reliably ("ביצים ולחם" is one item or two?), and a wrong split
  * is worse than a coarse task. Lines are the unit the sender chose.
  */
+
+import type { RoseyItemKind } from "./kind.js";
 
 /** Max characters kept per task title; longer lines are a paragraph, not a task. */
 export const MAX_TITLE_CHARS = 200;
@@ -24,7 +33,12 @@ export const MAX_TITLE_CHARS = 200;
 /** The words that turn a tag into a completion. Matched as the first word. */
 const DONE_WORDS = ["done", "בוצע", "בוצעה", "סיימתי"];
 
-export type RoseyCommand = { kind: "add"; items: string[] } | { kind: "done"; query: string };
+/** The words that make an add a grocery list. Matched as the first word, with a colon or alone. */
+const GROCERY_WORDS = ["קניות", "grocery", "groceries", "shopping"];
+
+export type RoseyCommand =
+  | { kind: "add"; items: string[]; itemKind: RoseyItemKind }
+  | { kind: "done"; query: string };
 
 export type TagMatcher = {
   /** True when `text` carries any Rosey alias. */
@@ -69,6 +83,9 @@ export function makeTagMatcher(aliases: readonly string[]): TagMatcher {
     `^(?:${DONE_WORDS.map(escapeRegex).join("|")})(?![\\p{L}\\p{N}])[\\s:,.-]*`,
     "iu",
   );
+  const groceryWord = `(?:${GROCERY_WORDS.map(escapeRegex).join("|")})(?![\\p{L}\\p{N}])`;
+  // "קניות: חלב" (a colon, then items on this line or below) or "קניות" alone on its line.
+  const groceryHead = new RegExp(`^${groceryWord}\\s*(?::\\s*|$)`, "iu");
 
   return {
     isTagged: (text) => !!text && tagTest.test(text),
@@ -85,8 +102,12 @@ export function makeTagMatcher(aliases: readonly string[]): TagMatcher {
         const rest = [first.replace(doneWord, ""), ...body.slice(1)].join(" ");
         return { kind: "done", query: rest.replace(/\s+/g, " ").trim() };
       }
-      const items = body.map(cleanItem).filter((i) => i.length > 0);
-      return items.length > 0 ? { kind: "add", items } : null;
+      const grocery = groceryHead.test(first);
+      const lines = grocery ? [first.replace(groceryHead, ""), ...body.slice(1)] : body;
+      const items = lines.map(cleanItem).filter((i) => i.length > 0);
+      return items.length > 0
+        ? { kind: "add", items, itemKind: grocery ? "grocery" : "task" }
+        : null;
     },
   };
 }
