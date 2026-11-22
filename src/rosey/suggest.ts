@@ -75,10 +75,22 @@ export function buildSuggestPrompt(batch: readonly RoseySourceMessage[]): string
   ].join("\n");
 }
 
-/** A bare array of candidates, or `{"items": [...]}`. */
+const isObject = (v: unknown): boolean => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * A bare array of candidate OBJECTS, or `{"items": [...]}`. A bare array of
+ * anything else is prose ("message [12]"), not an answer, and must not beat
+ * the real one.
+ */
 const isSuggestionList = (v: unknown): boolean =>
-  Array.isArray(v) ||
-  (!!v && typeof v === "object" && Array.isArray((v as { items?: unknown }).items));
+  (Array.isArray(v) && v.every(isObject)) ||
+  (isObject(v) && Array.isArray((v as { items?: unknown }).items));
+
+/** `{"items": [...]}` with at least one entry: an answer that said something. */
+const isNonEmptyItems = (v: unknown): boolean =>
+  isObject(v) &&
+  Array.isArray((v as { items?: unknown }).items) &&
+  (v as { items: unknown[] }).items.length > 0;
 
 export function parseSuggestions(
   reply: string,
@@ -128,5 +140,14 @@ export function parseSuggestions(
     nextIndex.set(id, itemIndex + 1);
     out.items.push({ sourceMessageId: id, itemIndex, title: text.slice(0, MAX_TITLE_CHARS) });
   }
+  // Nothing parseable (no task, no labelled non-task) from a value that is not
+  // itself the items answer (a bare array, or an empty list), while the reply
+  // holds a non-empty items answer elsewhere: what was read was not the answer.
+  // A failure, so the batch is retried, never "zero tasks", which would let the
+  // cursor skip it. An items answer whose entries are all malformed stays a
+  // result: its rejections are counted.
+  const parsed = out.items.length + Object.values(out.droppedByKind).reduce((a, b) => a + b, 0);
+  const notTheAnswer = Array.isArray(json) || list.length === 0;
+  if (parsed === 0 && notTheAnswer && lastJsonValue(reply, isNonEmptyItems) !== null) return null;
   return out;
 }

@@ -79,6 +79,27 @@ Notes: {"confidence": "high"}`;
     expect(out?.items).toHaveLength(1);
   });
 
+  it("trailing prose citing a message in brackets never beats the real answer", () => {
+    const reply = `{"items": [{"m": 10, "kind": "task", "text": "לקנות חלב"}]}
+The task comes from message [10].`;
+    expect(parseSuggestions(reply, batch)?.items).toEqual([
+      { sourceMessageId: 10, itemIndex: 0, title: "לקנות חלב" },
+    ]);
+  });
+
+  it("a reply with an items answer that yields nothing parseable is a batch failure", () => {
+    // The chosen value yields no item while an items-shaped answer is right there:
+    // reading it as "zero tasks" would let the cursor skip these messages.
+    const reply = `{"items": [{"m": 10, "kind": "task", "text": "לקנות חלב"}]}
+Revised: [{"note": "none"}]`;
+    expect(parseSuggestions(reply, batch)).toBeNull();
+  });
+
+  it("an answer whose items are all non-tasks is still zero tasks, not a failure", () => {
+    const out = parseSuggestions('{"items":[{"m":11,"kind":"past","text":"לתקן ברז"}]}', batch);
+    expect(out).toMatchObject({ items: [], droppedByKind: { past: 1 } });
+  });
+
   it("returns null when the reply has no usable JSON — a batch failure, not zero tasks", () => {
     expect(parseSuggestions("I could not find any tasks.", batch)).toBeNull();
     expect(parseSuggestions('{"tasks":[]}', batch)).toBeNull();
