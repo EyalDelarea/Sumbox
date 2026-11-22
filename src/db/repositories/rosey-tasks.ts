@@ -366,3 +366,21 @@ export async function resolveRaisedBy(
   for (const r of rows) out.set(Number(r.id), r.raised_by ? Number(r.raised_by) : null);
   return out;
 }
+
+/** The group row for a WhatsApp group JID, or null when the chat is unknown. */
+export async function groupIdForJid(db: Db, jid: string): Promise<number | null> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT id FROM groups WHERE whatsapp_id = $1 LIMIT 1`,
+    [jid],
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+/** Did Rosey send this message? (The own-echo guard; see rosey_messages.) */
+export async function isRoseyPost(db: Db, groupId: number, externalId: string): Promise<boolean> {
+  const { rowCount } = await db.query(
+    `SELECT 1 FROM rosey_messages WHERE group_id = $1 AND external_id = $2`,
+    [groupId, externalId],
+  );
+  return (rowCount ?? 0) > 0;
+}
