@@ -42,14 +42,30 @@ import {
   isRoseyPost,
   jidForGroupId,
   listTasks,
+  pollTaskIds,
   reconcileRoseyMessageId,
   recordRoseyMessage,
+  recordRoseyPoll,
+  recordStatusEvent,
   tasksDoneSince,
 } from "../db/repositories/rosey-tasks.js";
 import { type CaptureResult, captureMessage, quotedStanzaId } from "./capture.js";
 import { applyCommand } from "./commands.js";
 import type { RoseyConfig } from "./config.js";
-import { DONE_WINDOW_MS, type RoseySender, replyWithList } from "./reply.js";
+import {
+  applyPollVote,
+  type PollVoteOutcome,
+  PollVotes,
+  type RoseyPollSender,
+  replyWithPolls,
+} from "./poll.js";
+import {
+  DONE_WINDOW_MS,
+  type ListReplyOutcome,
+  type RoseySender,
+  replyWithList,
+  SEND_TIMEOUT_MS,
+} from "./reply.js";
 import { commandStore, type Generate, makeGenerate, runAggregation } from "./run.js";
 import { GroupSerialQueue } from "./serial-queue.js";
 import { makeTagMatcher } from "./tags.js";
@@ -86,6 +102,17 @@ export type RoseyLive = {
    * pass has finished (failures are logged, never thrown).
    */
   suggestNow: (groupId: number) => Promise<void>;
+  /**
+   * A vote on one of her list polls: `selected` is the voter's WHOLE current
+   * selection (option indexes), as WhatsApp sends it. Runs on the group's queue,
+   * like a command; a chat not on her list changes nothing.
+   */
+  onPollVote: (vote: {
+    jid: string;
+    pollId: string;
+    voter: string;
+    selected: readonly number[];
+  }) => Promise<PollVoteOutcome | { kind: "not_enabled" }>;
   /** Cancel pending suggestion timers (in-flight work finishes on its own). */
   stop: () => void;
 };
@@ -106,6 +133,13 @@ export type RoseyEngineDeps = {
   sender?: RoseySender;
   /** Injectable for tests; defaults to reply.ts's SEND_TIMEOUT_MS. */
   sendTimeoutMs?: number;
+  /**
+   * The poll transport (D8). With it, and `listStyle` answering "poll", a list
+   * request is answered with checklist polls; otherwise with the text list.
+   */
+  pollSender?: RoseyPollSender;
+  /** How a list request is answered, read per request; defaults to "text". */
+  listStyle?: () => "text" | "poll";
   /** A fresh WhatsApp message id for one of her posts, known before it is sent. */
   newMessageId: () => string;
   /** Told what capture decided for each message (ids and outcomes, never text). */
@@ -264,7 +298,28 @@ export function makeRoseyEngine(deps: RoseyEngineDeps): RoseyLive {
     timers.set(groupId, t);
   };
 
+  const votes = new PollVotes();
+
   return {
+    onPollVote: async (vote) => {
+      const enabled = await roseyJids();
+      const groupId = enabled.has(vote.jid) ? await groupIdForJid(pool, vote.jid) : null;
+      if (groupId === null) return { kind: "not_enabled" };
+      const out = await queue.run(groupId, () =>
+        applyPollVote(
+          {
+            pollTaskIds: (g, pollId) => pollTaskIds(pool, g, pollId),
+            markStatus: ({ taskId, status }) =>
+              recordStatusEvent(pool, { taskId, status, source: "poll", groupId }),
+          },
+          votes,
+          { groupId, pollId: vote.pollId, voter: vote.voter, selected: vote.selected },
+        ),
+      );
+      // Ids and statuses only — never an option's text.
+      log?.info({ groupId, pollId: vote.pollId, out }, "rosey: poll vote");
+      return out;
+    },
     suggestNow: (groupId) => {
       clearTimeout(timers.get(groupId));
       timers.delete(groupId);
@@ -321,8 +376,27 @@ export function makeRoseyEngine(deps: RoseyEngineDeps): RoseyLive {
           },
           scheduleSuggestions,
           replyList: (req) =>
-            replies.run(req.groupId, () =>
-              replyWithList(
+            replies.run(req.groupId, async () => {
+              if ((deps.listStyle?.() ?? "text") === "poll" && deps.pollSender) {
+                const polls = await replyWithPolls(
+                  {
+                    mode: cfg.sendMode,
+                    resolveEnabledJids: roseyJids,
+                    countPollsSince: (g, since) => countRoseyMessagesSince(pool, g, "poll", since),
+                    loadLive: (g) => listTasks(pool, g),
+                    record: (g, poll) => recordRoseyPoll(pool, { groupId: g, ...poll }),
+                    newMessageId: deps.newMessageId,
+                    sendTimeoutMs: deps.sendTimeoutMs ?? SEND_TIMEOUT_MS,
+                    sender: deps.pollSender,
+                    now: Date.now,
+                    log,
+                  },
+                  { jid: req.jid, groupId: req.groupId, quoted: req.request },
+                );
+                // Nothing open: no checklist to post, so the text list says so.
+                if (polls.kind !== "skipped" || polls.reason !== "nothing_open") return polls;
+              }
+              return replyWithList(
                 {
                   mode: cfg.sendMode,
                   resolveEnabledJids: roseyJids,
@@ -346,8 +420,8 @@ export function makeRoseyEngine(deps: RoseyEngineDeps): RoseyLive {
                   log,
                 },
                 { jid: req.jid, groupId: req.groupId, quoted: req.request },
-              ),
-            ),
+              );
+            }) as Promise<ListReplyOutcome>,
           log,
         }).then(
           (r) => {
