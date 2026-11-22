@@ -495,6 +495,14 @@ describe("her list polls in the ledger", () => {
     // Each option's text is recorded as sent (vote decryption hashes it).
     expect(await pollOptionTexts(pool, g, "POLL1")).toEqual(["ב #1", "א"]);
     expect(await pollOptionTexts(pool, other, "POLL1")).toBeNull();
+
+    // A poll whose option rows carry no readable key is not a poll she can map.
+    await pool.query(
+      `INSERT INTO rosey_messages (group_id, external_id, kind, message_secret)
+       VALUES ($1, 'OLD', 'poll', '\\x00'), ($1, 'OLD#0', 'poll', NULL)`,
+      [g],
+    );
+    expect(await pollTaskIds(pool, g, "OLD")).toBeNull();
   });
 
   it("an option whose task was deleted maps to null; a poll vote never moves a manual status", async () => {

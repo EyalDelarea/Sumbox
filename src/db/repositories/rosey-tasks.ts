@@ -564,6 +564,8 @@ async function pollOptions(db: Db, groupId: number, pollId: string): Promise<Pol
       out[index] = { taskId: r.task_id ? Number(r.task_id) : null, text: rest.slice(hash + 1) };
     }
   }
+  // No option row in this key format: not a poll she can map a vote on.
+  if (out.length === 0) return null;
   return Array.from(out, (o) => o ?? { taskId: null, text: "" });
 }
 
