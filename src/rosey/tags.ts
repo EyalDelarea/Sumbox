@@ -85,7 +85,10 @@ export function makeTagMatcher(aliases: readonly string[]): TagMatcher {
   );
   const groceryWord = `(?:${GROCERY_WORDS.map(escapeRegex).join("|")})(?![\\p{L}\\p{N}])`;
   // "קניות: חלב" (a colon, then items on this line or below) or "קניות" alone on its line.
-  const groceryHead = new RegExp(`^${groceryWord}\\s*(?::\\s*|$)`, "iu");
+  // Hebrew WhatsApp text carries invisible direction marks (LRM/RLM), and a
+  // phone keyboard may type a full-width colon: both count as the plain ones.
+  const gap = "[\\s\\u200e\\u200f]*";
+  const groceryHead = new RegExp(`^${gap}${groceryWord}${gap}(?:[:：]${gap}|$)`, "iu");
 
   return {
     isTagged: (text) => !!text && tagTest.test(text),

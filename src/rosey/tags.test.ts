@@ -92,6 +92,14 @@ describe("command parsing", () => {
     });
   });
 
+  it("reads the prefix through WhatsApp's invisible direction marks and a full-width colon", () => {
+    expect(rosey.parse("@Rosey ‏קניות‏: חלב")).toMatchObject({
+      items: ["חלב"],
+      itemKind: "grocery",
+    });
+    expect(rosey.parse("@Rosey קניות：חלב")).toMatchObject({ items: ["חלב"], itemKind: "grocery" });
+  });
+
   it("a grocery word alone on the first line heads a grocery list", () => {
     expect(rosey.parse("@רוזי קניות\nחלב\nלחם")).toEqual({
       kind: "add",
