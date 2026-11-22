@@ -124,6 +124,15 @@ describe("captureMessage — routing", () => {
     });
   });
 
+  it("applies nothing when the quoted message cannot be resolved (no unscoped guess)", async () => {
+    const { d, calls } = deps();
+    expect(await captureMessage(wa("@רוזי בוצע חלב", { quotedId: "WA-MISSING" }), d)).toEqual({
+      kind: "ignored",
+      reason: "quote_not_ingested",
+    });
+    expect(calls.applied).toEqual([]);
+  });
+
   it("does nothing for a tagged message that was never ingested", async () => {
     const { d, calls } = deps({ messageIdFor: async () => null });
     expect(await captureMessage(wa("@Rosey milk"), d)).toEqual({

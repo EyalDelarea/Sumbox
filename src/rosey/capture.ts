@@ -74,11 +74,15 @@ export async function captureMessage(msg: WAMessage, deps: CaptureDeps): Promise
   }
   if (!enabled.has(mapped.remoteJid)) return { kind: "ignored", reason: "not_enabled" };
   if (now() - mapped.sentAt.getTime() > LIVENESS_WINDOW_MS) {
+    // Not lost: the group's next aggregation pass catches up on late commands.
     return { kind: "ignored", reason: "stale" };
   }
 
   const groupId = await deps.groupIdForJid(mapped.remoteJid);
-  if (groupId === null) return { kind: "ignored", reason: "unknown_group" };
+  if (groupId === null) {
+    deps.log?.warn({}, "rosey: enabled group has no group row; message ignored");
+    return { kind: "ignored", reason: "unknown_group" };
+  }
   if (await deps.isOwnPost(groupId, mapped.externalId)) {
     return { kind: "ignored", reason: "own_post" };
   }
@@ -102,6 +106,12 @@ export async function captureMessage(msg: WAMessage, deps: CaptureDeps): Promise
   }
   const quoted = quotedStanzaId(msg);
   const quotedMessageId = quoted ? await deps.messageIdFor(groupId, quoted) : null;
+  if (quoted && quotedMessageId === null) {
+    // The quote is the command's scope. Matching without it could close a task
+    // the sender never pointed at, so an unresolvable quote applies nothing.
+    deps.log?.warn({ groupId, messageId }, "rosey: quoted message not stored; command not applied");
+    return { kind: "ignored", reason: "quote_not_ingested" };
+  }
   const outcome = await deps.applyCommand(cmd, {
     groupId,
     messageId,
