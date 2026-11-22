@@ -467,6 +467,27 @@ export async function recordRoseyMessage(
   );
 }
 
+/**
+ * Re-key a post recorded before its send to the id WhatsApp reported for it,
+ * when the two differ. One row either way, so the rate count is unchanged; if
+ * the reported id is already recorded, the chosen one is left as it is.
+ */
+export async function reconcileRoseyMessageId(
+  db: Db,
+  groupId: number,
+  chosenId: string,
+  reportedId: string,
+): Promise<void> {
+  await db.query(
+    `UPDATE rosey_messages SET external_id = $3
+      WHERE group_id = $1 AND external_id = $2
+        AND NOT EXISTS (
+          SELECT 1 FROM rosey_messages WHERE group_id = $1 AND external_id = $3
+        )`,
+    [groupId, chosenId, reportedId],
+  );
+}
+
 /** How many posts of `kind` Rosey sent to a group at or after `since` (her rate limits). */
 export async function countRoseyMessagesSince(
   db: Db,

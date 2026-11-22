@@ -8,6 +8,7 @@ import {
   isRoseyPost,
   listTasks,
   liveTasksRaisedBetween,
+  reconcileRoseyMessageId,
   recordRoseyMessage,
   recordStatusEvent,
   resolveRaisedBy,
@@ -459,6 +460,27 @@ describe("Rosey's sent-message ledger", () => {
     expect(await countRoseyMessagesSince(pool, g, "reply", new Date("2026-11-22T00:00:00Z"))).toBe(
       2,
     );
+  });
+});
+
+describe("reconcileRoseyMessageId", () => {
+  it("re-keys a recorded post to the id WhatsApp reported, without counting it twice", async () => {
+    const g = await group();
+    const t0 = new Date("2026-11-22T10:00:00Z");
+    await recordRoseyMessage(pool, { groupId: g, externalId: "CHOSEN", kind: "reply", sentAt: t0 });
+    await reconcileRoseyMessageId(pool, g, "CHOSEN", "REPORTED");
+    expect(await isRoseyPost(pool, g, "REPORTED")).toBe(true);
+    expect(await isRoseyPost(pool, g, "CHOSEN")).toBe(false);
+    expect(await countRoseyMessagesSince(pool, g, "reply", new Date(0))).toBe(1);
+  });
+
+  it("is a no-op when the reported id is already recorded (no duplicate, no error)", async () => {
+    const g = await group();
+    await recordRoseyMessage(pool, { groupId: g, externalId: "A", kind: "reply" });
+    await recordRoseyMessage(pool, { groupId: g, externalId: "B", kind: "reply" });
+    await reconcileRoseyMessageId(pool, g, "A", "B");
+    expect(await isRoseyPost(pool, g, "B")).toBe(true);
+    expect(await countRoseyMessagesSince(pool, g, "reply", new Date(0))).toBe(2);
   });
 });
 
