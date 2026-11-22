@@ -1623,4 +1623,8 @@ program
     process.on("SIGTERM", () => void report());
   });
 
+// ── Rosey (@Rosey / @רוזי), the task bot — see src/rosey/cli.ts ──────────────
+const { registerRoseyCommands } = await import("./rosey/cli.js");
+registerRoseyCommands(program);
+
 program.parse();
