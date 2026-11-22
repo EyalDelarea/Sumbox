@@ -117,6 +117,13 @@ export type AttachCollectorDeps = {
    * ops/runbooks/langfuse-observability.md.
    */
   telemetry?: { baseUrl: string; publicKey: string; secretKey: string };
+  /**
+   * Optional Rosey live task capture (ROSEY_ENABLED). RECEIVE ONLY: it is handed
+   * each message after that message's ingest has settled (a task cites the stored
+   * row) and it has no send function. Its own allowlist key ('rosey') and its own
+   * per-group queue; see src/rosey/live.ts. stop() cancels its pending timers.
+   */
+  rosey?: { onMessage: (msg: WAMessage) => Promise<void>; stop: () => void };
 };
 
 export type LiveServiceHandle = {
@@ -226,7 +233,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
   const onMessage = (msg: WAMessage) => {
     if (stopped) return;
     // Crash-isolation: errors inside the handler must NEVER escape the listener.
-    void _handleMessage(pool, msg, {
+    const ingested = _handleMessage(pool, msg, {
       dataDir,
       bus,
       downloadVoiceNote: (m) => session.downloadMedia(m),
@@ -249,6 +256,13 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
       .catch((err: unknown) => {
         onError(err);
       });
+
+    // Rosey — after ingest settles (success or failure: a miss is hers to log),
+    // because an explicit @Rosey command must cite the stored message row.
+    const rosey = deps.rosey;
+    if (rosey) {
+      void ingested.then(() => (stopped ? undefined : rosey.onMessage(msg))).catch(onError);
+    }
 
     // Allowlisted-group /סיכום reply — separate best-effort path, isolated from ingest.
     // Always attempt when wired: the matcher's own pre-gate + DB resolvers handle
@@ -456,6 +470,7 @@ export function attachCollector(deps: AttachCollectorDeps): LiveServiceHandle {
       // session.stop() below, on a later tick) is ignored instead of racing the
       // pool that the shutdown sequence is about to close.
       stopped = true;
+      deps.rosey?.stop();
 
       // Stop heartbeat timer
       heartbeatHandle?.stop();

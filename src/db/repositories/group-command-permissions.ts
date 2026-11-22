@@ -5,6 +5,11 @@ import type pg from "pg";
  *  orphan every permission row. */
 export const SUMMARY_COMMAND_KEY = "summary";
 
+/** Rosey's own allowlist key. Deliberately separate from SUMMARY_COMMAND_KEY, which
+ *  @Aida shares: enabling Rosey in a group must not enable either of them, and
+ *  enabling them must not enable Rosey. */
+export const ROSEY_COMMAND_KEY = "rosey";
+
 export type GroupCommandPermission = {
   groupId: number;
   command: string;

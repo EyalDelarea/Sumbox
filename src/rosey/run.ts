@@ -6,15 +6,26 @@
  */
 
 import type pg from "pg";
+// @Aida's trigger matcher: a pure module, no path into src/ask (see capture.ts).
+import { matchAskTrigger } from "../collector/ask-trigger.js";
+import {
+  listCommandPermissions,
+  ROSEY_COMMAND_KEY,
+  upsertCommandPermission,
+} from "../db/repositories/group-command-permissions.js";
 import {
   insertTask,
   liveTasksRaisedBetween,
+  messagesWithTagEvents,
+  type RoseySourceMessage,
+  recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
 } from "../db/repositories/rosey-tasks.js";
 import { getLastRun, recordRun } from "../db/repositories/scheduler-state.js";
 import { OllamaSummarizer } from "../summarization/summarizer.js";
 import { type AggregateReport, aggregateMessages } from "./aggregate.js";
+import { applyCommand, type CommandStore } from "./commands.js";
 import type { RoseyConfig } from "./config.js";
 import { makeTagMatcher } from "./tags.js";
 
@@ -49,8 +60,95 @@ export function cursorKey(groupId: number): string {
   return `rosey-aggregate:${groupId}`;
 }
 
+/**
+ * Turn Rosey on or off for a group (her own 'rosey' allowlist key). Turning her
+ * ON — the first time, or again after a disable — moves the group's cursor to
+ * now, so nothing sent before she was listening (history, or commands typed
+ * while she was off) is ever replayed as a command by the catch-up. Enabling a
+ * group that is already on leaves its cursor alone.
+ *
+ * The same cursor bounds what a pass reads, so passes after enabling suggest
+ * only from new messages. To suggest from the history too, run
+ * `rosey aggregate --group <id> --from-scratch` once: it re-reads the window
+ * while commands stay gated on the cursor, so none from before is replayed.
+ */
+export async function setRoseyEnabled(
+  pool: pg.Pool,
+  groupId: number,
+  enabled: boolean,
+): Promise<void> {
+  const wasOn = (await listCommandPermissions(pool, ROSEY_COMMAND_KEY)).some(
+    // Number(): group_id is a bigint, which pg returns as a string despite the type.
+    (p) => Number(p.groupId) === groupId && p.enabled,
+  );
+  // The cursor moves BEFORE she is switched on, so no pass can run in between.
+  if (enabled && !wasOn) await recordRun(pool, cursorKey(groupId), await databaseNow(pool));
+  await upsertCommandPermission(pool, { groupId, command: ROSEY_COMMAND_KEY, enabled });
+}
+
+/**
+ * The store an explicit @Rosey command writes through. Shared by the live path
+ * and the catch-up below, so a command reads and writes the same way whichever
+ * of them sees it first.
+ */
+export function commandStore(pool: pg.Pool, groupId: number): CommandStore {
+  return {
+    // A generous cap: a "done" looks across every live task of the group.
+    liveTasksRaisedBetween: (since, until) =>
+      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP),
+    insertTagged: async (input) => {
+      const raisedBy = await resolveRaisedBy(pool, groupId, [input.sourceMessageId]);
+      return insertTask(pool, {
+        ...input,
+        groupId,
+        origin: "tag",
+        raisedByParticipantId: raisedBy.get(input.sourceMessageId) ?? null,
+      });
+    },
+    markStatus: (input) => recordStatusEvent(pool, { ...input, source: "tag", groupId }),
+  };
+}
+
+export type TagCatchUp = {
+  /** Commands replayed in this run. */
+  commands: number;
+  created: number;
+  confirmed: number;
+  done: number;
+  /** A "done" that named no live task, or more than one: nothing changed. */
+  noMatch: number;
+  ambiguous: number;
+  /** A "done" on a task whose status was set by hand: recorded, not applied (D4). */
+  refused: number;
+  /** Commands that threw; the cursor stays put so they are retried. */
+  failures: number;
+};
+
 export type RunAggregationResult = {
   report: AggregateReport;
+  /**
+   * The catch-up: explicit commands nothing has applied. The live path applies a
+   * command when it arrives within 120 s of being sent; this pass applies any
+   * other one — a reconnect replay, or one whose live apply threw — keyed on
+   * whether it was APPLIED, never on timing:
+   *  - a command some tag event cites was applied (an event is written even
+   *    when D4 refuses the change), and is never replayed;
+   *  - a command the live path decided without applying anything (no match, an
+   *    ambiguous match, an unresolvable quote) or is still handling is named by
+   *    `skipCommand` and left alone — replaying it here, without its quote (the
+   *    quoted id is not stored), could close a task the sender never pointed at;
+   *  - only messages past the cursor are candidates, even from scratch: each
+   *    command gets one attempt per successful pass (a failed pass holds the
+   *    cursor back, so it is retried), and an old no-op "done" is never tried
+   *    again against tasks that exist only now;
+   *  - with no cursor at all, nothing is a candidate: a group's cursor starts
+   *    when Rosey is turned on for it (setRoseyEnabled), so history from
+   *    before she listened is never replayed as commands. A group that somehow
+   *    has none (enabled by hand in the DB) gets suggestions only on its first
+   *    pass, which then starts its cursor;
+   *  - a message that wakes @Aida is hers, never a command (see capture.ts).
+   */
+  tagged: TagCatchUp;
   /** False when any batch failed: those messages are read again next run. */
   cursorAdvanced: boolean;
 };
@@ -66,6 +164,15 @@ export async function runAggregation(
     /** Ignore the cursor and re-read the whole window. */
     fromScratch?: boolean;
     onBatchError?: (err: unknown, batch: { index: number; size: number }) => void;
+    onCommandError?: (err: unknown, messageId: number) => void;
+    /** A command the live path decided or is handling; the catch-up leaves it alone. */
+    skipCommand?: (m: RoseySourceMessage) => boolean;
+    /**
+     * Asked when the pass ends: true holds the cursor back. The live path holds
+     * it while a command it claimed is still unapplied — if that apply then
+     * throws, the command must still be past the cursor to be replayed.
+     */
+    holdCursor?: () => boolean;
     now?: () => Date;
   },
 ): Promise<RunAggregationResult> {
@@ -76,13 +183,65 @@ export async function runAggregation(
   // stamps, and a host clock running ahead of it would skip every message
   // ingested in the gap.
   const startedAt = await databaseNow(pool);
-  const changedSince = opts.fromScratch ? null : await getLastRun(pool, cursorKey(groupId));
+  const cursor = await getLastRun(pool, cursorKey(groupId));
+  const changedSince = opts.fromScratch ? null : cursor;
   const messages = await selectSourceMessages(pool, groupId, {
     sentSince: new Date(now().getTime() - opts.days * 86_400_000),
     changedSince,
   });
 
   const tags = makeTagMatcher(opts.cfg.tags);
+  const tagged: TagCatchUp = {
+    commands: 0,
+    created: 0,
+    confirmed: 0,
+    done: 0,
+    noMatch: 0,
+    ambiguous: 0,
+    refused: 0,
+    failures: 0,
+  };
+  // `>=`: the cursor is a millisecond Date and created_at has microseconds, so a
+  // message stored in the cursor's own millisecond is read by the query above;
+  // dropping it here would lose it. Re-trying it is safe: an applied command is
+  // cited by a tag event, and a live-decided one is named by skipCommand.
+  const candidates = messages.filter(
+    (m) => !m.isVoice && cursor !== null && m.ingestedAt >= cursor && !matchAskTrigger(m.content),
+  );
+  const applied = await messagesWithTagEvents(
+    pool,
+    candidates.map((m) => m.messageId),
+  );
+  const store = commandStore(pool, groupId);
+  // Commands first: an explicit tag wins (D3), so suggestions dedup against it.
+  for (const m of candidates) {
+    if (applied.has(m.messageId)) continue;
+    const cmd = tags.parse(m.content.trim());
+    if (!cmd) continue;
+    // Asked at the moment of replay: the live path may have decided it since the read.
+    if (opts.skipCommand?.(m)) continue;
+    tagged.commands++;
+    try {
+      // No quote here (the quoted id is not stored), so a late quote-only "done"
+      // has no scope and applies nothing; it is counted as noMatch.
+      const out = await applyCommand(
+        cmd,
+        { groupId, messageId: m.messageId, sentAt: m.sentAt, quotedMessageId: null },
+        store,
+      );
+      if (out.kind === "added") {
+        tagged.created += out.created;
+        tagged.confirmed += out.confirmed;
+      } else if (out.kind === "done") tagged.done++;
+      else if (out.kind === "done_refused") tagged.refused++;
+      else if (out.kind === "done_no_match") tagged.noMatch++;
+      else tagged.ambiguous++;
+    } catch (err) {
+      tagged.failures++;
+      opts.onCommandError?.(err, m.messageId);
+    }
+  }
+
   const report = await aggregateMessages(messages, {
     generate: opts.generate,
     isTagged: tags.isTagged,
@@ -93,9 +252,10 @@ export async function runAggregation(
     onBatchError: opts.onBatchError,
   });
 
-  const cursorAdvanced = report.batchFailures === 0;
+  const cursorAdvanced =
+    report.batchFailures === 0 && tagged.failures === 0 && !opts.holdCursor?.();
   if (cursorAdvanced) await recordRun(pool, cursorKey(groupId), startedAt);
-  return { report, cursorAdvanced };
+  return { report, tagged, cursorAdvanced };
 }
 
 async function databaseNow(pool: pg.Pool): Promise<Date> {

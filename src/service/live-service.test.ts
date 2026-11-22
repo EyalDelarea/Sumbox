@@ -357,3 +357,100 @@ describe("attachCollector", () => {
     expect(typeof receivedOpts["persistMediaDescriptor"]).toBe("function");
   });
 });
+
+describe("attachCollector — Rosey", () => {
+  const msg = { key: { id: "X", remoteJid: "g@g.us" } } as unknown;
+
+  it("hands Rosey each message only after its ingest has settled", async () => {
+    const { session, bus, setConnected, recordHeartbeat } = makeFakeDeps();
+    const order: string[] = [];
+    let finishIngest!: () => void;
+    const handleMessage = vi.fn().mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishIngest = () => {
+            order.push("ingested");
+            resolve(true);
+          };
+        }),
+    );
+    const rosey = {
+      onMessage: vi.fn().mockImplementation(async () => {
+        order.push("rosey");
+      }),
+      stop: vi.fn(),
+    };
+    attachCollector({
+      session: session as unknown as CollectorSession,
+      pool: fakePool,
+      bus,
+      dataDir: "/tmp/data",
+      setConnected,
+      recordHeartbeat,
+      handleMessage,
+      rosey,
+    });
+
+    session.emit("message", msg);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(rosey.onMessage).not.toHaveBeenCalled();
+
+    finishIngest();
+    await vi.waitFor(() => expect(rosey.onMessage).toHaveBeenCalledWith(msg));
+    expect(order).toEqual(["ingested", "rosey"]);
+  });
+
+  it("still reaches Rosey when ingest fails, and isolates Rosey's own errors", async () => {
+    const { session, bus, setConnected, recordHeartbeat } = makeFakeDeps();
+    const errors: unknown[] = [];
+    const handleMessage = vi.fn().mockRejectedValue(new Error("ingest failed"));
+    const rosey = {
+      onMessage: vi.fn().mockRejectedValue(new Error("rosey failed")),
+      stop: vi.fn(),
+    };
+    attachCollector({
+      session: session as unknown as CollectorSession,
+      pool: fakePool,
+      bus,
+      dataDir: "/tmp/data",
+      setConnected,
+      recordHeartbeat,
+      handleMessage,
+      onError: (e) => errors.push(e),
+      rosey,
+    });
+
+    session.emit("message", msg);
+    await vi.waitFor(() => expect(errors).toHaveLength(2));
+    expect(errors.map((e) => (e as Error).message).sort()).toEqual([
+      "ingest failed",
+      "rosey failed",
+    ]);
+  });
+
+  it("stop() stops Rosey, and a message whose ingest settles after stop() never reaches her", async () => {
+    const { session, bus, setConnected, recordHeartbeat } = makeFakeDeps();
+    let finishIngest!: () => void;
+    const handleMessage = vi
+      .fn()
+      .mockImplementation(() => new Promise<boolean>((r) => (finishIngest = () => r(true))));
+    const rosey = { onMessage: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
+    const handle = attachCollector({
+      session: session as unknown as CollectorSession,
+      pool: fakePool,
+      bus,
+      dataDir: "/tmp/data",
+      setConnected,
+      recordHeartbeat,
+      handleMessage,
+      rosey,
+    });
+
+    session.emit("message", msg);
+    handle.stop();
+    expect(rosey.stop).toHaveBeenCalledTimes(1);
+    finishIngest();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(rosey.onMessage).not.toHaveBeenCalled();
+  });
+});

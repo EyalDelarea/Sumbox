@@ -162,15 +162,22 @@ export async function recordStatusEvent(
   input: StatusEventInput,
 ): Promise<StatusEventResult> {
   return inTransaction(db, async (c) => {
-    const { rows } = await c.query<{ status: TaskStatus; group_id: string }>(
-      `SELECT status, group_id FROM rosey_tasks WHERE id = $1 FOR UPDATE`,
-      [input.taskId],
-    );
+    const { rows } = await c.query<{
+      status: TaskStatus;
+      status_source: EventSource;
+      group_id: string;
+    }>(`SELECT status, status_source, group_id FROM rosey_tasks WHERE id = $1 FOR UPDATE`, [
+      input.taskId,
+    ]);
     const row = rows[0];
     if (!row || (input.groupId !== undefined && Number(row.group_id) !== input.groupId)) {
       return { found: false };
     }
-    const applied = shouldApply(row.status, input.status, input.source);
+    const applied = shouldApply(
+      { status: row.status, source: row.status_source },
+      input.status,
+      input.source,
+    );
     await c.query(
       `INSERT INTO rosey_task_events (task_id, status, source, applied, source_message_id)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -242,6 +249,10 @@ export async function listTasks(
 export type RoseySourceMessage = {
   messageId: number;
   sentAt: Date;
+  /** When the collector stored it (messages.created_at). */
+  ingestedAt: Date;
+  /** WhatsApp's message id, which the live path knows before the row id. */
+  externalId: string | null;
   sender: string | null;
   content: string;
   isVoice: boolean;
@@ -268,11 +279,13 @@ export async function selectSourceMessages(
   const { rows } = await db.query<{
     id: string;
     sent_at: Date;
+    created_at: Date;
+    external_id: string | null;
     sender: string | null;
     content: string;
     is_voice: boolean;
   }>(
-    `SELECT m.id, m.sent_at, p.display_name AS sender,
+    `SELECT m.id, m.sent_at, m.created_at, m.external_id, p.display_name AS sender,
             COALESCE(NULLIF(btrim(m.text_content), ''), btrim(t.transcript)) AS content,
             (t.id IS NOT NULL AND NULLIF(btrim(m.text_content), '') IS NULL) AS is_voice
        FROM messages m
@@ -293,6 +306,8 @@ export async function selectSourceMessages(
   return rows.map((r) => ({
     messageId: Number(r.id),
     sentAt: r.sent_at,
+    ingestedAt: r.created_at,
+    externalId: r.external_id,
     sender: r.sender,
     content: r.content,
     isVoice: r.is_voice,
@@ -365,4 +380,45 @@ export async function resolveRaisedBy(
   );
   for (const r of rows) out.set(Number(r.id), r.raised_by ? Number(r.raised_by) : null);
   return out;
+}
+
+/** The group row for a WhatsApp group JID, or null when the chat is unknown. */
+export async function groupIdForJid(db: Db, jid: string): Promise<number | null> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT id FROM groups WHERE whatsapp_id = $1 LIMIT 1`,
+    [jid],
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+/** The chat JID a group is stored under (the inverse of groupIdForJid). */
+export async function jidForGroupId(db: Db, groupId: number): Promise<string | null> {
+  const { rows } = await db.query<{ whatsapp_id: string | null }>(
+    `SELECT whatsapp_id FROM groups WHERE id = $1`,
+    [groupId],
+  );
+  return rows[0]?.whatsapp_id ?? null;
+}
+
+/** Did Rosey send this message? (The own-echo guard; see rosey_messages.) */
+export async function isRoseyPost(db: Db, groupId: number, externalId: string): Promise<boolean> {
+  const { rowCount } = await db.query(
+    `SELECT 1 FROM rosey_messages WHERE group_id = $1 AND external_id = $2`,
+    [groupId, externalId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/** Of these messages, the ones some explicit command has already written an event for. */
+export async function messagesWithTagEvents(
+  db: Db,
+  messageIds: readonly number[],
+): Promise<Set<number>> {
+  if (messageIds.length === 0) return new Set();
+  const { rows } = await db.query<{ source_message_id: string }>(
+    `SELECT DISTINCT source_message_id FROM rosey_task_events
+      WHERE source = 'tag' AND source_message_id = ANY($1::bigint[])`,
+    [messageIds],
+  );
+  return new Set(rows.map((r) => Number(r.source_message_id)));
 }
