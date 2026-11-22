@@ -7,8 +7,10 @@
  *   2. Clone the group from live through a read-only pool (clone.ts).
  *   3. Run her real engine over the copy, with an in-memory sink for sends
  *      (session.ts), behind a page on 127.0.0.1 (server.ts).
- *   4. On Ctrl-C (or a startup failure) drop the scratch database. `--cleanup`
- *      only drops it, for after a crash.
+ *   4. On Ctrl-C, SIGTERM or SIGHUP (a closed terminal), on a startup failure,
+ *      and best effort on an uncaught error, drop the scratch database.
+ *      `--cleanup` only drops it, for after a crash that left it behind (a
+ *      kill -9 cannot be caught); a run that finds one says so.
  *
  * Nothing here — or anything it imports — loads Baileys or the collector's
  * session; no-whatsapp.test.ts walks the import graph to prove it.
@@ -35,6 +37,30 @@ const FONTS_DIR = path.resolve(
   "../../web/public/fonts",
 );
 
+const CLEANUP_HINT = "npm run dev -- rosey-sandbox --cleanup";
+
+const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+const CRASH_EVENTS = ["uncaughtException", "unhandledRejection"] as const;
+
+/**
+ * End the run on a stop signal (`stop`) and on an uncaught error (`crash`,
+ * which must tear down and exit non-zero: a listener replaces Node's own
+ * crash). Returns the function that removes every listener again.
+ */
+export function watchExit(
+  proc: NodeJS.EventEmitter,
+  h: { stop: (signal: string) => void; crash: (err: unknown) => void },
+): () => void {
+  const stops = STOP_SIGNALS.map((s) => [s, () => h.stop(s)] as const);
+  const crash = (err: unknown) => h.crash(err);
+  for (const [s, fn] of stops) proc.on(s, fn);
+  for (const e of CRASH_EVENTS) proc.on(e, crash);
+  return () => {
+    for (const [s, fn] of stops) proc.off(s, fn);
+    for (const e of CRASH_EVENTS) proc.off(e, crash);
+  };
+}
+
 export type RoseySandboxOptions = {
   liveUrl: string;
   groupId?: number;
@@ -59,17 +85,23 @@ export async function runRoseySandbox(opts: RoseySandboxOptions): Promise<void> 
   }
   const port = opts.port ?? DEFAULT_SANDBOX_PORT;
 
-  // Listen for Ctrl-C from the start: one during migrate/clone lets startup
-  // finish its current step and then tears down, instead of killing the
-  // process with a copy of the chat left behind.
+  // Listen from the start: a Ctrl-C during migrate/clone lets startup finish
+  // its current step and then tears down, instead of killing the process with
+  // a copy of the chat left behind.
   let stopRequested = false;
   let wake: (() => void) | null = null;
-  const onSignal = () => {
-    stopRequested = true;
-    wake?.();
-  };
-  process.on("SIGINT", onSignal);
-  process.on("SIGTERM", onSignal);
+  const unwatch = watchExit(process, {
+    stop: () => {
+      stopRequested = true;
+      wake?.();
+    },
+    crash: (err) => {
+      out(`rosey-sandbox crashed: ${(err as Error)?.stack ?? String(err)}`);
+      void teardown()
+        .catch(() => undefined) // teardown already printed the --cleanup hint
+        .finally(() => process.exit(1));
+    },
+  });
 
   let created = false;
   let live: pg.Pool | null = null;
@@ -77,9 +109,14 @@ export async function runRoseySandbox(opts: RoseySandboxOptions): Promise<void> 
   let sandbox: RoseySandbox | null = null;
   let server: ReturnType<typeof createSandboxServer> | null = null;
 
-  const teardown = async () => {
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
+  // One teardown, however many ways the run ends at once (a signal and a crash).
+  let tearing: Promise<void> | null = null;
+  const teardown = () => {
+    tearing ??= tearDown();
+    return tearing;
+  };
+  const tearDown = async () => {
+    unwatch();
     sandbox?.stop();
     if (server?.listening) await new Promise<void>((r) => server!.close(() => r()));
     server?.closeAllConnections();
@@ -92,7 +129,7 @@ export async function runRoseySandbox(opts: RoseySandboxOptions): Promise<void> 
     } catch (err) {
       out(
         `Could NOT drop ${target.name} (${(err as Error).message}): it holds a copy of the chat. ` +
-          "Run: npm run dev -- rosey-sandbox --cleanup",
+          `Run: ${CLEANUP_HINT}`,
       );
       throw err;
     }
@@ -100,8 +137,14 @@ export async function runRoseySandbox(opts: RoseySandboxOptions): Promise<void> 
 
   try {
     out(`Creating ${target.name} and migrating it…`);
-    await createScratch(target);
+    const { leftover } = await createScratch(target);
     created = true;
+    if (leftover) {
+      out(
+        `Found a leftover ${target.name} from an earlier run (a copy of the chat) and replaced ` +
+          `it. To drop one without starting the sandbox: ${CLEANUP_HINT}`,
+      );
+    }
     scratch = await openScratch(target);
     live = readOnlyPool(opts.liveUrl);
     const lv = live;

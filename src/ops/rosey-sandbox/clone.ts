@@ -132,11 +132,12 @@ export async function dropScratch(target: ScratchTarget): Promise<void> {
 
 /**
  * A fresh, EMPTY scratch database. Migrate it next. A leftover one from a
- * crashed run is dropped first, but never one in use: a second sandbox on the
- * same server would otherwise force-drop the first one's database under it.
+ * crashed run is dropped first (and reported, so the caller can say so), but
+ * never one in use: a second sandbox on the same server would otherwise
+ * force-drop the first one's database under it.
  */
-export async function createScratch(target: ScratchTarget): Promise<void> {
-  await onAdmin(target, async (c) => {
+export async function createScratch(target: ScratchTarget): Promise<{ leftover: boolean }> {
+  return onAdmin(target, async (c) => {
     const { rows } = await c.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1`,
       [target.name],
@@ -147,8 +148,10 @@ export async function createScratch(target: ScratchTarget): Promise<void> {
           "running. Stop it first, or run --cleanup if it is a stale one.",
       );
     }
+    const found = await c.query(`SELECT 1 FROM pg_database WHERE datname = $1`, [target.name]);
     await c.query(`DROP DATABASE IF EXISTS "${target.name}"`);
     await c.query(`CREATE DATABASE "${target.name}"`);
+    return { leftover: (found.rowCount ?? 0) > 0 };
   });
 }
 

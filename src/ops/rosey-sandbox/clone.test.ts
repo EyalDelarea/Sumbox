@@ -224,6 +224,21 @@ describe("cloneGroup", () => {
     expect((await scratch.query("SELECT 1 AS ok")).rows).toEqual([{ ok: 1 }]);
   });
 
+  it("says when it found a leftover copy from an earlier run", async () => {
+    const own: ScratchTarget = {
+      ...target,
+      liveName: "leftover_probe",
+      name: "leftover_probe_rosey_sandbox",
+    };
+    try {
+      expect(await createScratch(own)).toEqual({ leftover: false });
+      // Nothing dropped it (a crash): the next run finds it.
+      expect(await createScratch(own)).toEqual({ leftover: true });
+    } finally {
+      await dropScratch(own);
+    }
+  });
+
   it("reports a live column this checkout's schema lacks instead of dropping it silently", async () => {
     const e = await seedGroup("e");
     await live.query("ALTER TABLE rosey_tasks ADD COLUMN live_only_extra int");
