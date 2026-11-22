@@ -104,13 +104,20 @@ describe("mergeGroups", () => {
     const dupB = await id(dupId, "rm-b", "R-EXT-DUP-B"); // collides with survB
     const dupC = await id(dupId, "rm-c", "R-EXT-C"); // unique: moves
 
-    const task = async (groupId: number, msg: number, status: string, source: string) => {
+    const task = async (
+      groupId: number,
+      msg: number,
+      status: string,
+      source: string,
+      title = "t",
+      slot = 0,
+    ) => {
       const origin = status === "suggested" ? "suggested" : "tag";
       const { rows } = await pool.query<{ id: string }>(
         `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
                                   source_message_id, source_item_index, raised_at)
-         VALUES ($1, 't', 't', $5, $3, $4, $2, 0, now()) RETURNING id`,
-        [groupId, msg, status, source, origin],
+         VALUES ($1, $6, $6, $5, $3, $4, $2, $7, now()) RETURNING id`,
+        [groupId, msg, status, source, origin, title, slot],
       );
       return Number(rows[0]!.id);
     };
@@ -123,7 +130,18 @@ describe("mergeGroups", () => {
     );
     // A twin: both sides hold a task for message B; the dup's was closed by hand.
     const survTwin = await task(survivorId, survB, "open", "tag");
-    await task(dupId, dupB, "dropped", "manual");
+    const dupTwin = await task(dupId, dupB, "dropped", "manual");
+    // A poll Rosey posted for the dup's twin must follow it to the surviving task.
+    await pool.query(
+      `INSERT INTO rosey_messages (group_id, external_id, kind, task_id, message_secret)
+       VALUES ($1, 'R-POLL-1', 'poll', $2, '\\x00'::bytea)`,
+      [dupId, dupTwin],
+    );
+    // A DIFFERENT item of message B on the dup side, at a position the survivor
+    // already holds with yet another item: not a twin, so it must move, not vanish.
+    // It was closed by hand; the survivor's item at that position must NOT take it on.
+    const survOther = await task(survivorId, survB, "open", "tag", "v", 1);
+    const sameSlot = await task(dupId, dupB, "done", "manual", "u", 1);
     // A task on a message that simply moves.
     const moving = await task(dupId, dupC, "open", "tag");
     await pool.query(
@@ -136,7 +154,7 @@ describe("mergeGroups", () => {
     const { rows: tasks } = await pool.query(
       `SELECT id::int, group_id::int, source_message_id::int, status, status_source
          FROM rosey_tasks WHERE id = ANY($1::bigint[]) ORDER BY id`,
-      [[closedByHand, survTwin, moving]],
+      [[closedByHand, survTwin, moving, sameSlot, survOther]],
     );
     expect(tasks).toEqual([
       {
@@ -152,6 +170,20 @@ describe("mergeGroups", () => {
         group_id: survivorId,
         source_message_id: survB,
         status: "dropped",
+        status_source: "manual",
+      },
+      {
+        id: survOther,
+        group_id: survivorId,
+        source_message_id: survB,
+        status: "open",
+        status_source: "tag",
+      },
+      {
+        id: sameSlot,
+        group_id: survivorId,
+        source_message_id: survB,
+        status: "done",
         status_source: "manual",
       },
       {
@@ -173,6 +205,10 @@ describe("mergeGroups", () => {
       `SELECT group_id::int, task_id::int FROM rosey_messages WHERE external_id = 'R-SENT-1'`,
     );
     expect(sent).toEqual([{ group_id: survivorId, task_id: moving }]);
+    const { rows: poll } = await pool.query(
+      `SELECT group_id::int, task_id::int FROM rosey_messages WHERE external_id = 'R-POLL-1'`,
+    );
+    expect(poll).toEqual([{ group_id: survivorId, task_id: survTwin }]);
   });
 
   it("rejects merging a group into itself", async () => {

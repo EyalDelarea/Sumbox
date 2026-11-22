@@ -232,17 +232,18 @@ export async function mergeGroups(
     survivorId,
     dupId,
   ]);
-  // A twin — both sides hold a task for the same item of the same message — keeps
-  // the survivor's row (UNIQUE (source_message_id, source_item_index)). A closed
-  // status on the dup's row (done/dropped: usually set by hand) carries across
-  // rather than reopening, and the dup row's event history moves with it.
+  // A twin — both sides hold the same item (same title key: insertTask's
+  // identity) of the same message — keeps the survivor's row. A closed status on
+  // the dup's row (done/dropped: usually set by hand) carries across rather than
+  // reopening, and everything that points at the dup row — its event history and
+  // any post of hers about it (a poll) — moves to the survivor's row.
   const twins = `${dupToSurvivor},
     twins AS (
       SELECT surv.id AS surv_id, dup.id AS dup_id, dup.status, dup.status_source
       FROM dup_to_surv m
       JOIN rosey_tasks dup ON dup.source_message_id = m.dup_msg_id
       JOIN rosey_tasks surv ON surv.source_message_id = m.surv_msg_id
-                           AND surv.source_item_index = dup.source_item_index
+                           AND surv.title_key = dup.title_key
     )`;
   await client.query(
     `${twins}
@@ -260,15 +261,35 @@ export async function mergeGroups(
      WHERE e.task_id = w.dup_id`,
     [survivorId, dupId],
   );
+  await client.query(
+    `${twins}
+     UPDATE rosey_messages r SET task_id = w.surv_id
+     FROM twins w
+     WHERE r.task_id = w.dup_id`,
+    [survivorId, dupId],
+  );
+  // Every other task on a colliding dup message moves to the survivor's message.
+  // Its position there may be held by another item, so it takes a fresh slot past
+  // the message's highest one (UNIQUE (source_message_id, source_item_index)).
   const repointedRoseyTasks = await client.query(
-    `${dupToSurvivor}
-     UPDATE rosey_tasks t SET source_message_id = m.surv_msg_id, updated_at = now()
-     FROM dup_to_surv m
-     WHERE t.source_message_id = m.dup_msg_id
-       AND NOT EXISTS (
+    `${dupToSurvivor},
+     moving AS (
+       SELECT t.id, m.surv_msg_id,
+              (SELECT COALESCE(MAX(x.source_item_index), -1) FROM rosey_tasks x
+                WHERE x.source_message_id = m.surv_msg_id)
+              + ROW_NUMBER() OVER (PARTITION BY m.surv_msg_id
+                                   ORDER BY t.source_message_id, t.source_item_index) AS slot
+       FROM dup_to_surv m
+       JOIN rosey_tasks t ON t.source_message_id = m.dup_msg_id
+       WHERE NOT EXISTS (
          SELECT 1 FROM rosey_tasks x
-         WHERE x.source_message_id = m.surv_msg_id AND x.source_item_index = t.source_item_index
-       )`,
+         WHERE x.source_message_id = m.surv_msg_id AND x.title_key = t.title_key
+       )
+     )
+     UPDATE rosey_tasks t
+        SET source_message_id = mv.surv_msg_id, source_item_index = mv.slot, updated_at = now()
+     FROM moving mv
+     WHERE t.id = mv.id`,
     [survivorId, dupId],
   );
   // Evidence (ON DELETE SET NULL) is repointed rather than blanked.
