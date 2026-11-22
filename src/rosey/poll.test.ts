@@ -9,8 +9,8 @@ import {
   MAX_POLL_OPTIONS,
   POLL_POST_LIMITS,
   type PollReplyDeps,
-  PollVotes,
   type PollVoteStore,
+  PollVotes,
   replyWithPolls,
   TASKS_POLL_NAME,
 } from "./poll.js";
@@ -150,13 +150,19 @@ describe("replyWithPolls", () => {
     const live = Array.from({ length: MAX_POLL_OPTIONS + 1 }, (_, i) => task(i + 1, `m${i}`));
     const h = harness({}, live);
     h.setPosts(POLL_POST_LIMITS[0]!.max - 1); // room for one post, the list needs two
-    expect(await replyWithPolls(h.deps, h.req)).toEqual({ kind: "skipped", reason: "rate_limited" });
+    expect(await replyWithPolls(h.deps, h.req)).toEqual({
+      kind: "skipped",
+      reason: "rate_limited",
+    });
     expect(h.events).toEqual([]);
   });
 
   it("says nothing is open instead of posting an empty poll", async () => {
     const h = harness({}, []);
-    expect(await replyWithPolls(h.deps, h.req)).toEqual({ kind: "skipped", reason: "nothing_open" });
+    expect(await replyWithPolls(h.deps, h.req)).toEqual({
+      kind: "skipped",
+      reason: "nothing_open",
+    });
   });
 
   it("a record that fails sends nothing", async () => {
@@ -200,7 +206,12 @@ function voteStore(taskIds: (number | null)[] | null) {
 }
 
 describe("applyPollVote", () => {
-  const vote = (voter: string, selected: number[]) => ({ groupId: 1, pollId: "P", voter, selected });
+  const vote = (voter: string, selected: number[]) => ({
+    groupId: 1,
+    pollId: "P",
+    voter,
+    selected,
+  });
 
   it("a tick marks its task done; un-ticking reopens it", async () => {
     const { store, marks } = voteStore([10, 11]);
