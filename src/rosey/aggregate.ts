@@ -57,7 +57,7 @@ export type AggregateReport = {
   merged: { exact: number; model: number };
   dedupUnparsed: number;
   created: number;
-  /** Already stored from an earlier run (same message, same item index). */
+  /** Already stored from an earlier run (same message, same normalized title), whatever its status. */
   alreadyStored: number;
   raisedByUnresolved: number;
 };

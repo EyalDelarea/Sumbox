@@ -102,7 +102,7 @@ describe("insertTask", () => {
     const g = await group();
     const m = await message(g);
     const s = await task(g, m);
-    const t = await task(g, m, { origin: "tag", sourceItemIndex: 1 });
+    const t = await task(g, m, { origin: "tag", title: "לקנות לחם", titleKey: "לקנות לחם" });
     const [rs, rt] = await Promise.all(
       [s, t].map((id) => listTasks(pool, g).then((l) => l.find((x) => x.id === id))),
     );
@@ -111,11 +111,28 @@ describe("insertTask", () => {
     expect(await events(s!)).toEqual([{ status: "suggested", source: "model", applied: true }]);
   });
 
-  it("is idempotent per (message, item index)", async () => {
+  it("is idempotent per (message, title key), not per item position", async () => {
     const g = await group();
     const m = await message(g);
     expect(await task(g, m)).not.toBeNull();
-    expect(await task(g, m, { title: "משהו אחר", titleKey: "משהו אחר" })).toBeNull();
+    // The same item again, at another position: already stored.
+    expect(await task(g, m, { sourceItemIndex: 3 })).toBeNull();
+    // A different item asking for a taken position: stored, in the next free slot.
+    const other = await task(g, m, { title: "משהו אחר", titleKey: "משהו אחר" });
+    expect(other).not.toBeNull();
+    const slots = (await listTasks(pool, g)).map((t) => [t.titleKey, t.sourceItemIndex]);
+    expect(slots.sort()).toEqual([
+      ["לקנות חלב", 0],
+      ["משהו אחר", 1],
+    ]);
+  });
+
+  it("serializes concurrent inserts of one item on one message", async () => {
+    const g = await group();
+    const m = await message(g);
+    const ids = await Promise.all([0, 1, 2, 3].map((i) => task(g, m, { sourceItemIndex: i })));
+    expect(ids.filter((id) => id !== null)).toHaveLength(1);
+    expect(await listTasks(pool, g)).toHaveLength(1);
   });
 
   it("goes when its source message is deleted", async () => {

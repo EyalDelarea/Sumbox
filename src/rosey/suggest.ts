@@ -9,8 +9,10 @@
  *     must label every candidate with a `kind`, and only `kind: "task"` is kept.
  *     A declared label is checkable; an omission is not. (A prompt rule's
  *     position matters more than its wording, so it is also rule 1.)
- *  2. One message is often a list. The model emits one object per item, and the
- *     item's position within its message becomes its stable index.
+ *  2. One message is often a list. The model emits one object per item; the
+ *     item's position within its message is only a preferred slot — the store
+ *     keys an item on its message and normalized title, because the model does
+ *     not number the same message's items the same way on every run.
  *
  * Every candidate must cite a message id from THIS batch. On an earlier probe
  * of the same model, 40% of citations were invented; an id outside the batch is
@@ -30,7 +32,7 @@ type SuggestKind = (typeof SUGGEST_KINDS)[number];
 
 export type SuggestedItem = {
   sourceMessageId: number;
-  /** Position of this item among the kept items of its message, from 0. */
+  /** Position among the kept items of its message, from 0: a preferred slot, not an identity. */
   itemIndex: number;
   title: string;
 };

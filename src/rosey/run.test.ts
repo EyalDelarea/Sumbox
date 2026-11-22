@@ -100,4 +100,55 @@ describe("runAggregation", () => {
     expect(again.report.created).toBe(0);
     expect(await listTasks(pool, g)).toHaveLength(1);
   });
+
+  it("a rerun where the model answers differently loses no task", async () => {
+    const g = await group();
+    const m = await message(g, "רשימה לסופר");
+    // The model's reply for one message, scripted per run.
+    const scripted = (texts: string[]) => async (system: string) =>
+      system === DEDUP_SYSTEM
+        ? '{"same_as": null}'
+        : JSON.stringify({ items: texts.map((text) => ({ m, kind: "task", text })) });
+
+    await runAggregation(pool, g, {
+      cfg,
+      generate: scripted(["לקנות חלב", "לקנות לחם"]),
+      days: 30,
+    });
+    // Run 2 drops the first item and finds a new one: the new item lands on the
+    // position another stored task already holds.
+    const again = await runAggregation(pool, g, {
+      cfg,
+      generate: scripted(["לקנות לחם", "לקנות ביצים"]),
+      days: 30,
+      fromScratch: true,
+    });
+    expect(again.report).toMatchObject({ created: 1, alreadyStored: 0 });
+    const titles = (await listTasks(pool, g)).map((t) => t.title).sort();
+    expect(titles).toEqual(["לקנות ביצים", "לקנות חלב", "לקנות לחם"].sort());
+  });
+
+  it("a rerun that repeats a stored item, even after it was closed, does not fork it", async () => {
+    const g = await group();
+    const m = await message(g, "רשימה לסופר");
+    const scripted = (texts: string[]) => async (system: string) =>
+      system === DEDUP_SYSTEM
+        ? '{"same_as": null}'
+        : JSON.stringify({ items: texts.map((text) => ({ m, kind: "task", text })) });
+    await runAggregation(pool, g, {
+      cfg,
+      generate: scripted(["לקנות חלב", "לקנות לחם"]),
+      days: 30,
+    });
+    // Closed tasks are not dedup candidates, so only the store's identity stops a fork.
+    await pool.query(`UPDATE rosey_tasks SET status = 'done' WHERE group_id = $1`, [g]);
+    const again = await runAggregation(pool, g, {
+      cfg,
+      generate: scripted(["לקנות לחם", "לקנות חלב"]),
+      days: 30,
+      fromScratch: true,
+    });
+    expect(again.report).toMatchObject({ created: 0, alreadyStored: 2 });
+    expect(await listTasks(pool, g, { includeClosed: true })).toHaveLength(2);
+  });
 });

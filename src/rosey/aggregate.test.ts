@@ -43,7 +43,7 @@ function harness(script: {
     liveTasksRaisedBetween: async (since, until) =>
       stored.filter((t) => t.raisedAt >= since && t.raisedAt <= until),
     insertSuggestion: async (input) => {
-      const k = `${input.sourceMessageId}:${input.sourceItemIndex}`;
+      const k = `${input.sourceMessageId}:${input.titleKey}`; // the store's identity
       if (seen.has(k)) return null;
       seen.add(k);
       const id = stored.length + 1;
