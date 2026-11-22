@@ -168,6 +168,39 @@ describe("purgeUnselectedChats", () => {
     expect(await count("summary_group_marks", "group_id = $1", [included])).toBe(1);
   });
 
+  it("purges Rosey's tasks, their history, and her sent ledger with the chat", async () => {
+    // Same trap as aida_messages: rosey_messages is group-keyed with no message FK,
+    // and the group row survives this purge, so only the explicit DELETE removes it.
+    const unselected = await newGroup("rosey-drop");
+    const included = await newGroup("rosey-keep");
+    await includeGroup(included);
+    for (const g of [unselected, included]) {
+      const msg = await newMessage(g);
+      const { rows } = await admin.query<{ id: string }>(
+        `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
+                                  source_message_id, raised_at)
+         VALUES ($1, 'לקנות חלב', 'לקנות חלב', 'tag', 'open', 'tag', $2, now()) RETURNING id`,
+        [g, msg],
+      );
+      await admin.query(
+        `INSERT INTO rosey_task_events (task_id, status, source, applied) VALUES ($1, 'open', 'tag', true)`,
+        [rows[0]!.id],
+      );
+      await admin.query(
+        `INSERT INTO rosey_messages (group_id, external_id, kind) VALUES ($1, $2, 'reply')`,
+        [g, `ROSEY-${g}`],
+      );
+    }
+
+    await purgeUnselectedChats(admin);
+
+    expect(await count("rosey_tasks", "group_id = $1", [unselected])).toBe(0);
+    expect(await count("rosey_messages", "group_id = $1", [unselected])).toBe(0);
+    expect(await count("rosey_task_events", "true", [])).toBe(1);
+    expect(await count("rosey_tasks", "group_id = $1", [included])).toBe(1);
+    expect(await count("rosey_messages", "group_id = $1", [included])).toBe(1);
+  });
+
   it("with olderThanDays, spares unselected chats that had recent activity", async () => {
     const dormant = await newGroup("dormant");
     const active = await newGroup("active");
@@ -220,6 +253,26 @@ describe("deleteAllData", () => {
     expect(await count("groups", "true", [])).toBe(0);
     expect(await count("messages", "true", [])).toBe(0);
     expect(await count("imports", "true", [])).toBe(0);
+  });
+
+  it("wipes Rosey's tables too (they carry no tenant_id, so they go by cascade)", async () => {
+    const g = await newGroup("rosey-wipe");
+    const msg = await newMessage(g);
+    await admin.query(
+      `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
+                                source_message_id, raised_at)
+       VALUES ($1, 'x', 'x', 'tag', 'open', 'tag', $2, now())`,
+      [g, msg],
+    );
+    await admin.query(
+      `INSERT INTO rosey_messages (group_id, external_id, kind) VALUES ($1, 'ROSEY-W', 'reply')`,
+      [g],
+    );
+
+    await deleteAllData(admin);
+
+    expect(await count("rosey_tasks", "true", [])).toBe(0);
+    expect(await count("rosey_messages", "true", [])).toBe(0);
   });
 });
 

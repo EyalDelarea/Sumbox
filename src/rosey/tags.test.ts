@@ -1,0 +1,83 @@
+import { describe, expect, it } from "vitest";
+import { matchAskTrigger } from "../collector/ask-trigger.js";
+import { DEFAULT_ROSEY_TAGS, loadRoseyConfig } from "./config.js";
+import { makeTagMatcher, parseTagAliases } from "./tags.js";
+
+const rosey = makeTagMatcher(parseTagAliases(DEFAULT_ROSEY_TAGS));
+
+describe("parseTagAliases", () => {
+  it("adds a missing @, trims, and de-duplicates", () => {
+    expect(parseTagAliases(" Rosey, @רוזי ,@Rosey,,")).toEqual(["@Rosey", "@רוזי"]);
+  });
+
+  it("config falls back to the defaults when ROSEY_TAGS is blank", () => {
+    expect(loadRoseyConfig({ ROSEY_TAGS: " , " }).tags).toEqual(["@Rosey", "@רוזי"]);
+    expect(loadRoseyConfig({ ROSEY_TAGS: "@Rosie" }).tags).toEqual(["@Rosie"]);
+  });
+});
+
+describe("tag matching", () => {
+  it("matches either script, case-insensitively, anywhere in the text", () => {
+    expect(rosey.isTagged("@Rosey לקנות חלב")).toBe(true);
+    expect(rosey.isTagged("לקנות חלב @רוזי")).toBe(true);
+    expect(rosey.isTagged("@ROSEY, milk")).toBe(true);
+  });
+
+  it("does not match a longer word that merely starts with the tag", () => {
+    expect(rosey.isTagged("@Roseyy milk")).toBe(false);
+    expect(rosey.isTagged("@רוזיה תקני חלב")).toBe(false);
+    expect(rosey.isTagged("Rosey without the at sign")).toBe(false);
+  });
+
+  it("is disjoint from @Aida's trigger in both directions", () => {
+    expect(rosey.isTagged("@Aida מה קורה?")).toBe(false);
+    expect(rosey.isTagged("@אידה מה קורה?")).toBe(false);
+    expect(matchAskTrigger("@Rosey לקנות חלב")).toBeNull();
+    expect(matchAskTrigger("@רוזי לקנות חלב")).toBeNull();
+  });
+
+  it("honours configured aliases only", () => {
+    const custom = makeTagMatcher(["@Rosie"]);
+    expect(custom.isTagged("@Rosie milk")).toBe(true);
+    expect(custom.isTagged("@Rosey milk")).toBe(false);
+  });
+});
+
+describe("command parsing", () => {
+  it("one line is one task, even with commas", () => {
+    expect(rosey.parse("@Rosey לקנות חלב, ביצים ולחם")).toEqual({
+      kind: "add",
+      items: ["לקנות חלב, ביצים ולחם"],
+    });
+  });
+
+  it("each line of a list is its own task, with bullets stripped", () => {
+    expect(rosey.parse("@רוזי\n- חלב\n* ביצים\n2) לחם\n✅ קפה\n\n")).toEqual({
+      kind: "add",
+      items: ["חלב", "ביצים", "לחם", "קפה"],
+    });
+  });
+
+  it("a leading done-word is a completion, with the rest as the query", () => {
+    expect(rosey.parse("@Rosey done: milk")).toEqual({ kind: "done", query: "milk" });
+    expect(rosey.parse("@רוזי בוצע לקנות חלב")).toEqual({ kind: "done", query: "לקנות חלב" });
+    expect(rosey.parse("@רוזי בוצע")).toEqual({ kind: "done", query: "" });
+  });
+
+  it("a done-word that is only the start of another word is an ordinary item", () => {
+    expect(rosey.parse("@Rosey doneness check")).toEqual({
+      kind: "add",
+      items: ["doneness check"],
+    });
+  });
+
+  it("a bare tag, or an untagged message, is nothing to do", () => {
+    expect(rosey.parse("@Rosey")).toBeNull();
+    expect(rosey.parse("לקנות חלב")).toBeNull();
+  });
+
+  it("caps an over-long line", () => {
+    const parsed = rosey.parse(`@Rosey ${"א".repeat(500)}`);
+    expect(parsed?.kind === "add" && parsed.items[0]?.length).toBe(200);
+  });
+});
