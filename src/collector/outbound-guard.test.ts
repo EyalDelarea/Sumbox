@@ -142,7 +142,7 @@ describe("PASSIVE_MODE_BANNER", () => {
   // The banner is the operator's only startup statement of what the device sends.
   // It once claimed "will NOT send messages" while /סיכום and @Aida replies went out.
   it("names every kind of send the allowlist lets through", () => {
-    for (const sent of ["/סיכום", "@Aida", "reactions", "enabled"]) {
+    for (const sent of ["/סיכום", "@Aida", "error replies", "⏳", "⏸", "✅", "❌", "enabled"]) {
       expect(PASSIVE_MODE_BANNER).toContain(sent);
     }
   });

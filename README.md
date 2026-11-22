@@ -161,7 +161,7 @@ This is the most important step. On first run (`make dev` or `npx tsx src/cli.ts
 **Before the QR appears, a safety banner prints:**
 
 ```
-🔒 Passive mode: no read receipts, presence, or typing. Messages and reactions go ONLY to groups enabled in the commands tab (/סיכום replies, @Aida answers, ⏳/✅ reactions); toggling a group takes effect on its next message, no restart. Every other chat: nothing is sent (set WHATSAPP_ALLOW_SEND=true to lift this).
+🔒 Passive mode: no read receipts, presence, or typing. Messages and reactions go ONLY to groups enabled in the commands tab (/סיכום replies, @Aida answers, error replies, and ⏳ ⏸ ✅ ❌ reactions); toggling a group takes effect on its next message, no restart. Every other chat: nothing is sent (WHATSAPP_ALLOW_SEND=true lifts this for every chat).
 ```
 
 **To link:**

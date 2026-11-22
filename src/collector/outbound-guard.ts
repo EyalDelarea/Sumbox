@@ -39,10 +39,11 @@ export type AllowlistSource =
  * The startup banner both collector entry points (`serve --collect`, `collect`) log
  * when sending is not globally enabled. It must describe what this guard actually
  * lets through: the allowlisted groups below receive `/סיכום` replies, `@Aida`
- * answers and status reactions. Shown verbatim in README § Linking WhatsApp.
+ * answers, error replies and ⏳ ⏸ ✅ ❌ status reactions. Shown verbatim in
+ * README § Linking WhatsApp.
  */
 export const PASSIVE_MODE_BANNER =
-  "🔒 Passive mode: no read receipts, presence, or typing. Messages and reactions go ONLY to groups enabled in the commands tab (/סיכום replies, @Aida answers, ⏳/✅ reactions); toggling a group takes effect on its next message, no restart. Every other chat: nothing is sent (set WHATSAPP_ALLOW_SEND=true to lift this).";
+  "🔒 Passive mode: no read receipts, presence, or typing. Messages and reactions go ONLY to groups enabled in the commands tab (/סיכום replies, @Aida answers, error replies, and ⏳ ⏸ ✅ ❌ reactions); toggling a group takes effect on its next message, no restart. Every other chat: nothing is sent (WHATSAPP_ALLOW_SEND=true lifts this for every chat).";
 
 /** Methods that actively send chat content — blocked by throwing. */
 export const HARD_BLOCKED = ["sendMessage", "relayMessage"] as const;
