@@ -1,0 +1,103 @@
+import { randomUUID } from "node:crypto";
+import pg from "pg";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { listTasks } from "../db/repositories/rosey-tasks.js";
+import { getLastRun } from "../db/repositories/scheduler-state.js";
+import { createTestDatabase } from "../test/db.js";
+import { loadRoseyConfig } from "./config.js";
+import { DEDUP_SYSTEM } from "./dedup.js";
+import { cursorKey, runAggregation } from "./run.js";
+
+let pool: pg.Pool;
+beforeAll(async () => {
+  pool = new pg.Pool({ connectionString: await createTestDatabase() });
+}, 120_000);
+afterAll(async () => {
+  await pool?.end();
+}, 30_000);
+
+const cfg = loadRoseyConfig({});
+
+async function group(): Promise<number> {
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO groups (name, source) VALUES ($1, 'live') RETURNING id`,
+    [`rosey-run-${randomUUID()}`],
+  );
+  return Number(rows[0]!.id);
+}
+
+async function message(groupId: number, text: string): Promise<number> {
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO messages (group_id, source, message_type, text_content, sent_at, dedupe_key)
+     VALUES ($1, 'live', 'text', $2, now(), $3) RETURNING id`,
+    [groupId, text, `dk-${randomUUID()}`],
+  );
+  return Number(rows[0]!.id);
+}
+
+/** A scripted local model: every message becomes one task titled after its text. */
+function model(opts: { fail?: boolean } = {}) {
+  const seen: string[] = [];
+  const generate = async (system: string, user: string) => {
+    if (system === DEDUP_SYSTEM) return '{"same_as": null}';
+    if (opts.fail) throw new Error("ollama down");
+    seen.push(user);
+    const ids = [...user.matchAll(/^\[(\d+)\] \S+ \S+.*?: (.*)$/gmu)];
+    return JSON.stringify({
+      items: ids.map((m) => ({ m: Number(m[1]), kind: "task", text: m[2] })),
+    });
+  };
+  return { generate, seen };
+}
+
+describe("runAggregation", () => {
+  it("stores suggestions, advances the cursor, and reads only new messages next time", async () => {
+    const g = await group();
+    await message(g, "להחליף נורה");
+    await message(g, "@Rosey לקנות לחם");
+
+    const m1 = model();
+    const first = await runAggregation(pool, g, { cfg, generate: m1.generate, days: 30 });
+    expect(first).toMatchObject({ cursorAdvanced: true, report: { created: 1, taggedSkipped: 1 } });
+    expect(await getLastRun(pool, cursorKey(g))).not.toBeNull();
+
+    await message(g, "להתקשר לאינסטלטור");
+    const m2 = model();
+    const second = await runAggregation(pool, g, { cfg, generate: m2.generate, days: 30 });
+    expect(second.report.messagesRead).toBe(1);
+    expect(m2.seen.join("\n")).not.toContain("להחליף נורה");
+
+    const titles = (await listTasks(pool, g)).map((t) => t.title).sort();
+    expect(titles).toEqual(["להתקשר לאינסטלטור", "להחליף נורה"].sort());
+  });
+
+  it("does not advance the cursor when a batch fails, so the messages are read again", async () => {
+    const g = await group();
+    await message(g, "לקנות חלב");
+    const failed = await runAggregation(pool, g, {
+      cfg,
+      generate: model({ fail: true }).generate,
+      days: 30,
+    });
+    expect(failed.cursorAdvanced).toBe(false);
+    expect(await getLastRun(pool, cursorKey(g))).toBeNull();
+
+    const retry = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    expect(retry.report).toMatchObject({ messagesRead: 1, created: 1 });
+  });
+
+  it("fromScratch re-reads the window without duplicating stored items", async () => {
+    const g = await group();
+    await message(g, "לקנות חלב");
+    await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    const again = await runAggregation(pool, g, {
+      cfg,
+      generate: model().generate,
+      days: 30,
+      fromScratch: true,
+    });
+    expect(again.report.messagesRead).toBe(1);
+    expect(again.report.created).toBe(0);
+    expect(await listTasks(pool, g)).toHaveLength(1);
+  });
+});
