@@ -247,10 +247,9 @@ export async function runAggregation(
     generate: opts.generate,
     isTagged: tags.isTagged,
     resolveRaisedBy: (ids) => resolveRaisedBy(pool, groupId, ids),
-    liveTasksRaisedBetween: (since, until) =>
-      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP),
-    insertSuggestion: (input) =>
-      insertTask(pool, { ...input, groupId, origin: "suggested", kind: "task" }),
+    liveTasksRaisedBetween: (since, until, kind) =>
+      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP, { kind }),
+    insertSuggestion: (input) => insertTask(pool, { ...input, groupId, origin: "suggested" }),
     onBatchError: opts.onBatchError,
   });
 

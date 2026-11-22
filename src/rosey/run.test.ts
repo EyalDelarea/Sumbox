@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listTasks } from "../db/repositories/rosey-tasks.js";
+import { listTasks, setTaskKind } from "../db/repositories/rosey-tasks.js";
 import { getLastRun, recordRun } from "../db/repositories/scheduler-state.js";
 import { createTestDatabase } from "../test/db.js";
 import { loadRoseyConfig } from "./config.js";
@@ -52,7 +52,7 @@ async function message(groupId: number, text: string, lateMs = 0): Promise<numbe
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
 /** A scripted local model: every message becomes one task titled after its text. */
-function model(opts: { fail?: boolean } = {}) {
+function model(opts: { fail?: boolean; kind?: "task" | "grocery" } = {}) {
   const seen: string[] = [];
   const generate = async (system: string, user: string) => {
     if (system === DEDUP_SYSTEM) return '{"same_as": null}';
@@ -60,7 +60,7 @@ function model(opts: { fail?: boolean } = {}) {
     seen.push(user);
     const ids = [...user.matchAll(/^\[(\d+)\] \S+ \S+.*?: (.*)$/gmu)];
     return JSON.stringify({
-      items: ids.map((m) => ({ m: Number(m[1]), kind: "task", text: m[2] })),
+      items: ids.map((m) => ({ m: Number(m[1]), kind: opts.kind ?? "task", text: m[2] })),
     });
   };
   return { generate, seen };
@@ -98,6 +98,32 @@ describe("runAggregation", () => {
 
     const titles = (await listTasks(pool, g)).map((t) => t.title).sort();
     expect(titles).toEqual(["להתקשר לאינסטלטור", "להחליף נורה"].sort());
+  });
+
+  it("stores the model's grocery label, and a kind set by hand survives a re-read", async () => {
+    const g = await group();
+    await message(g, "חלב");
+    await tick();
+    const first = await runAggregation(pool, g, {
+      cfg,
+      generate: model({ kind: "grocery" }).generate,
+      days: 30,
+    });
+    expect(first.report.createdByKind).toEqual({ task: 0, grocery: 1 });
+    const [item] = await listTasks(pool, g);
+    expect(item?.kind).toBe("grocery");
+
+    // The owner disagrees (D4: manual is the top layer) …
+    await setTaskKind(pool, item!.id, "task");
+    // … and a full re-read whose model says grocery again does not undo it.
+    await runAggregation(pool, g, {
+      cfg,
+      generate: model({ kind: "grocery" }).generate,
+      days: 30,
+      fromScratch: true,
+    });
+    const after = await listTasks(pool, g);
+    expect(after.map((t) => [t.id, t.kind])).toEqual([[item!.id, "task"]]);
   });
 
   it("catches up on late commands the live path never saw, exactly once", async () => {
