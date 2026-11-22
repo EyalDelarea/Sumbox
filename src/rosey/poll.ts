@@ -16,7 +16,8 @@
  *  3. applyPollVote — a vote (poll id, voter, the options that voter now has
  *     ticked) in, status events out, through the poll layer of D4 (status.ts):
  *     an option ticked by its first voter marks its task done; an option left
- *     with no voter reopens it. A manual status is never moved (D4 layer 3).
+ *     with no voter reopens it, but only if a poll closed it (D4, status.ts:
+ *     a tag or reply after the tick wins). A manual status is never moved.
  *
  * What a real WhatsApp send still needs (not here): the Baileys poll send, which
  * must carry the secret recorded here, and vote decryption — a pollUpdateMessage
@@ -286,7 +287,8 @@ export type PollVoteOutcome =
 /**
  * One voter's vote on one of her polls. Only what this vote changed is acted
  * on: an option this voter newly ticked marks its task done; an option this
- * voter un-ticked reopens its task once nobody has it ticked. Options outside
+ * voter un-ticked asks to reopen its task once nobody has it ticked, which
+ * the store applies only if a poll set the current status. Options outside
  * the poll are ignored.
  */
 export async function applyPollVote(

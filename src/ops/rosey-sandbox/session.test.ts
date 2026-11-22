@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { recordStatusEvent } from "../../db/repositories/rosey-tasks.js";
 import { DEDUP_SYSTEM } from "../../rosey/dedup.js";
 import { setRoseyEnabled } from "../../rosey/run.js";
 import { createTestDatabase } from "../../test/db.js";
@@ -148,6 +149,26 @@ describe("RoseySandbox", () => {
     await s.setStatus(tasks[0]!.id, "dropped");
     await s.vote({ pollId: polls[0]!.id, member: owner, option: 0 });
     expect((await s.state()).tasks[0]).toMatchObject({ status: "dropped", statusSource: "manual" });
+    s.stop();
+  });
+
+  it("an untick never reopens a task something else closed after the tick", async () => {
+    const { s, member, owner } = await sandbox();
+    await s.post({ member, text: "@Rosey לתקן ברז" });
+    const { tasks } = await until(
+      () => s.state(),
+      (v) => v.tasks.length === 1,
+    );
+    await s.post({ member, text: "@רוזי רשימה" });
+    const { polls } = await until(
+      () => s.state(),
+      (v) => v.polls.length === 1,
+    );
+    await s.vote({ pollId: polls[0]!.id, member: owner, option: 0 }); // tick: done (poll)
+    // Then a reply in the group drops it.
+    await recordStatusEvent(pool, { taskId: tasks[0]!.id, status: "dropped", source: "reply" });
+    await s.vote({ pollId: polls[0]!.id, member: owner, option: 0 }); // untick
+    expect((await s.state()).tasks[0]).toMatchObject({ status: "dropped", statusSource: "reply" });
     s.stop();
   });
 
