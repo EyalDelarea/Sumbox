@@ -102,6 +102,7 @@ export function commandStore(pool: pg.Pool, groupId: number): CommandStore {
         ...input,
         groupId,
         origin: "tag",
+        kind: "task",
         raisedByParticipantId: raisedBy.get(input.sourceMessageId) ?? null,
       });
     },
@@ -248,7 +249,8 @@ export async function runAggregation(
     resolveRaisedBy: (ids) => resolveRaisedBy(pool, groupId, ids),
     liveTasksRaisedBetween: (since, until) =>
       liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP),
-    insertSuggestion: (input) => insertTask(pool, { ...input, groupId, origin: "suggested" }),
+    insertSuggestion: (input) =>
+      insertTask(pool, { ...input, groupId, origin: "suggested", kind: "task" }),
     onBatchError: opts.onBatchError,
   });
 

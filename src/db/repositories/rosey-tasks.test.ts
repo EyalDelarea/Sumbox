@@ -9,6 +9,7 @@ import {
   recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
+  setTaskKind,
 } from "./rosey-tasks.js";
 
 let pool: pg.Pool;
@@ -80,6 +81,7 @@ const task = (
     title: "לקנות חלב",
     titleKey: "לקנות חלב",
     origin: "suggested",
+    kind: "task",
     raisedByParticipantId: null,
     sourceMessageId,
     sourceItemIndex: 0,
@@ -258,6 +260,80 @@ describe("liveTasksRaisedBetween", () => {
     await recordStatusEvent(pool, { taskId: done, status: "done", source: "manual" });
     const live = await liveTasksRaisedBetween(pool, g, at(5), at(12));
     expect(live.map((t) => t.id)).toEqual([inWin]);
+  });
+
+  it("reads one kind only when asked: dedup is per kind", async () => {
+    const g = await group();
+    const m = await message(g);
+    const at = new Date(Date.UTC(2026, 10, 10));
+    const t = (await task(g, m, { title: "לתקן ברז", titleKey: "לתקן ברז", raisedAt: at }))!;
+    const gr = (await task(g, m, {
+      title: "חלב",
+      titleKey: "חלב",
+      kind: "grocery",
+      raisedAt: at,
+    }))!;
+    const since = new Date(Date.UTC(2026, 10, 1));
+    const until = new Date(Date.UTC(2026, 10, 20));
+    const ids = async (kind?: "task" | "grocery") =>
+      (await liveTasksRaisedBetween(pool, g, since, until, 60, { kind })).map((x) => x.id).sort();
+    expect(await ids("grocery")).toEqual([gr]);
+    expect(await ids("task")).toEqual([t]);
+    expect(await ids()).toEqual([t, gr].sort());
+  });
+});
+
+describe("kind", () => {
+  it("is stored on insert and read back by both list views", async () => {
+    const g = await group();
+    const m = await message(g);
+    const gr = (await task(g, m, { title: "חלב", titleKey: "חלב", kind: "grocery" }))!;
+    const t = (await task(g, m, { title: "לתקן ברז", titleKey: "לתקן ברז" }))!;
+    const listed = await listTasks(pool, g);
+    expect(listed.find((x) => x.id === gr)?.kind).toBe("grocery");
+    expect(listed.find((x) => x.id === t)?.kind).toBe("task");
+    const live = await liveTasksRaisedBetween(pool, g, new Date(0), new Date("2030-01-01"));
+    expect(live.find((x) => x.id === gr)?.kind).toBe("grocery");
+  });
+
+  it("a row written without a kind is a task (the column default)", async () => {
+    const g = await group();
+    const m = await message(g);
+    await pool.query(
+      `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
+                                source_message_id, raised_at)
+       VALUES ($1, 'x', 'x', 'tag', 'open', 'tag', $2, now())`,
+      [g, m],
+    );
+    expect((await listTasks(pool, g))[0]?.kind).toBe("task");
+  });
+
+  it("setTaskKind changes the kind by hand and leaves the status alone", async () => {
+    const g = await group();
+    const m = await message(g);
+    const id = (await task(g, m, { title: "חלב", titleKey: "חלב" }))!;
+    expect(await setTaskKind(pool, id, "grocery")).toEqual({
+      found: true,
+      previous: "task",
+      current: "grocery",
+    });
+    const row = (await listTasks(pool, g)).find((x) => x.id === id)!;
+    expect(row).toMatchObject({ kind: "grocery", status: "suggested", statusSource: "model" });
+    expect(await setTaskKind(pool, id, "task")).toMatchObject({
+      previous: "grocery",
+      current: "task",
+    });
+    expect(await setTaskKind(pool, 987_654_321, "task")).toEqual({ found: false });
+  });
+
+  it("a re-read never rewrites the kind of a stored item", async () => {
+    const g = await group();
+    const m = await message(g);
+    const id = (await task(g, m, { title: "חלב", titleKey: "חלב" }))!;
+    await setTaskKind(pool, id, "grocery");
+    // The model labels the same item of the same message the other way on a rerun.
+    expect(await task(g, m, { title: "חלב", titleKey: "חלב", kind: "task" })).toBeNull();
+    expect((await listTasks(pool, g)).find((x) => x.id === id)?.kind).toBe("grocery");
   });
 });
 

@@ -13,6 +13,7 @@ function task(id: number, title: string, over: Partial<RoseyTask> = {}): RoseyTa
     title,
     titleKey: titleKey(title),
     origin: "tag",
+    kind: "task",
     status: "open",
     statusSource: "tag",
     raisedByParticipantId: null,
