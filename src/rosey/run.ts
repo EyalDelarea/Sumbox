@@ -81,8 +81,9 @@ export async function setRoseyEnabled(
     // Number(): group_id is a bigint, which pg returns as a string despite the type.
     (p) => Number(p.groupId) === groupId && p.enabled,
   );
-  await upsertCommandPermission(pool, { groupId, command: ROSEY_COMMAND_KEY, enabled });
+  // The cursor moves BEFORE she is switched on, so no pass can run in between.
   if (enabled && !wasOn) await recordRun(pool, cursorKey(groupId), await databaseNow(pool));
+  await upsertCommandPermission(pool, { groupId, command: ROSEY_COMMAND_KEY, enabled });
 }
 
 /**

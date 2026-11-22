@@ -536,6 +536,32 @@ describe("makeRoseyLive", () => {
     live.stop();
   });
 
+  it("a pass armed before `rosey disable` does not run, so commands sent after it are never applied", async () => {
+    const logged: string[] = [];
+    const log = {
+      info: (_: unknown, msg?: string) => {
+        if (msg) logged.push(msg);
+      },
+      warn: () => {},
+      error: () => {},
+    };
+    const live = makeRoseyLive({
+      pool,
+      cfg: { ...cfg, suggestDebounceMs: 300 },
+      generate,
+      log,
+    });
+    const g = await group(true);
+    await deliver(live, g, "צריך לסדר את הארון"); // arms the pass
+    await setRoseyEnabled(pool, g.id, false);
+    await deliver(live, g, "@Rosey לקנות נורות"); // ignored live: she is off
+    await vi.waitFor(() => expect(logged).toContain("rosey: pass skipped; group not enabled"), {
+      timeout: 3_000,
+    });
+    expect(await listTasks(pool, g.id, { includeClosed: true })).toEqual([]);
+    live.stop();
+  });
+
   it("applies commands in arrival order even when the first one's lookups are slower", async () => {
     const add = `WA-${randomUUID()}`;
     const done = `WA-${randomUUID()}`;

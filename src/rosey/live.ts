@@ -137,6 +137,11 @@ export function makeRoseyLive(deps: {
     queue
       .run(groupId, async () => {
         const jid = await jidForGroupId(pool, groupId);
+        // Re-checked when the pass runs: one armed before `rosey disable` must not
+        // replay what was said after it (the live path ignored those, so the
+        // catch-up would see them as unapplied commands).
+        const enabled = new Set(await getEnabledGroupJids(pool, ROSEY_COMMAND_KEY));
+        if (jid === null || !enabled.has(jid)) return null;
         const cutoff = Date.now() + slackMs;
         // A message whose group is not resolved yet is ours only if it came from
         // this group's chat, so one chat's failure never holds another's cursor.
@@ -174,7 +179,12 @@ export function makeRoseyLive(deps: {
         }
         return result;
       })
-      .then(({ report, tagged, cursorAdvanced }) =>
+      .then((result) => {
+        if (result === null) {
+          log?.info({ groupId }, "rosey: pass skipped; group not enabled");
+          return;
+        }
+        const { report, tagged, cursorAdvanced } = result;
         log?.info(
           {
             groupId,
@@ -191,8 +201,8 @@ export function makeRoseyLive(deps: {
           cursorAdvanced
             ? "rosey: suggestion pass"
             : "rosey: suggestion pass incomplete; will retry",
-        ),
-      )
+        );
+      })
       .catch((err: unknown) => log?.error({ err, groupId }, "rosey: suggestion pass failed"));
 
   const scheduleSuggestions = (groupId: number) => {
