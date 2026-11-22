@@ -122,7 +122,10 @@ export function applyOutboundGuard<T>(
       const original = (target[method] as (...args: unknown[]) => unknown).bind(target);
       target[method] = async (...args: unknown[]): Promise<unknown> => {
         if (await isAllowed(args[0])) {
-          return original(...args);
+          // The scope authorises THIS call only. The real send runs outside it,
+          // so nothing it starts (Baileys emits the echo on nextTick, and
+          // @Aida or /סיכום may react to it) inherits a bot's scope.
+          return sendScope.exit(() => original(...args));
         }
         throw new Error(
           `Outbound WhatsApp send blocked: "${method}" targets a chat that is not enabled ` +
