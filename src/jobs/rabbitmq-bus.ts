@@ -7,6 +7,13 @@ import type { ConsumeOptions, Job, JobPayloads, JobType } from "./job-types.js";
 const DEFAULT_MAX_ATTEMPTS = 3;
 const RECONNECT_DELAY_MS = 2_000;
 
+/** One consume() call, kept so it can be replayed on a new channel. */
+interface ConsumerRegistration {
+  type: JobType;
+  handler: (job: Job) => Promise<void>;
+  opts: ConsumeOptions;
+}
+
 export interface RabbitMqJobBusOptions {
   url: string;
   recorder: JobRunRecorder;
@@ -41,6 +48,13 @@ export class RabbitMqJobBus implements JobBus {
   // Track which queues+exchanges we have already asserted so we don't repeat.
   private readonly assertedTypes = new Set<JobType>();
 
+  /**
+   * Every consumer registered so far. A consumer lives on a channel, so when the
+   * channel or connection dies the broker forgets it; connect() replays this list
+   * on each new channel so a worker keeps consuming across a reconnect.
+   */
+  private readonly consumers: ConsumerRegistration[] = [];
+
   constructor(opts: RabbitMqJobBusOptions) {
     this.url = opts.url;
     this.recorder = opts.recorder;
@@ -57,41 +71,67 @@ export class RabbitMqJobBus implements JobBus {
     if (this.connectingPromise) return this.connectingPromise;
 
     this.connectingPromise = (async () => {
+      let model: amqplib.ChannelModel | null = null;
       try {
-        const model = await amqplib.connect(this.url);
-        this.model = model;
+        // A new connection may face a broker that came back empty, so re-assert
+        // every queue on it instead of trusting what the last connection saw.
+        this.assertedTypes.clear();
 
-        // Auto-reconnect on unexpected close
-        model.on("close", () => {
-          if (!this.closed) {
-            this.model = null;
-            this.channel = null;
-            this.connectingPromise = null;
-            this.assertedTypes.clear();
-            console.warn("[RabbitMqJobBus] connection closed unexpectedly; reconnecting...");
-            void this.scheduleReconnect();
-          }
-        });
-
+        model = await amqplib.connect(this.url);
         model.on("error", (err: Error) => {
           console.error("[RabbitMqJobBus] connection error:", err.message);
         });
 
         const ch = await model.createChannel();
-
         ch.on("error", (err: Error) => {
           console.error("[RabbitMqJobBus] channel error:", err.message);
         });
 
+        // Re-subscribe everything registered so far. Empty on the first connect.
+        for (const reg of this.consumers) await this.startConsumer(ch, reg);
+
+        // Watch for loss only once fully up: a failure above is handled by the
+        // catch below, and must not also schedule a reconnect from here.
+        const live = model;
+        live.on("close", () => this.onConnectionLost(live, "connection closed"));
+        ch.on("close", () => this.onConnectionLost(live, "channel closed"));
+
+        this.model = live;
         this.channel = ch;
+        if (this.consumers.length > 0) {
+          console.warn(
+            `[RabbitMqJobBus] reconnected; re-subscribed ${this.consumers.length} consumer(s)`,
+          );
+        }
         return ch;
       } catch (err) {
         // Clear mutex on failure so a subsequent call can retry.
         this.connectingPromise = null;
+        await model?.close().catch(() => {});
         throw err;
       }
     })();
     return this.connectingPromise;
+  }
+
+  /**
+   * The connection or the channel died without close() being called. Either way
+   * the broker has dropped our consumers, so discard both and rebuild: connect()
+   * opens a fresh connection and re-subscribes every registered consumer.
+   *
+   * A channel-only close (a channel error, or a broker `consumer_timeout`) leaves
+   * the connection up; closing it here sends both cases down one recovery path.
+   * The identity check turns the second event of a pair (a channel closes along
+   * with its connection) and events from a superseded connection into no-ops.
+   */
+  private onConnectionLost(model: amqplib.ChannelModel, reason: string): void {
+    if (this.closed || this.model !== model) return;
+    this.model = null;
+    this.channel = null;
+    this.connectingPromise = null;
+    console.warn(`[RabbitMqJobBus] ${reason} unexpectedly; reconnecting...`);
+    void model.close().catch(() => {}); // a no-op error when the connection already dropped
+    void this.scheduleReconnect();
   }
 
   private async scheduleReconnect(): Promise<void> {
@@ -164,7 +204,17 @@ export class RabbitMqJobBus implements JobBus {
     handler: (job: Job<T>) => Promise<void>,
     opts: ConsumeOptions,
   ): Promise<void> {
+    const reg = { type, handler, opts } as ConsumerRegistration;
     const ch = await this.connect();
+    await this.startConsumer(ch, reg);
+    // Registered only once it is live, so the connect() above can't replay it a
+    // second time. From here on, every reconnect re-subscribes it.
+    this.consumers.push(reg);
+  }
+
+  /** Subscribe one consumer on `ch`. consume() and every reconnect both use it. */
+  private async startConsumer(ch: amqplib.Channel, reg: ConsumerRegistration): Promise<void> {
+    const { type, handler, opts } = reg;
     await this.assertTopology(ch, type);
 
     await ch.prefetch(opts.prefetch);
@@ -185,8 +235,8 @@ export class RabbitMqJobBus implements JobBus {
         const attempts = ((headers["attempts"] as number) ?? 0) + 1;
         const maxAttempts = (headers["maxAttempts"] as number) ?? DEFAULT_MAX_ATTEMPTS;
 
-        const payload = JSON.parse(msg.content.toString()) as JobPayloads[T];
-        const job: Job<T> = { id, type, payload, attempts, maxAttempts };
+        const payload = JSON.parse(msg.content.toString()) as JobPayloads[JobType];
+        const job = { id, type, payload, attempts, maxAttempts } as Job;
 
         await this.recorder.recordStatus(id, "running");
 
@@ -215,9 +265,10 @@ export class RabbitMqJobBus implements JobBus {
           }
         }
       })().catch((err) => {
-        // Safety net: close() can still race between a `this.closed` guard above and the
-        // channel call (the channel flips to "closing" in between). The message stays
-        // unacked and is redelivered, so log and move on — never let this fire-and-forget
+        // Safety net: the channel can close between a guard above and the channel call,
+        // on shutdown (close() flips it to "closing") or because the broker dropped it.
+        // Either way the message stays unacked and is redelivered (after a drop, to the
+        // re-subscribed consumer), so log and move on — never let this fire-and-forget
         // task become an unhandled rejection that takes the process down.
         console.warn(
           `[RabbitMqJobBus] in-flight ${type} handling aborted (channel closing?): ${
