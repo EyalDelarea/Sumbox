@@ -9,6 +9,10 @@ import type pg from "pg";
 // @Aida's trigger matcher: a pure module, no path into src/ask (see capture.ts).
 import { matchAskTrigger } from "../collector/ask-trigger.js";
 import {
+  ROSEY_COMMAND_KEY,
+  upsertCommandPermission,
+} from "../db/repositories/group-command-permissions.js";
+import {
   insertTask,
   liveTasksRaisedBetween,
   messagesWithTagEvents,
@@ -16,6 +20,7 @@ import {
   recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
+  startCursorIfAbsent,
 } from "../db/repositories/rosey-tasks.js";
 import { getLastRun, recordRun } from "../db/repositories/scheduler-state.js";
 import { OllamaSummarizer } from "../summarization/summarizer.js";
@@ -53,6 +58,21 @@ export const DEDUP_CANDIDATE_CAP = 500;
 /** The scheduler_state key holding a group's aggregation cursor (ingest time). */
 export function cursorKey(groupId: number): string {
   return `rosey-aggregate:${groupId}`;
+}
+
+/**
+ * Turn Rosey on or off for a group (her own 'rosey' allowlist key). The FIRST
+ * enable starts the group's cursor at now, so messages from before she
+ * listened are never replayed as commands by the catch-up. A later re-enable
+ * leaves the cursor where it is.
+ */
+export async function setRoseyEnabled(
+  pool: pg.Pool,
+  groupId: number,
+  enabled: boolean,
+): Promise<void> {
+  await upsertCommandPermission(pool, { groupId, command: ROSEY_COMMAND_KEY, enabled });
+  if (enabled) await startCursorIfAbsent(pool, cursorKey(groupId));
 }
 
 /**
@@ -109,8 +129,12 @@ export type RunAggregationResult = {
    *  - only messages past the cursor are candidates, even from scratch: each
    *    command gets one attempt per successful pass (a failed pass holds the
    *    cursor back, so it is retried), and an old no-op "done" is never tried
-   *    again against tasks that exist only now. A group's FIRST run has no
-   *    cursor, so every command in its window is a candidate;
+   *    again against tasks that exist only now;
+   *  - with no cursor at all, nothing is a candidate: a group's cursor starts
+   *    when Rosey is first enabled for it (setRoseyEnabled), so history from
+   *    before she listened is never replayed as commands. A group that somehow
+   *    has none (enabled by hand in the DB) gets suggestions only on its first
+   *    pass, which then starts its cursor;
    *  - a message that wakes @Aida is hers, never a command (see capture.ts).
    */
   tagged: TagCatchUp;
@@ -171,7 +195,7 @@ export async function runAggregation(
   // dropping it here would lose it. Re-trying it is safe: an applied command is
   // cited by a tag event, and a live-decided one is named by skipCommand.
   const candidates = messages.filter(
-    (m) => !m.isVoice && (cursor === null || m.ingestedAt >= cursor) && !matchAskTrigger(m.content),
+    (m) => !m.isVoice && cursor !== null && m.ingestedAt >= cursor && !matchAskTrigger(m.content),
   );
   const applied = await messagesWithTagEvents(
     pool,

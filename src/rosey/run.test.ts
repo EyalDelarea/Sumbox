@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { listTasks } from "../db/repositories/rosey-tasks.js";
-import { getLastRun } from "../db/repositories/scheduler-state.js";
+import { getLastRun, recordRun } from "../db/repositories/scheduler-state.js";
 import { createTestDatabase } from "../test/db.js";
 import { loadRoseyConfig } from "./config.js";
 import { DEDUP_SYSTEM } from "./dedup.js";
-import { cursorKey, runAggregation } from "./run.js";
+import { cursorKey, runAggregation, setRoseyEnabled } from "./run.js";
 
 let pool: pg.Pool;
 beforeAll(async () => {
@@ -18,12 +18,18 @@ afterAll(async () => {
 
 const cfg = loadRoseyConfig({});
 
-async function group(): Promise<number> {
+/** Before any test message: Rosey has listened since long ago (a cursor at epoch). */
+const ENABLED_LONG_AGO = new Date(0);
+
+async function group(opts: { cursor?: Date | null } = {}): Promise<number> {
   const { rows } = await pool.query<{ id: string }>(
     `INSERT INTO groups (name, source) VALUES ($1, 'live') RETURNING id`,
     [`rosey-run-${randomUUID()}`],
   );
-  return Number(rows[0]!.id);
+  const id = Number(rows[0]!.id);
+  const cursor = opts.cursor === undefined ? ENABLED_LONG_AGO : opts.cursor;
+  if (cursor) await recordRun(pool, cursorKey(id), cursor);
+  return id;
 }
 
 /** `lateMs`: how long after sending it was ingested (a reconnect replay is late). */
@@ -182,7 +188,39 @@ describe("runAggregation", () => {
       holdCursor: () => true,
     });
     expect(run.cursorAdvanced).toBe(false);
-    expect(await getLastRun(pool, cursorKey(g))).toBeNull();
+    expect(await getLastRun(pool, cursorKey(g))).toEqual(ENABLED_LONG_AGO);
+  });
+
+  it("a group with no cursor replays no command on its first pass, and suggests", async () => {
+    const g = await group({ cursor: null });
+    await message(g, "@Rosey לתקן מזגן", 10 * 60_000);
+    await message(g, "צריך להחליף נורה");
+    const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    expect(run.tagged).toMatchObject({ commands: 0 });
+    expect(run.report.created).toBe(1);
+    expect((await listTasks(pool, g)).map((t) => t.origin)).toEqual(["suggested"]);
+    expect(run.cursorAdvanced).toBe(true);
+  });
+
+  it("first enabling Rosey starts the cursor: older commands are never replayed, newer ones are", async () => {
+    const g = await group({ cursor: null });
+    await message(g, "@Rosey לתקן מזגן", 10 * 60_000); // before she listened
+    await tick();
+    await setRoseyEnabled(pool, g, true);
+    const start = await getLastRun(pool, cursorKey(g));
+    expect(start).not.toBeNull();
+    await tick();
+    await message(g, "@Rosey לקנות מסנן", 10 * 60_000); // a late replay after enabling
+    const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    expect(run.tagged).toMatchObject({ commands: 1, created: 1 });
+    expect((await listTasks(pool, g)).map((t) => t.title)).toEqual(["לקנות מסנן"]);
+
+    // Disable and re-enable: the cursor is not restarted.
+    const before = await getLastRun(pool, cursorKey(g));
+    await setRoseyEnabled(pool, g, false);
+    await tick();
+    await setRoseyEnabled(pool, g, true);
+    expect(await getLastRun(pool, cursorKey(g))).toEqual(before);
   });
 
   it("never replays a message addressed to @Aida as a command", async () => {
@@ -202,7 +240,7 @@ describe("runAggregation", () => {
       days: 30,
     });
     expect(failed.cursorAdvanced).toBe(false);
-    expect(await getLastRun(pool, cursorKey(g))).toBeNull();
+    expect(await getLastRun(pool, cursorKey(g))).toEqual(ENABLED_LONG_AGO);
 
     const retry = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
     expect(retry.report).toMatchObject({ messagesRead: 1, created: 1 });

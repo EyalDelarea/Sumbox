@@ -136,10 +136,8 @@ export function registerRoseyCommands(program: Command): void {
         try {
           const groupId = positiveInt(o.group, "--group");
           await withPool(async (pool) => {
-            const { ROSEY_COMMAND_KEY, upsertCommandPermission } = await import(
-              "../db/repositories/group-command-permissions.js"
-            );
-            await upsertCommandPermission(pool, { groupId, command: ROSEY_COMMAND_KEY, enabled });
+            const { setRoseyEnabled } = await import("./run.js");
+            await setRoseyEnabled(pool, groupId, enabled);
             process.stdout.write(
               `rosey ${enabled ? "enabled" : "disabled"} for group ${groupId}\n`,
             );

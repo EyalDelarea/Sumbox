@@ -9,15 +9,12 @@ import type { WAMessage } from "@whiskeysockets/baileys";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { recordAidaMessage } from "../db/repositories/aida-messages.js";
-import {
-  ROSEY_COMMAND_KEY,
-  upsertCommandPermission,
-} from "../db/repositories/group-command-permissions.js";
 import { listTasks } from "../db/repositories/rosey-tasks.js";
 import { createTestDatabase } from "../test/db.js";
 import { loadRoseyConfig } from "./config.js";
 import { DEDUP_SYSTEM } from "./dedup.js";
 import { makeRoseyLive, roseyLiveFromEnv } from "./live.js";
+import { setRoseyEnabled } from "./run.js";
 
 let pool: pg.Pool;
 beforeAll(async () => {
@@ -36,8 +33,7 @@ async function group(enabled: boolean): Promise<{ id: number; jid: string }> {
     [`rosey-live-${randomUUID()}`, jid],
   );
   const id = Number(rows[0]!.id);
-  if (enabled)
-    await upsertCommandPermission(pool, { groupId: id, command: ROSEY_COMMAND_KEY, enabled });
+  if (enabled) await setRoseyEnabled(pool, id, true); // as `rosey enable` does
   return { id, jid };
 }
 
@@ -364,8 +360,8 @@ describe("makeRoseyLive", () => {
             await new Promise((r) => setTimeout(r, 100)); // outlives the command loop
             throw new Error("db blip");
           }
-          // The command's own task insert (its row lock), not the pass's suggestions.
-          if (failInsert && sql.includes("FOR NO KEY UPDATE") && params?.[0] === cmdRow) {
+          // The command's own task insert, not the pass's suggestions.
+          if (failInsert && sql.includes("INSERT INTO rosey_tasks") && params?.includes(cmdRow)) {
             failInsert = false;
             throw new Error("db blip");
           }
