@@ -99,8 +99,8 @@ export function applyOutboundGuard<T>(
           return original(...args);
         }
         throw new Error(
-          `Outbound WhatsApp send blocked: "${method}" is disabled (read-only mode). ` +
-            `Set WHATSAPP_ALLOW_SEND=true to explicitly enable sending.`,
+          `Outbound WhatsApp send blocked: "${method}" targets a chat that is not enabled ` +
+            `in the commands tab. Only enabled groups receive /סיכום and @Aida replies.`,
         );
       };
     }
