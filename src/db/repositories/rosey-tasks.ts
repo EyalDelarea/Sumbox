@@ -447,6 +447,58 @@ export async function isRoseyPost(db: Db, groupId: number, externalId: string): 
   return (rowCount ?? 0) > 0;
 }
 
+/** A post type Rosey sends (rosey_messages.kind). Only replies are sent today. */
+export type RoseyPostKind = "reply";
+
+/**
+ * Record one message Rosey sent, from the id her send returned. Idempotent on
+ * (group_id, external_id). This row is both her own-echo guard and what her
+ * rate limits count, so it is written for every real send.
+ */
+export async function recordRoseyMessage(
+  db: Db,
+  input: { groupId: number; externalId: string; kind: RoseyPostKind; sentAt?: Date },
+): Promise<void> {
+  await db.query(
+    `INSERT INTO rosey_messages (group_id, external_id, kind, sent_at)
+     VALUES ($1, $2, $3, COALESCE($4, now()))
+     ON CONFLICT (group_id, external_id) DO NOTHING`,
+    [input.groupId, input.externalId, input.kind, input.sentAt ?? null],
+  );
+}
+
+/** How many posts of `kind` Rosey sent to a group at or after `since` (her rate limits). */
+export async function countRoseyMessagesSince(
+  db: Db,
+  groupId: number,
+  kind: RoseyPostKind,
+  since: Date,
+): Promise<number> {
+  const { rows } = await db.query<{ n: string }>(
+    `SELECT count(*) AS n FROM rosey_messages
+      WHERE group_id = $1 AND kind = $2 AND sent_at >= $3`,
+    [groupId, kind, since],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+/**
+ * A group's done items (both kinds) whose latest applied "done" event is at or
+ * after `since`, oldest raised first. Read from the event log, not updated_at:
+ * a kind edit also bumps updated_at, and must not make an old item look new.
+ */
+export async function tasksDoneSince(db: Db, groupId: number, since: Date): Promise<RoseyTask[]> {
+  const { rows } = await db.query<TaskRow>(
+    `SELECT ${TASK_COLUMNS} FROM rosey_tasks t
+      WHERE t.group_id = $1 AND t.status = 'done'
+        AND (SELECT max(e.created_at) FROM rosey_task_events e
+              WHERE e.task_id = t.id AND e.applied AND e.status = 'done') >= $2
+      ORDER BY t.raised_at, t.id`,
+    [groupId, since],
+  );
+  return rows.map(mapTask);
+}
+
 /** Of these messages, the ones some explicit command has already written an event for. */
 export async function messagesWithTagEvents(
   db: Db,

@@ -3,13 +3,17 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase } from "../../test/db.js";
 import {
+  countRoseyMessagesSince,
   insertTask,
+  isRoseyPost,
   listTasks,
   liveTasksRaisedBetween,
+  recordRoseyMessage,
   recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
   setTaskKind,
+  tasksDoneSince,
 } from "./rosey-tasks.js";
 
 let pool: pg.Pool;
@@ -431,5 +435,57 @@ describe("selectSourceMessages", () => {
     );
     const rows = await selectSourceMessages(pool, g, { sentSince: since, changedSince: cursor });
     expect(rows.map((r) => r.messageId).sort()).toEqual([lateSync, voice].sort());
+  });
+});
+
+describe("Rosey's sent-message ledger", () => {
+  it("records a reply once, marks it as her own post, and counts replies in a window", async () => {
+    const g = await group();
+    const other = await group();
+    const t0 = new Date("2026-11-22T10:00:00Z");
+    await recordRoseyMessage(pool, { groupId: g, externalId: "R1", kind: "reply", sentAt: t0 });
+    await recordRoseyMessage(pool, { groupId: g, externalId: "R1", kind: "reply", sentAt: t0 });
+    await recordRoseyMessage(pool, {
+      groupId: g,
+      externalId: "R2",
+      kind: "reply",
+      sentAt: new Date("2026-11-22T08:00:00Z"),
+    });
+    await recordRoseyMessage(pool, { groupId: other, externalId: "R3", kind: "reply", sentAt: t0 });
+    expect(await isRoseyPost(pool, g, "R1")).toBe(true);
+    expect(await countRoseyMessagesSince(pool, g, "reply", new Date("2026-11-22T09:00:00Z"))).toBe(
+      1,
+    );
+    expect(await countRoseyMessagesSince(pool, g, "reply", new Date("2026-11-22T00:00:00Z"))).toBe(
+      2,
+    );
+  });
+});
+
+describe("tasksDoneSince", () => {
+  it("returns the items whose applied done event falls in the window, of both kinds", async () => {
+    const g = await group();
+    const m = await message(g);
+    const recent = (await task(g, m, { title: "ברז", titleKey: "ברז", sourceItemIndex: 0 }))!;
+    const grocery = (await task(g, m, {
+      title: "חלב",
+      titleKey: "חלב",
+      kind: "grocery",
+      sourceItemIndex: 1,
+    }))!;
+    const old = (await task(g, m, { title: "ישן", titleKey: "ישן", sourceItemIndex: 2 }))!;
+    const reopened = (await task(g, m, { title: "שוב", titleKey: "שוב", sourceItemIndex: 3 }))!;
+    for (const id of [recent, grocery, old, reopened]) {
+      await recordStatusEvent(pool, { taskId: id, status: "done", source: "manual" });
+    }
+    await pool.query(
+      `UPDATE rosey_task_events SET created_at = now() - interval '30 days' WHERE task_id = $1`,
+      [old],
+    );
+    await recordStatusEvent(pool, { taskId: reopened, status: "open", source: "manual" });
+    const since = new Date(Date.now() - 7 * 86_400_000);
+    expect((await tasksDoneSince(pool, g, since)).map((t) => t.id).sort()).toEqual(
+      [recent, grocery].sort(),
+    );
   });
 });
