@@ -9,6 +9,7 @@ import type pg from "pg";
 // @Aida's trigger matcher: a pure module, no path into src/ask (see capture.ts).
 import { matchAskTrigger } from "../collector/ask-trigger.js";
 import {
+  listCommandPermissions,
   ROSEY_COMMAND_KEY,
   upsertCommandPermission,
 } from "../db/repositories/group-command-permissions.js";
@@ -21,7 +22,7 @@ import {
   resolveRaisedBy,
   selectSourceMessages,
 } from "../db/repositories/rosey-tasks.js";
-import { getLastRun, recordRun, startSlotIfAbsent } from "../db/repositories/scheduler-state.js";
+import { getLastRun, recordRun } from "../db/repositories/scheduler-state.js";
 import { OllamaSummarizer } from "../summarization/summarizer.js";
 import { type AggregateReport, aggregateMessages } from "./aggregate.js";
 import { applyCommand, type CommandStore } from "./commands.js";
@@ -60,10 +61,11 @@ export function cursorKey(groupId: number): string {
 }
 
 /**
- * Turn Rosey on or off for a group (her own 'rosey' allowlist key). The FIRST
- * enable starts the group's cursor at now, so messages from before she
- * listened are never replayed as commands by the catch-up. A later re-enable
- * leaves the cursor where it is.
+ * Turn Rosey on or off for a group (her own 'rosey' allowlist key). Turning her
+ * ON — the first time, or again after a disable — moves the group's cursor to
+ * now, so nothing sent before she was listening (history, or commands typed
+ * while she was off) is ever replayed as a command by the catch-up. Enabling a
+ * group that is already on leaves its cursor alone.
  *
  * The same cursor bounds what a pass reads, so passes after enabling suggest
  * only from new messages. To suggest from the history too, run
@@ -75,8 +77,12 @@ export async function setRoseyEnabled(
   groupId: number,
   enabled: boolean,
 ): Promise<void> {
+  const wasOn = (await listCommandPermissions(pool, ROSEY_COMMAND_KEY)).some(
+    // Number(): group_id is a bigint, which pg returns as a string despite the type.
+    (p) => Number(p.groupId) === groupId && p.enabled,
+  );
   await upsertCommandPermission(pool, { groupId, command: ROSEY_COMMAND_KEY, enabled });
-  if (enabled) await startSlotIfAbsent(pool, cursorKey(groupId));
+  if (enabled && !wasOn) await recordRun(pool, cursorKey(groupId), await databaseNow(pool));
 }
 
 /**
@@ -135,7 +141,7 @@ export type RunAggregationResult = {
    *    cursor back, so it is retried), and an old no-op "done" is never tried
    *    again against tasks that exist only now;
    *  - with no cursor at all, nothing is a candidate: a group's cursor starts
-   *    when Rosey is first enabled for it (setRoseyEnabled), so history from
+   *    when Rosey is turned on for it (setRoseyEnabled), so history from
    *    before she listened is never replayed as commands. A group that somehow
    *    has none (enabled by hand in the DB) gets suggestions only on its first
    *    pass, which then starts its cursor;

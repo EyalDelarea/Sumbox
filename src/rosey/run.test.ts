@@ -215,12 +215,26 @@ describe("runAggregation", () => {
     expect(run.tagged).toMatchObject({ commands: 1, created: 1 });
     expect((await listTasks(pool, g)).map((t) => t.title)).toEqual(["לקנות מסנן"]);
 
-    // Disable and re-enable: the cursor is not restarted.
+    // Enabling a group that is already enabled leaves its cursor alone.
     const before = await getLastRun(pool, cursorKey(g));
-    await setRoseyEnabled(pool, g, false);
     await tick();
     await setRoseyEnabled(pool, g, true);
     expect(await getLastRun(pool, cursorKey(g))).toEqual(before);
+  });
+
+  it("re-enabling after a disable restarts the cursor: commands sent while off are never replayed", async () => {
+    const g = await group({ cursor: null });
+    await setRoseyEnabled(pool, g, true);
+    await tick();
+    await setRoseyEnabled(pool, g, false);
+    await message(g, "@Rosey לתקן מזגן", 10 * 60_000); // sent while she was off
+    await tick();
+    await setRoseyEnabled(pool, g, true);
+    await tick();
+    await message(g, "@Rosey לקנות מסנן", 10 * 60_000); // a late replay after re-enabling
+    const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
+    expect(run.tagged).toMatchObject({ commands: 1, created: 1 });
+    expect((await listTasks(pool, g)).map((t) => t.title)).toEqual(["לקנות מסנן"]);
   });
 
   it("a backfill after enabling reads the history for suggestions, never its commands", async () => {
