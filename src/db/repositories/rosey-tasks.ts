@@ -242,6 +242,8 @@ export async function listTasks(
 export type RoseySourceMessage = {
   messageId: number;
   sentAt: Date;
+  /** When the collector stored it (messages.created_at). */
+  ingestedAt: Date;
   sender: string | null;
   content: string;
   isVoice: boolean;
@@ -268,11 +270,12 @@ export async function selectSourceMessages(
   const { rows } = await db.query<{
     id: string;
     sent_at: Date;
+    created_at: Date;
     sender: string | null;
     content: string;
     is_voice: boolean;
   }>(
-    `SELECT m.id, m.sent_at, p.display_name AS sender,
+    `SELECT m.id, m.sent_at, m.created_at, p.display_name AS sender,
             COALESCE(NULLIF(btrim(m.text_content), ''), btrim(t.transcript)) AS content,
             (t.id IS NOT NULL AND NULLIF(btrim(m.text_content), '') IS NULL) AS is_voice
        FROM messages m
@@ -293,6 +296,7 @@ export async function selectSourceMessages(
   return rows.map((r) => ({
     messageId: Number(r.id),
     sentAt: r.sent_at,
+    ingestedAt: r.created_at,
     sender: r.sender,
     content: r.content,
     isVoice: r.is_voice,
@@ -383,4 +387,18 @@ export async function isRoseyPost(db: Db, groupId: number, externalId: string): 
     [groupId, externalId],
   );
   return (rowCount ?? 0) > 0;
+}
+
+/** Of these messages, the ones some explicit command has already written an event for. */
+export async function messagesWithTagEvents(
+  db: Db,
+  messageIds: readonly number[],
+): Promise<Set<number>> {
+  if (messageIds.length === 0) return new Set();
+  const { rows } = await db.query<{ source_message_id: string }>(
+    `SELECT DISTINCT source_message_id FROM rosey_task_events
+      WHERE source = 'tag' AND source_message_id = ANY($1::bigint[])`,
+    [messageIds],
+  );
+  return new Set(rows.map((r) => Number(r.source_message_id)));
 }

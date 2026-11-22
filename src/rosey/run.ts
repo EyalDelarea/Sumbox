@@ -9,6 +9,7 @@ import type pg from "pg";
 import {
   insertTask,
   liveTasksRaisedBetween,
+  messagesWithTagEvents,
   recordStatusEvent,
   resolveRaisedBy,
   selectSourceMessages,
@@ -60,7 +61,7 @@ export function commandStore(pool: pg.Pool, groupId: number): CommandStore {
   return {
     // A generous cap: a "done" looks across every live task of the group.
     liveTasksRaisedBetween: (since, until) =>
-      liveTasksRaisedBetween(pool, groupId, since, until, 500),
+      liveTasksRaisedBetween(pool, groupId, since, until, DEDUP_CANDIDATE_CAP),
     insertTagged: async (input) => {
       const raisedBy = await resolveRaisedBy(pool, groupId, [input.sourceMessageId]);
       return insertTask(pool, {
@@ -74,23 +75,32 @@ export function commandStore(pool: pg.Pool, groupId: number): CommandStore {
   };
 }
 
+/** Mirrors capture.ts: a message older than this on arrival was never applied live. */
+const LIVE_HORIZON_MS = 120_000;
+
 export type TagCatchUp = {
-  /** Tagged text messages read in this run. */
+  /** Late commands applied in this run. */
   commands: number;
   created: number;
   confirmed: number;
   done: number;
+  /** A "done" that named no live task, or more than one: nothing changed. */
+  noMatch: number;
+  ambiguous: number;
+  /** Commands that threw; the cursor stays put so they are retried. */
+  failures: number;
 };
 
 export type RunAggregationResult = {
   report: AggregateReport;
   /**
-   * Explicit commands found in the read window. The live path applies a command
-   * within seconds, but only for a message that arrives live; one sent while the
-   * collector was down (or before Rosey was enabled) is applied here instead.
-   * Applying twice is harmless: an item's insert is idempotent per (message,
-   * index), a confirmed suggestion is already open, and a done task is no longer
-   * live to match.
+   * Late explicit commands. The live path applies a command only when it arrives
+   * within 120 s of being sent; one delivered later (a reconnect replay after the
+   * collector was down) is applied here instead, exactly once:
+   *  - a message stored within the horizon of its send time was the live path's
+   *    to apply, and is never replayed — replaying it without its quote, or after
+   *    its task closed, could close or recreate the wrong task;
+   *  - a late message already cited by a tag event was applied by an earlier pass.
    */
   tagged: TagCatchUp;
   /** False when any batch failed: those messages are read again next run. */
@@ -108,6 +118,7 @@ export async function runAggregation(
     /** Ignore the cursor and re-read the whole window. */
     fromScratch?: boolean;
     onBatchError?: (err: unknown, batch: { index: number; size: number }) => void;
+    onCommandError?: (err: unknown, messageId: number) => void;
     now?: () => Date;
   },
 ): Promise<RunAggregationResult> {
@@ -125,24 +136,46 @@ export async function runAggregation(
   });
 
   const tags = makeTagMatcher(opts.cfg.tags);
-  const tagged: TagCatchUp = { commands: 0, created: 0, confirmed: 0, done: 0 };
+  const tagged: TagCatchUp = {
+    commands: 0,
+    created: 0,
+    confirmed: 0,
+    done: 0,
+    noMatch: 0,
+    ambiguous: 0,
+    failures: 0,
+  };
+  const late = messages.filter(
+    (m) => !m.isVoice && m.ingestedAt.getTime() - m.sentAt.getTime() > LIVE_HORIZON_MS,
+  );
+  const applied = await messagesWithTagEvents(
+    pool,
+    late.map((m) => m.messageId),
+  );
   const store = commandStore(pool, groupId);
   // Commands first: an explicit tag wins (D3), so suggestions dedup against it.
-  for (const m of messages) {
-    if (m.isVoice) continue; // a spoken word is not a typed command
+  for (const m of late) {
+    if (applied.has(m.messageId)) continue;
     const cmd = tags.parse(m.content.trim());
     if (!cmd) continue;
     tagged.commands++;
-    const out = await applyCommand(
-      cmd,
-      { groupId, messageId: m.messageId, sentAt: m.sentAt, quotedMessageId: null },
-      store,
-    );
-    if (out.kind === "added") {
-      tagged.created += out.created;
-      tagged.confirmed += out.confirmed;
-    } else if (out.kind === "done") {
-      tagged.done++;
+    try {
+      // No quote here (the quoted id is not stored), so a late quote-only "done"
+      // has no scope and applies nothing; it is counted as noMatch.
+      const out = await applyCommand(
+        cmd,
+        { groupId, messageId: m.messageId, sentAt: m.sentAt, quotedMessageId: null },
+        store,
+      );
+      if (out.kind === "added") {
+        tagged.created += out.created;
+        tagged.confirmed += out.confirmed;
+      } else if (out.kind === "done") tagged.done++;
+      else if (out.kind === "done_no_match") tagged.noMatch++;
+      else tagged.ambiguous++;
+    } catch (err) {
+      tagged.failures++;
+      opts.onCommandError?.(err, m.messageId);
     }
   }
 
@@ -156,7 +189,7 @@ export async function runAggregation(
     onBatchError: opts.onBatchError,
   });
 
-  const cursorAdvanced = report.batchFailures === 0;
+  const cursorAdvanced = report.batchFailures === 0 && tagged.failures === 0;
   if (cursorAdvanced) await recordRun(pool, cursorKey(groupId), startedAt);
   return { report, tagged, cursorAdvanced };
 }

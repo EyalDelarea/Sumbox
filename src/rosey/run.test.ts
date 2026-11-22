@@ -26,11 +26,13 @@ async function group(): Promise<number> {
   return Number(rows[0]!.id);
 }
 
-async function message(groupId: number, text: string): Promise<number> {
+/** `lateMs`: how long after sending it was ingested (a reconnect replay is late). */
+async function message(groupId: number, text: string, lateMs = 0): Promise<number> {
   const { rows } = await pool.query<{ id: string }>(
     `INSERT INTO messages (group_id, source, message_type, text_content, sent_at, dedupe_key)
-     VALUES ($1, 'live', 'text', $2, now(), $3) RETURNING id`,
-    [groupId, text, `dk-${randomUUID()}`],
+     VALUES ($1, 'live', 'text', $2, now() - make_interval(secs => $4::float / 1000), $3)
+     RETURNING id`,
+    [groupId, text, `dk-${randomUUID()}`, lateMs],
   );
   return Number(rows[0]!.id);
 }
@@ -67,11 +69,12 @@ describe("runAggregation", () => {
 
     const m1 = model();
     const first = await runAggregation(pool, g, { cfg, generate: m1.generate, days: 30 });
-    // The tagged message is not shown to the model; it is applied as a command.
+    // The tagged message is never shown to the model. It arrived live, so it was
+    // the live path's to apply; the pass does not replay it.
     expect(first).toMatchObject({
       cursorAdvanced: true,
       report: { created: 1, taggedSkipped: 1 },
-      tagged: { commands: 1, created: 1 },
+      tagged: { commands: 0 },
     });
     expect(m1.seen.join("\n")).not.toContain("לקנות לחם");
     expect(await getLastRun(pool, cursorKey(g))).not.toBeNull();
@@ -82,22 +85,26 @@ describe("runAggregation", () => {
     expect(second.report.messagesRead).toBe(1);
     expect(m2.seen.join("\n")).not.toContain("להחליף נורה");
 
-    const tasks = (await listTasks(pool, g)).map((t) => [t.title, t.origin]).sort();
-    expect(tasks).toEqual(
-      [
-        ["להתקשר לאינסטלטור", "suggested"],
-        ["להחליף נורה", "suggested"],
-        ["לקנות לחם", "tag"],
-      ].sort(),
-    );
+    const titles = (await listTasks(pool, g)).map((t) => t.title).sort();
+    expect(titles).toEqual(["להתקשר לאינסטלטור", "להחליף נורה"].sort());
   });
 
-  it("catches up on commands the live path missed, and applying one twice is harmless", async () => {
+  it("catches up on late commands the live path never saw, exactly once", async () => {
     const g = await group();
-    await message(g, "@Rosey לתקן מזגן\nלקנות מסנן");
-    await message(g, "@Rosey בוצע מזגן");
+    const TEN_MIN = 10 * 60_000;
+    await message(g, "@Rosey לתקן מזגן\nלקנות מסנן", TEN_MIN);
+    await message(g, "@Rosey בוצע מזגן", TEN_MIN);
+    await message(g, "@Rosey בוצע", TEN_MIN); // a quote-only done, its quote lost
     const run = await runAggregation(pool, g, { cfg, generate: model().generate, days: 30 });
-    expect(run.tagged).toEqual({ commands: 2, created: 2, confirmed: 0, done: 1 });
+    expect(run.tagged).toEqual({
+      commands: 3,
+      created: 2,
+      confirmed: 0,
+      done: 1,
+      noMatch: 1,
+      ambiguous: 0,
+      failures: 0,
+    });
 
     const again = await runAggregation(pool, g, {
       cfg,
@@ -105,7 +112,9 @@ describe("runAggregation", () => {
       days: 30,
       fromScratch: true,
     });
-    expect(again.tagged).toEqual({ commands: 2, created: 0, confirmed: 0, done: 0 });
+    // Cited by tag events already: not applied again. (The no-op "done" wrote no
+    // event, so it is re-read — and changes nothing again.)
+    expect(again.tagged).toMatchObject({ commands: 1, created: 0, done: 0, noMatch: 1 });
     const tasks = (await listTasks(pool, g, { includeClosed: true }))
       .map((t) => [t.title, t.status])
       .sort();

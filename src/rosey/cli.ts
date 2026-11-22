@@ -105,6 +105,10 @@ export function registerRoseyCommands(program: Command): void {
               process.stderr.write(
                 `  batch ${b.index} (${b.size} messages) failed: ${(err as Error).message}\n`,
               ),
+            onCommandError: (err, messageId) =>
+              process.stderr.write(
+                `  command in message ${messageId} failed: ${(err as Error).message}\n`,
+              ),
           });
           process.stdout.write(
             `${JSON.stringify({ groupId, days, model: cfg.model, seconds: Math.round((Date.now() - t0) / 1000), cursorAdvanced, ...report, tagged }, null, 2)}\n`,
