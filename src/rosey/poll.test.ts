@@ -248,6 +248,20 @@ describe("applyPollVote", () => {
     expect(out.kind).toBe("applied");
   });
 
+  it("a vote whose status write fails is forgotten, so the same vote again retries it", async () => {
+    const { store, marks } = voteStore([10]);
+    const flaky: PollVoteStore = {
+      ...store,
+      markStatus: async () => {
+        throw new Error("db down");
+      },
+    };
+    const votes = new PollVotes();
+    await expect(applyPollVote(flaky, votes, vote("dana", [0]))).rejects.toThrow("db down");
+    await applyPollVote(store, votes, vote("dana", [0]));
+    expect(marks).toEqual(["10:done"]);
+  });
+
   it("a poll that is not hers changes nothing", async () => {
     const { store, marks } = voteStore(null);
     expect(await applyPollVote(store, new PollVotes(), vote("dana", [0]))).toEqual({

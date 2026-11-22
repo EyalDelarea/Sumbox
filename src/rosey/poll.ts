@@ -299,18 +299,25 @@ export async function applyPollVote(
   const selected = new Set(vote.selected.filter((i) => i >= 0 && i < taskIds.length));
   const before = votes.set(vote.pollId, vote.voter, selected);
   const effects: PollVoteEffect[] = [];
-  for (let option = 0; option < taskIds.length; option++) {
-    const taskId = taskIds[option];
-    if (taskId === null || taskId === undefined) continue; // its task was deleted
-    const ticked = selected.has(option) && !before.has(option);
-    const unticked = !selected.has(option) && before.has(option);
-    if (!ticked && !unticked) continue;
-    // Done on its FIRST tick and reopened when its LAST one goes: a second
-    // voter adds no event.
-    const voters = votes.votersOf(vote.pollId, option).length;
-    if ((ticked && voters > 1) || (unticked && voters > 0)) continue;
-    const status = ticked ? "done" : "open";
-    effects.push({ option, taskId, status, result: await store.markStatus({ taskId, status }) });
+  try {
+    for (let option = 0; option < taskIds.length; option++) {
+      const taskId = taskIds[option];
+      if (taskId === null || taskId === undefined) continue; // its task was deleted
+      const ticked = selected.has(option) && !before.has(option);
+      const unticked = !selected.has(option) && before.has(option);
+      if (!ticked && !unticked) continue;
+      // Done on its FIRST tick and reopened when its LAST one goes: a second
+      // voter adds no event.
+      const voters = votes.votersOf(vote.pollId, option).length;
+      if ((ticked && voters > 1) || (unticked && voters > 0)) continue;
+      const status = ticked ? "done" : "open";
+      effects.push({ option, taskId, status, result: await store.markStatus({ taskId, status }) });
+    }
+  } catch (err) {
+    // Forget this vote, so the same vote arriving again is a change again and
+    // retries what failed (rather than looking already applied).
+    votes.set(vote.pollId, vote.voter, before);
+    throw err;
   }
   return { kind: "applied", effects };
 }
