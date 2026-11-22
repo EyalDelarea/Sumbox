@@ -111,18 +111,20 @@ describe("mergeGroups", () => {
       source: string,
       title = "t",
       slot = 0,
+      kind = "task",
     ) => {
       const origin = status === "suggested" ? "suggested" : "tag";
       const { rows } = await pool.query<{ id: string }>(
         `INSERT INTO rosey_tasks (group_id, title, title_key, origin, status, status_source,
-                                  source_message_id, source_item_index, raised_at)
-         VALUES ($1, $6, $6, $5, $3, $4, $2, $7, now()) RETURNING id`,
-        [groupId, msg, status, source, origin, title, slot],
+                                  source_message_id, source_item_index, raised_at, kind)
+         VALUES ($1, $6, $6, $5, $3, $4, $2, $7, now(), $8) RETURNING id`,
+        [groupId, msg, status, source, origin, title, slot, kind],
       );
       return Number(rows[0]!.id);
     };
     // A task closed by hand on a colliding dup message, with no survivor twin.
-    const closedByHand = await task(dupId, dupA, "done", "manual");
+    // A grocery item: its kind rides along with the row it is.
+    const closedByHand = await task(dupId, dupA, "done", "manual", "t", 0, "grocery");
     await pool.query(
       `INSERT INTO rosey_task_events (task_id, status, source, applied, source_message_id)
        VALUES ($1, 'done', 'tag', true, $2)`,
@@ -143,13 +145,23 @@ describe("mergeGroups", () => {
     const survOther = await task(survivorId, survB, "open", "tag", "v", 1);
     const sameSlot = await task(dupId, dupB, "done", "manual", "u", 1);
     // A task on a message that simply moves.
-    const moving = await task(dupId, dupC, "open", "tag");
+    const moving = await task(dupId, dupC, "open", "tag", "t", 0, "grocery");
     await pool.query(
       `INSERT INTO rosey_messages (group_id, external_id, kind, task_id) VALUES ($1, 'R-SENT-1', 'reply', $2)`,
       [dupId, moving],
     );
 
     await mergeGroups(pool, { survivorId, dupId, name: "Rosey Merge Survivor" });
+
+    const { rows: kinds } = await pool.query(
+      `SELECT id::int, kind FROM rosey_tasks WHERE id = ANY($1::bigint[]) ORDER BY id`,
+      [[closedByHand, survTwin, moving]],
+    );
+    expect(kinds).toEqual([
+      { id: closedByHand, kind: "grocery" },
+      { id: survTwin, kind: "task" },
+      { id: moving, kind: "grocery" },
+    ]);
 
     const { rows: tasks } = await pool.query(
       `SELECT id::int, group_id::int, source_message_id::int, status, status_source
